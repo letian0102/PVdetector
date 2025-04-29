@@ -1,5 +1,4 @@
-﻿io
-zipfile
+﻿zipfile
 base64
 shutil
 tempfile

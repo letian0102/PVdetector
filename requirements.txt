@@ -1,9 +1,4 @@
-﻿zipfile
-base64
-shutil
-tempfile
-re
-os
+﻿tempfile
 textwrap
 pathlib
 typing

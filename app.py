@@ -283,7 +283,7 @@ if run:
         stem   = Path(file.name).stem
         counts = read_counts(file, header_row, skip_rows)
 
-        # automatic peak-count via GPT
+        # automatic peak-count via GPT  (unchanged)
         if n_fixed is None:
             prompt = ("How many distinct density peaks (modes) does this list show? "
                       "Answer with a single integer.\n\n"
@@ -305,12 +305,40 @@ if run:
             counts, n_use, promin, bw, min_width or None, grid_sz
         )
 
-        # fallback right-tail valley if single peak
-        if n_fixed is None and len(peaks) == 1 and not valleys:
+        # ─────── NEW: ask GPT for the valley if there is *exactly one* peak ───────
+        if len(peaks) == 1 and api_key:
+            print("here.")
+            thumb = fig_to_png(plt.figure(figsize=(3, 1.5), dpi=80)); plt.close()
+            v_prompt = (
+                f"The attached thumbnail shows a single major density peak at x ≈ {peaks[0]:.3f}. "
+                "Return the x-coordinate of the valley at the right tail where the density distribution is at the end of decreasing, valley should not be somewhere far from the main distribution."
+                "Respond with one number only."
+            )
             try:
-                valleys = [float(xs[np.argmin(ys[xs > peaks[0]])])]
-            except Exception:
-                valleys = []
+                v_reply = client.chat.completions.create(
+                    model=gpt_model, seed=2025, timeout=60,
+                    messages=[
+                        {"role":"system","content":"You locate right-tail valleys."},
+                        {"role":"user",
+                         "content":[
+                             {"type":"text","text": v_prompt},
+                             {"type":"image_url",
+                              "image_url":{"url":f"data:image/png;base64,{thumb64(thumb)}"}}
+                         ]}
+                    ]
+                )
+                valley_val = float(
+                    re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?",
+                               v_reply.choices[0].message.content)[0]
+                )
+                valleys = [valley_val]
+            except Exception as e:
+                st.warning(f"GPT valley failed for {stem}: {e}")
+                if not valleys:                       # simple fallback
+                    try:
+                        valleys = [float(xs[np.argmin(ys[xs > peaks[0]])])]
+                    except Exception:
+                        valleys = []
 
         # plot
         pad = 0.05 * (xs.max() - xs.min())

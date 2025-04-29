@@ -1,7 +1,4 @@
-﻿tempfile
-textwrap
-pathlib
-typing
+﻿pathlib
 numpy
 pandas
 matplotlib

@@ -2,7 +2,6 @@
 numpy
 pandas
 matplotlib
-PIL
 scipy
 streamlit
 openai

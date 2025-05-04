@@ -125,6 +125,9 @@ with st.sidebar:
     min_w    = st.slider("Min peak width", 0, 6, 0, 1)
     grid_sz  = st.slider("Max KDE grid", 4_000, 40_000, 20_000, 1_000)
 
+    # how far the KDE must drop (as % of peak height) to call a “valley”
+    val_drop = st.slider("Valley drop (% of peak)", 1, 50, 10, 1)
+
     st.markdown("---  \n### GPT helper (Automatic peak-count)")
     model_pick = st.selectbox("Model",
                               ["o4-mini", "gpt-4o-mini",
@@ -186,47 +189,19 @@ if run:
             counts, n_use, promin, bw, min_w or None, grid_sz
         )
 
-        # ──────── NEW: ask GPT for the valley if exactly **one** peak ────────
-        if len(peaks) == 1 and api_key:
-            # tiny thumbnail to keep prompt short
-            fig_t, ax_t = plt.subplots(figsize=(3, 1.5), dpi=80)
-            ax_t.plot(xs, ys, color="black"); ax_t.axis("off")
-            thumb_png = fig_to_png(fig_t); plt.close(fig_t)
+        # ──────── If only one peak ────────
+        if len(peaks) == 1 and not valleys:            # no valley yet
+            idx_peak = np.searchsorted(xs, peaks[0])   # index of the peak
+            y_peak   = ys[idx_peak]                    # peak height
 
-            valley_prompt = (
-                f"The attached thumbnail shows a density distribution graph. "
-                "Return the x-coordinate of the valley, which is at the end of decreasing of the main distribution, valley should not be somewhere far from the main distribution."
-                "Respond with one number only."
-            )
-            try:
-                v_reply = client.chat.completions.create(
-                    model=gpt_model, seed=2025, timeout=60,
-                    messages=[
-                        {"role": "system",
-                        "content": "You detect the right-tail valley after a single peak."},
-                        {"role": "user",
-                        "content": [
-                            {"type": "text", "text": valley_prompt},
-                            {"type": "image_url",
-                            "image_url":
-                                {"url": f"data:image/png;base64,{thumb64(thumb_png)}"}}
-                        ]},
-                    ],
-                )
-                valley_val = float(
-                    re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?",
-                            v_reply.choices[0].message.content)[0]
-                )
-                valleys = [valley_val]
-            except Exception as e:
-                st.warning(f"GPT valley failed for {stem}: {e}")
-                # simple heuristic fall-back
-                if not valleys:
-                    try:
-                        valleys = [float(xs[np.argmin(ys[xs > peaks[0]])])]
-                    except Exception:
-                        valleys = []
-        # ---------------------------------------------------------------------
+            # walk right until KDE < (val_drop %) of peak height
+            tail_ys = ys[idx_peak:]
+            below   = np.where(tail_ys < (val_drop/100) * y_peak)[0]
+
+            if below.size:
+                valleys = [float(xs[idx_peak + below[0]])]
+            else:
+                valleys = []                           # let other fallbacks run
 
         # ----- plot (unchanged) --------------------------------------
         pad = 0.05 * (xs.max() - xs.min())

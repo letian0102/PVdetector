@@ -13,7 +13,6 @@ _cache: dict[str, int] = {}
 def ask_gpt_peak_count(
     client:     OpenAI,
     model_name: str,
-    sample:     list[float],
     max_peaks:  int,
     counts_full: np.ndarray | None = None,   # NEW
 ) -> int | None:
@@ -27,7 +26,7 @@ def ask_gpt_peak_count(
     prompt = (
         "How many distinct density peaks (modes) does this list show? "
         "Answer with a single integer.\n\n"
-        f"{sample}"
+        f"{counts_full}"
     )
     try:
         rsp = client.chat.completions.create(

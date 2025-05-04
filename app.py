@@ -177,7 +177,7 @@ if run:
         # 2. GPT fallback when not confident
         if n_use is None and n_fixed is None:
             n_use = ask_gpt_peak_count(
-                client, gpt_model, counts[:200].tolist(),
+                client, gpt_model,
                 max_peaks, counts_full=counts      # ← add this kw-arg
             )
 
@@ -194,8 +194,8 @@ if run:
             thumb_png = fig_to_png(fig_t); plt.close(fig_t)
 
             valley_prompt = (
-                f"The attached thumbnail shows ONE density peak at x ≈ {peaks[0]:.3f}. "
-                "Return the x-coordinate of the valley at the right tail where the density distribution is at the end of decreasing, valley should not be somewhere far from the main distribution."
+                f"The attached thumbnail shows a density distribution graph. "
+                "Return the x-coordinate of the valley, which is at the end of decreasing of the main distribution, valley should not be somewhere far from the main distribution."
                 "Respond with one number only."
             )
             try:

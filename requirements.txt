@@ -6,3 +6,4 @@ matplotlib
 scipy
 streamlit
 openai
+sklearn

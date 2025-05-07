@@ -13,9 +13,10 @@ from openai import OpenAI
 from peak_valley import (
     arcsinh_transform, read_counts,
     kde_peaks_valleys, quick_peak_estimate,
-    fig_to_png,
-    ask_gpt_peak_count, ask_gpt_prominence,
+    fig_to_png
 )
+
+from peak_valley.gpt_adapter import ask_gpt_peak_count, ask_gpt_prominence
 
 # ───────────────────────────────────────── UI set-up ─────────────────────────────────────────
 st.set_page_config("Peak & Valley Detector", "🔬", layout="wide")

@@ -16,7 +16,7 @@ def ask_gpt_peak_count(
     max_peaks:  int,
     counts_full: np.ndarray | None = None,   # NEW
 ) -> int | None:
-    """As before but with a memoisation layer."""
+    """As before but with a memoization layer."""
     if counts_full is not None:
         sig = shape_signature(counts_full)
         if sig in _cache:                    # seen → reuse

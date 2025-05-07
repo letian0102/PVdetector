@@ -1,6 +1,8 @@
+# app.py  – Streamlit entry-point
 from __future__ import annotations
-import io, zipfile, tempfile, re
+import io, zipfile, tempfile
 from pathlib import Path
+import re                                         # only for log messages
 
 import numpy as np
 import pandas as pd
@@ -11,33 +13,36 @@ from openai import OpenAI
 from peak_valley import (
     arcsinh_transform, read_counts,
     kde_peaks_valleys, quick_peak_estimate,
-    fig_to_png, ask_gpt_peak_count,
+    fig_to_png
 )
 
-# ───────────────── UI set-up ─────────────────
+from peak_valley.gpt_adapter import ask_gpt_peak_count, ask_gpt_prominence
+
+# ───────────────────────────────────────── UI set-up ─────────────────────────────────────────
 st.set_page_config("Peak & Valley Detector", "🔬", layout="wide")
 st.title("🔬 Peak & Valley Detector — CSV *or* full dataset")
 
-# persistent slots
+# persistent slots ───────────────────────────────────────────────────────────────────────────
 for key, default in {
     "results": {}, "fig_pngs": {}, "generated_csvs": [],
     "expr_df": None, "meta_df": None,
-    "expr_name": None, "meta_name": None,            # NEW
+    "expr_name": None, "meta_name": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ════════════════════ SIDEBAR ═══════════════════════
+
+# ════════════════════════  SIDEBAR  ════════════════════════════════════════════════════════
 with st.sidebar:
     mode = st.radio("Choose mode", ["Counts CSV files", "Whole dataset"])
 
-    # ───── 1) Counts-CSV workflow ─────
+    # ───────────────────── 1) Counts-CSV workflow ─────────────────────
     if mode == "Counts CSV files":
         counts_files = st.file_uploader(
             "Upload *_raw_counts.csv*", type=["csv"], accept_multiple_files=True
         )
 
-        # already-generated CSVs from datasets
+        # already-generated CSVs from previous dataset uploads
         gen_files: list[io.BytesIO] = []
         if st.session_state.generated_csvs:
             st.markdown("**Generated CSVs (cached)**")
@@ -45,14 +50,15 @@ with st.sidebar:
             picked = st.multiselect("Choose cached files", stems, stems)
             for stem, bio in st.session_state.generated_csvs:
                 if stem in picked:
-                    bio.seek(0); bio.name = f"{stem}_raw_counts.csv"
+                    bio.seek(0)
+                    bio.name = f"{stem}_raw_counts.csv"
                     gen_files.append(bio)
 
         st.markdown("---  \n**CSV layout**")
         header_row = st.number_input("Header row  (-1 = none)", 0, step=1)
         skip_rows  = st.number_input("Rows to skip",              0, step=1)
 
-    # ───── 2) Whole-dataset workflow ─────
+    # ───────────────────── 2) Whole-dataset workflow ──────────────────
     else:
         # uploaders always visible – users may replace the dataset any time
         expr_file = st.file_uploader("expression_matrix_combined.csv", type=["csv"])
@@ -65,9 +71,7 @@ with st.sidebar:
                     st.session_state[k] = None
                 st.experimental_rerun()
 
-        # (re)load if BOTH uploaders have files and
-        #  • nothing cached yet, or
-        #  • filenames changed
+        # (re)load if BOTH uploaders have files and nothing cached OR names changed
         if expr_file and meta_file:
             reload_needed = (
                 st.session_state.expr_df is None or
@@ -75,9 +79,9 @@ with st.sidebar:
                 meta_file.name != st.session_state.meta_name
             )
             if reload_needed:
-                with st.spinner("⌛ Parsing expression / metadata …"):
-                    st.session_state.expr_df = pd.read_csv(expr_file, low_memory=False)
-                    st.session_state.meta_df = pd.read_csv(meta_file,  low_memory=False)
+                with st.spinner("⌛ Parsing expression & metadata …"):
+                    st.session_state.expr_df  = pd.read_csv(expr_file, low_memory=False)
+                    st.session_state.meta_df  = pd.read_csv(meta_file,  low_memory=False)
                     st.session_state.expr_name = expr_file.name
                     st.session_state.meta_name = meta_file.name
 
@@ -95,8 +99,8 @@ with st.sidebar:
 
             if sel_markers and sel_samples:
                 if st.button("Generate counts CSVs"):
-                    total   = len(sel_markers) * len(sel_samples)
-                    bar     = st.progress(0.0, "Generating …")
+                    total    = len(sel_markers) * len(sel_samples)
+                    bar      = st.progress(0.0, "Generating …")
                     existing = {s for s, _ in st.session_state.generated_csvs}
 
                     for i, m in enumerate(sel_markers, 1):
@@ -121,7 +125,7 @@ with st.sidebar:
 
         header_row, skip_rows = -1, 0      # generated CSVs are header-less
 
-    # ───── common detector widgets (unchanged) ─────
+    # ───────────────────── Detection parameters ───────────────────────
     st.markdown("---  \n### Detection")
     auto    = st.selectbox("Number of peaks", ["Automatic", 1, 2, 3, 4, 5, 6])
     n_fixed = None if auto == "Automatic" else int(auto)
@@ -133,19 +137,25 @@ with st.sidebar:
     bw_opt = st.selectbox("Bandwidth", ["scott", "silverman", "0.5", "0.8", "1.0"])
     bw     = float(bw_opt) if bw_opt.replace(".", "", 1).isdigit() else bw_opt
 
-    promin   = st.slider("Prominence", 0.0, 1.0, 0.00, 0.01)
+    # ───── PROMINENCE: Manual vs GPT-automatic ────────────────────────
+    prom_mode = st.radio("Prominence mode", ["Manual", "Automatic (GPT)"])
+    if prom_mode == "Manual":
+        promin = st.slider("Prominence", 0.01, 0.30, 0.05, 0.01)
+    else:
+        promin = None                                 # decide later
+
     min_w    = st.slider("Min peak width", 0, 6, 0, 1)
     grid_sz  = st.slider("Max KDE grid", 4_000, 40_000, 20_000, 1_000)
     val_drop = st.slider("Valley drop (% of peak)", 1, 50, 10, 1)
 
-    st.markdown("---  \n### GPT helper (Automatic peak-count)")
+    st.markdown("---  \n### GPT helper")
     pick = st.selectbox("Model", ["o4-mini", "gpt-4o-mini",
                                   "gpt-4-turbo-preview", "Custom"])
     gpt_model = st.text_input("Custom model") if pick == "Custom" else pick
     api_key   = st.text_input("OpenAI API key", type="password")
     dark_bg   = st.checkbox("🌙 Dark plots")
 
-# ═════════ main buttons ═════════
+# ═════════════════════ main buttons ═══════════════════════════════════
 run       = st.button("🚀 Run detector")
 clear_all = st.button("🗑️ Clear results")
 
@@ -154,7 +164,7 @@ if clear_all:
     st.session_state.fig_pngs.clear()
     st.rerun()
 
-# ───────────────── MAIN processing (unchanged) ─────────────────
+# ═════════════════════ MAIN processing ════════════════════════════════
 if run:
     if mode == "Counts CSV files":
         csv_files = list(counts_files or []) + gen_files
@@ -163,24 +173,35 @@ if run:
     else:
         st.error("Generate CSVs first then switch to *Counts CSV files*."); st.stop()
 
-    if auto == "Automatic" and not api_key:
-        st.error("Automatic mode needs an OpenAI key."); st.stop()
+    # GPT needed if either Automatic peaks **or** Automatic prominence is chosen
+    gpt_needed = ((auto == "Automatic") or (prom_mode == "Automatic (GPT)"))
+    if gpt_needed and not api_key:
+        st.error("Automatic peak-count/prominence requires an OpenAI key.")
+        st.stop()
 
     client   = OpenAI(api_key=api_key) if api_key else None
-    progress = st.progress(0.0, "Processing…")
+    progress = st.progress(0.0, "Processing …")
 
-    new = [f for f in csv_files if Path(f.name).stem not in st.session_state.results]
+    new_files = [f for f in csv_files if Path(f.name).stem not in st.session_state.results]
 
-    for idx, file in enumerate(new, 1):
+    for idx, file in enumerate(new_files, 1):
         stem   = Path(file.name).stem
         counts = read_counts(file, header_row, skip_rows)
 
-        if n_fixed is None:
+        # ───────── decide prominence ────────────────────────────────
+        prom_used = promin
+        if prom_used is None:                             # GPT-automatic
+            prom_used = ask_gpt_prominence(
+                client, gpt_model, counts_full=counts
+            )
+
+        # ───────── decide number of peaks ───────────────────────────
+        if n_fixed is None:                               # Automatic
             n_est, confident = quick_peak_estimate(
-                counts, promin, bw, min_w or None, grid_sz
+                counts, prom_used, bw, min_w or None, grid_sz
             )
             n_use = n_est if confident else None
-            if n_use is not None:                       # ← NEW: respect UI cap
+            if n_use is not None:
                 n_use = min(n_use, max_peaks)
         else:
             n_use = n_fixed
@@ -189,15 +210,21 @@ if run:
             n_use = ask_gpt_peak_count(
                 client, gpt_model, max_peaks, counts_full=counts
             )
-        
-        if n_use is None:                               # still None → apply cap
+        if n_use is None:                                 # fallback → cap
             n_use = max_peaks
-            
+
+        # ───────── detector ────────────────────────────────────────
         peaks, valleys, xs, ys = kde_peaks_valleys(
-            counts, n_use, promin, bw, min_w or None, grid_sz,
-            drop_frac = val_drop / 100.0        # <= pass slider %
+            counts,
+            n_use,
+            prom_used,
+            bw,
+            min_w or None,
+            grid_sz,
+            drop_frac=val_drop / 100.0,
         )
 
+        # single-peak tail valley heuristic
         if len(peaks) == 1 and not valleys:
             idx_peak = np.searchsorted(xs, peaks[0])
             y_peak   = ys[idx_peak]
@@ -205,32 +232,34 @@ if run:
             if below.size:
                 valleys = [float(xs[idx_peak + below[0]])]
 
-        pad = 0.05*(xs.max()-xs.min())
-        fig, ax = plt.subplots(figsize=(5,2.5), dpi=150)
-        colL,colF = ("#4FC3F7","#4FC3F766") if dark_bg else ("skyblue","#87CEEB88")
+        # ───────── plot ────────────────────────────────────────────
+        pad = 0.05 * (xs.max() - xs.min())
+        fig, ax = plt.subplots(figsize=(5, 2.5), dpi=150)
+        colL, colF = ("#4FC3F7", "#4FC3F766") if dark_bg else ("skyblue", "#87CEEB88")
         if dark_bg:
             fig.patch.set_facecolor("#222"); ax.set_facecolor("#222")
             ax.tick_params(colors="white"); ax.spines[:].set_color("white")
             ax.xaxis.label.set_color("white"); ax.yaxis.label.set_color("white")
 
-        ax.plot(xs, ys, color=colL); ax.fill_between(xs,0,ys,color=colF)
-        ax.set_xlim(xs.min()-pad, xs.max()+pad)
-        for p in peaks: ax.axvline(p, color="red", ls="--", lw=1)
-        for v in valleys: ax.axvline(v, color="green", ls=":", lw=1)
+        ax.plot(xs, ys, color=colL)
+        ax.fill_between(xs, 0, ys, color=colF)
+        ax.set_xlim(xs.min() - pad, xs.max() + pad)
+        for p in peaks:
+            ax.axvline(p, color="red", ls="--", lw=1)
+        for v in valleys:
+            ax.axvline(v, color="green", ls=":", lw=1)
         ax.set_xlabel("Arcsinh counts"); ax.set_ylabel("Density")
         ax.set_title(stem, fontsize=9); fig.tight_layout()
 
         st.session_state.fig_pngs[f"{stem}.png"] = fig_to_png(fig); plt.close(fig)
         st.session_state.results[stem] = {"peaks": peaks, "valleys": valleys}
-        progress.progress(idx/len(new), f"Done {stem}")
+
+        progress.progress(idx / len(new_files), f"Done {stem}")
 
     st.success("All files processed!")
 
-# (history, summary, download sections – unchanged; copy from previous version)
 
-
-
-# ═══════════════════════ History / controls ═══════════════════════════
+# ═══════════════ History / controls (unchanged) ═══════════════════════
 st.header("📊 Processed datasets")
 if st.session_state.results:
     for stem, info in list(st.session_state.results.items()):
@@ -247,10 +276,11 @@ else:
     st.info("No results yet.")
 
 
-# ═══════════════════════ Summary + ZIP ════════════════════════════════
+# ═══════════════ Summary + ZIP (unchanged) ════════════════════════════
 if st.session_state.results:
     df = pd.DataFrame([{"file": k, **v} for k, v in st.session_state.results.items()])
-    st.subheader("📋 Summary"); st.dataframe(df, use_container_width=True)
+    st.subheader("📋 Summary")
+    st.dataframe(df, use_container_width=True)
 
     with io.BytesIO() as buf:
         with zipfile.ZipFile(buf, "w") as z:

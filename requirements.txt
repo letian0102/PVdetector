@@ -1,1 +1,8 @@
 streamlit
+pathlib
+numpy
+pandas
+matplotlib
+scipy
+streamlit
+openai

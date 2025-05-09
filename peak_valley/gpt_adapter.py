@@ -1,13 +1,63 @@
 from __future__ import annotations
-import re
+import re, textwrap
 from openai import OpenAI, OpenAIError
 import numpy as np
 from .signature import shape_signature
 
-__all__ = ["ask_gpt_peak_count", "ask_gpt_prominence"]
+__all__ = ["ask_gpt_peak_count", "ask_gpt_prominence", "ask_gpt_bandwidth"]
 
 # keep a simple run-time cache; survives a single Streamlit run
 _cache: dict[tuple[str, str], float | int] = {}  # (tag, sig) → value
+
+def ask_gpt_bandwidth(
+    client:      OpenAI,
+    model_name:  str,
+    counts_full: np.ndarray,
+    peak_amount: int,               # 🔸 NEW – expected modes
+    default:     float = 0.8,
+) -> float:
+    """
+    Return a KDE bandwidth *scale factor* in **[0.3 … 0.8]** that makes the
+    KDE reveal *about* ``peak_amount`` peaks.
+    The answer is memo-cached by the (signature, expected_peaks) pair.
+    """
+    sig = shape_signature(counts_full)
+    key = ("bw", sig, peak_amount)
+    if key in _cache:                      # reuse identical call
+        return _cache[key]
+
+    # ── construct a compact prompt ───────────────────────────────────────
+    #  • Give GPT a concise numeric summary (5-number summary + length)
+    #  • State the desired number of peaks explicitly
+    q  = np.percentile(counts_full, [0, 25, 50, 75, 100]).round(2).tolist()
+    N  = len(counts_full)
+    prompt = textwrap.dedent(f"""
+        You are tuning the bandwidth for a 1-D Gaussian KDE.
+        The data have n = {N} points with
+        min = {q[0]}, Q1 = {q[1]}, median = {q[2]}, Q3 = {q[3]}, max = {q[4]}.
+
+        Choose a *scale factor* in the **0.3-0.8** range (1.0 = Scott's rule)
+        so that the KDE curve shows **≈ {peak_amount} distinct peaks**:
+        ─ if the bandwidth is too small the curve will be noisy (too many peaks),
+        ─ if it is too large it will merge peaks.
+
+        Reply with just one decimal number, nothing else.
+    """).strip()
+
+    try:
+        rsp  = client.chat.completions.create(
+            model=model_name,
+            seed=2025,
+            timeout=45,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        val = float(re.findall(r"\d*\.?\d+", rsp.choices[0].message.content)[0])
+        val = float(np.clip(val, 0.3, 0.8))      # final safety clamp
+    except Exception:
+        val = default
+
+    _cache[key] = val
+    return val
 
 def ask_gpt_prominence(
     client:     OpenAI,
@@ -36,7 +86,7 @@ def ask_gpt_prominence(
     )
     try:
         rsp = client.chat.completions.create(
-            model=model_name, seed=2025, timeout=60,
+            model=model_name, seed=2025,
             messages=[{"role": "user", "content": prompt}],
         )
         val = float(re.findall(r"\d*\.?\d+", rsp.choices[0].message.content)[0])
@@ -51,7 +101,8 @@ def ask_gpt_peak_count(
     client:     OpenAI,
     model_name: str,
     max_peaks:  int,
-    counts_full: np.ndarray | None = None,   # NEW
+    counts_full: np.ndarray | None = None,
+    marker_name: str | None = None,
 ) -> int | None:
     """As before but with a memoization layer."""
     if counts_full is not None:
@@ -60,16 +111,15 @@ def ask_gpt_peak_count(
             return min(_cache[sig], max_peaks)
 
     # ---------- GPT call (unchanged) ----------
+    marker_txt = f"for the protein marker **{marker_name}** " if marker_name else ""
     prompt = (
-        "How many distinct density peaks (modes) does this list show? "
-        "Answer with a single integer.\n\n"
+        f"How many density peaks (modes) should be visible in the following raw protein-count list? Remember this is  {marker_txt} (Give ONE integer ≤ {max_peaks}.)\n\n"
         f"{counts_full}"
     )
     try:
         rsp = client.chat.completions.create(
             model=model_name,
             seed=2025,
-            timeout=60,
             messages=[{"role": "user", "content": prompt}],
         )
         n = int(re.findall(r"\d+", rsp.choices[0].message.content)[0])

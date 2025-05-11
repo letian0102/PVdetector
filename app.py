@@ -120,7 +120,7 @@ def _manual_editor(stem: str):
         # push back to main state
         st.session_state.results[stem]["peaks"]   = pk_list
         st.session_state.results[stem]["valleys"] = vl_list
-        st.session_state.dirty[stem] = False
+        # st.session_state.dirty[stem] = False
 
     # ---------- live plot -------------------------------------------------
     with colR:
@@ -131,7 +131,7 @@ def _manual_editor(stem: str):
     # sync back to main result dict after UI elements update ----------------
     st.session_state.results[stem]["peaks"] = pk_list.copy()
     st.session_state.results[stem]["valleys"] = vl_list.copy()
-    st.session_state.dirty[stem] = False
+    # st.session_state.dirty[stem] = False
 
 # ───────────────── helper: master results accordion ------------------------
 
@@ -313,6 +313,9 @@ with st.sidebar:
                 if prom_mode == "Manual" else None)
 
     min_w    = st.slider("Min peak width", 0, 6, 0, 1)
+    curv = st.slider("Curvature thresh (0 = off)", 0.0000, 0.005, 0.0001, 0.0001)
+    tp   = st.checkbox("Treat concave-down turning points as peaks", False)
+    min_sep   = st.slider("Min peak separation", 0.0, 10.0, 0.7, 0.1)
     grid_sz  = st.slider("Max KDE grid", 4_000, 40_000, 20_000, 1_000)
     val_drop = st.slider("Valley drop (% of peak)", 1, 50, 10, 1)
 
@@ -389,7 +392,7 @@ if st.session_state.run_active and st.session_state.pending:
                     n_fixed if n_fixed is not None else max_peaks)
         bw_use = ask_gpt_bandwidth(
             OpenAI(api_key=api_key) if api_key else None,
-            gpt_model, cnts, peak_amount=expected, default=0.8
+            gpt_model, cnts, peak_amount=expected, default='scott'
         )
 
     # prominence
@@ -432,7 +435,10 @@ if st.session_state.run_active and st.session_state.pending:
 
     peaks, valleys, xs, ys = kde_peaks_valleys(
         cnts, n_use, prom_use, bw_use, min_w or None, grid_sz,
-        drop_frac=val_drop / 100.0
+        drop_frac=val_drop / 100.0,
+        min_x_sep=min_sep,
+        curvature_thresh = curv if curv > 0 else None,
+        turning_peak     = tp
     )
     if len(peaks) == 1 and not valleys:
         p_idx = np.searchsorted(xs, peaks[0])

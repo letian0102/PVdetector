@@ -14,7 +14,7 @@ def ask_gpt_bandwidth(
     model_name:  str,
     counts_full: np.ndarray,
     peak_amount: int,               # 🔸 NEW – expected modes
-    default:     float = 0.5,
+    default:     float = 'scott',
 ) -> float:
     """
     Return a KDE bandwidth *scale factor* in **[0.1 … 0.5]** that makes the
@@ -33,12 +33,12 @@ def ask_gpt_bandwidth(
         You are tuning the bandwidth for a 1-D Gaussian KDE.
         The data is {counts_full}
 
-        Choose a *scale factor* in the **0.1-0.5** range
+        Choose a *scale factor* in the **0.10-0.50** range
         so that the KDE curve shows **≈ {peak_amount} distinct peaks**:
         ─ if the bandwidth is too small the curve will be noisy (too many peaks),
         ─ if it is too large it will merge peaks.
 
-        Reply with just one decimal number, nothing else.
+        Reply with just a number with two decimal places, nothing else.
     """).strip()
 
     try:
@@ -49,7 +49,7 @@ def ask_gpt_bandwidth(
             messages=[{"role": "user", "content": prompt}],
         )
         val = float(re.findall(r"\d*\.?\d+", rsp.choices[0].message.content)[0])
-        val = float(np.clip(val, 0.1, 0.7))      # final safety clamp
+        val = float(np.clip(val, 0.10, 0.50))      # final safety clamp
     except Exception:
         val = default
 

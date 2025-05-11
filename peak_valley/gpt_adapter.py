@@ -14,10 +14,10 @@ def ask_gpt_bandwidth(
     model_name:  str,
     counts_full: np.ndarray,
     peak_amount: int,               # 🔸 NEW – expected modes
-    default:     float = 0.8,
+    default:     float = 0.5,
 ) -> float:
     """
-    Return a KDE bandwidth *scale factor* in **[0.3 … 0.8]** that makes the
+    Return a KDE bandwidth *scale factor* in **[0.1 … 0.5]** that makes the
     KDE reveal *about* ``peak_amount`` peaks.
     The answer is memo-cached by the (signature, expected_peaks) pair.
     """
@@ -29,14 +29,11 @@ def ask_gpt_bandwidth(
     # ── construct a compact prompt ───────────────────────────────────────
     #  • Give GPT a concise numeric summary (5-number summary + length)
     #  • State the desired number of peaks explicitly
-    q  = np.percentile(counts_full, [0, 25, 50, 75, 100]).round(2).tolist()
-    N  = len(counts_full)
     prompt = textwrap.dedent(f"""
         You are tuning the bandwidth for a 1-D Gaussian KDE.
-        The data have n = {N} points with
-        min = {q[0]}, Q1 = {q[1]}, median = {q[2]}, Q3 = {q[3]}, max = {q[4]}.
+        The data is {counts_full}
 
-        Choose a *scale factor* in the **0.3-0.8** range (1.0 = Scott's rule)
+        Choose a *scale factor* in the **0.1-0.5** range
         so that the KDE curve shows **≈ {peak_amount} distinct peaks**:
         ─ if the bandwidth is too small the curve will be noisy (too many peaks),
         ─ if it is too large it will merge peaks.
@@ -52,7 +49,7 @@ def ask_gpt_bandwidth(
             messages=[{"role": "user", "content": prompt}],
         )
         val = float(re.findall(r"\d*\.?\d+", rsp.choices[0].message.content)[0])
-        val = float(np.clip(val, 0.3, 0.8))      # final safety clamp
+        val = float(np.clip(val, 0.1, 0.7))      # final safety clamp
     except Exception:
         val = default
 

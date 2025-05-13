@@ -47,6 +47,63 @@ for key, default in {
     if key not in st.session_state:
         st.session_state[key] = default
 
+# ───────────────────────────── helpers for ZIPs ─────────────────────────────
+def _make_aligned_zip() -> bytes:
+    """
+    PNGs + aligned counts + landmark table.
+    """
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        # aligned counts (one CSV / sample)
+        for stem, arr in st.session_state.aligned_counts.items():
+            buf = io.BytesIO(); np.savetxt(buf, arr, delimiter=",")
+            z.writestr(f"{stem}_aligned.csv", buf.getvalue())
+
+        # plots --------------------------------------------------------------
+        for fn, png in st.session_state.aligned_fig_pngs.items():
+            z.writestr(fn, png)
+        if st.session_state.aligned_ridge_png:
+            z.writestr("aligned_ridge.png",
+                       st.session_state.aligned_ridge_png)
+
+        # landmarks table ----------------------------------------------------
+        lm_dict = {stem: row
+                   for stem, row
+                   in zip(st.session_state.results,
+                          st.session_state.aligned_landmarks)}
+        for stem in st.session_state.results:
+            lm_dict.setdefault(stem, [np.nan, np.nan, np.nan])
+
+        col_names = _cols_for_align_mode(st.session_state.align_mode)
+        # pad rows that are shorter than header length
+        for k, row in lm_dict.items():
+            if len(row) < len(col_names):
+                lm_dict[k] = list(row) + [np.nan]*(len(col_names)-len(row))
+
+        lm_df = (pd.DataFrame
+                 .from_dict(lm_dict, orient="index", columns=col_names)
+                 .sort_index())
+        csv_buf = io.StringIO(); lm_df.to_csv(csv_buf)
+        z.writestr("aligned_landmarks.csv", csv_buf.getvalue())
+    return out.getvalue()
+
+
+def _make_curves_zip() -> bytes:
+    """
+    One *_xs.csv* (grid) and one *_ys.csv* (density) per sample.
+    """
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        for stem, info in st.session_state.aligned_results.items():
+            x_buf = io.BytesIO()
+            np.savetxt(x_buf, np.asarray(info["xs"]), delimiter=",")
+            z.writestr(f"{stem}_xs.csv", x_buf.getvalue())
+
+            y_buf = io.BytesIO()
+            np.savetxt(y_buf, np.asarray(info["ys"]), delimiter=",")
+            z.writestr(f"{stem}_ys.csv", y_buf.getvalue())
+    return out.getvalue()
+
 
 # ───────────────────────── helper: (re)plot a dataset ───────────────────────
 
@@ -151,11 +208,27 @@ def _manual_editor(stem: str):
         st.image(png, use_container_width=True)
 
     # sync back to main result dict after UI elements update ----------------
-    st.session_state.results[stem]["peaks"] = pk_list.copy()
-    st.session_state.results[stem]["valleys"] = vl_list.copy()
+    #st.session_state.results[stem]["peaks"] = pk_list.copy()
+    #st.session_state.results[stem]["valleys"] = vl_list.copy()
     # st.session_state.dirty[stem] = False
 
+    apply_key = f"{stem}_apply_edits"
+    if st.button("✅ Apply changes", key=apply_key):
+        st.session_state.results[stem]["peaks"]   = pk_list.copy()
+        st.session_state.results[stem]["valleys"] = vl_list.copy()
+        st.session_state.dirty[stem] = True       # mark for slow re-run
+        st.rerun()
+
 # ───────────────── helper: master results accordion ------------------------
+
+def _cols_for_align_mode(mode: str) -> list[str]:
+    """Return the proper column names for each align_mode."""
+    return {
+        "negPeak": ["neg_peak"],
+        "valley":  ["valley"],
+        "negPeak_valley": ["neg_peak", "valley"],
+        "negPeak_valley_posPeak": ["neg_peak", "valley", "pos_peak"],
+    }[mode]
 
 def render_aligned(container):
     container.header("🔧 Aligned distributions")
@@ -353,6 +426,53 @@ with st.sidebar:
     grid_sz  = st.slider("Max KDE grid", 4_000, 40_000, 20_000, 1_000)
     val_drop = st.slider("Valley drop (% of peak)", 1, 50, 10, 1)
 
+    # ───────────── Alignment options ──────────────
+    st.markdown("---\n### Alignment")
+
+    align_mode = st.selectbox(
+        "Landmark set",
+        ["negPeak_valley_posPeak", "negPeak_valley", "negPeak", "valley"],
+        index=0, key="align_mode",
+    )
+
+    col_names = _cols_for_align_mode(
+        st.session_state.get("align_mode", "negPeak_valley_posPeak")
+    )
+
+    # ► choose where the *aligned* landmarks should end up
+    target_mode = st.radio(
+        "Target landmark positions",
+        ["Automatic (median across samples)", "Custom (enter numbers)"],
+        horizontal=True, key="target_mode",
+    )
+
+    def _ask_numbers(labels: list[str], defaults: list[float], prefix: str) -> list[float]:
+        vals = []
+        for lab, d, i in zip(labels, defaults, range(len(labels))):
+            v = st.number_input(
+                f"Target {lab}", value=float(d), key=f"{prefix}_{i}"
+            )
+            vals.append(float(v))
+        return vals
+
+    if target_mode.startswith("Automatic"):
+        target_vec: list[float] | None = None    # -> compute later from data
+    else:
+        if align_mode == "negPeak":
+            target_vec = _ask_numbers(["negative peak"], [2.0], "tgt1")
+        elif align_mode == "valley":
+            target_vec = _ask_numbers(["valley"], [3.0], "tgt2")
+        elif align_mode == "negPeak_valley":
+            target_vec = _ask_numbers(
+                ["negative peak", "valley"], [2.0, 3.0], "tgt3"
+            )
+        else:   # 3-landmark
+            target_vec = _ask_numbers(
+                ["negative peak", "valley", "right-most peak"],
+                [2.0, 3.0, 5.0], "tgt4"
+            )
+
+
     st.markdown("---\n### GPT helper")
     pick = st.selectbox("Model",
                         ["o4-mini", "gpt-4o-mini",
@@ -549,8 +669,12 @@ if st.session_state.aligned_ridge_png:
              use_container_width=True)
 
 if st.session_state.results:
-    df = pd.DataFrame([{"file": k, **v}
-                       for k, v in st.session_state.results.items()])
+    df = pd.DataFrame([
+        {"file": k,
+         "peaks":   v["peaks"],
+         "valleys": v["valleys"]}
+        for k, v in st.session_state.results.items()
+    ])
     st.subheader("📋 Summary")
     st.dataframe(df, use_container_width=True)
 
@@ -581,19 +705,29 @@ if st.session_state.results:
             landmark_mat = fill_landmark_matrix(
                 peaks   = peaks_all,
                 valleys = valleys_all,
-                align_type  = "negPeak_valley_posPeak",
+                align_type  = align_mode,
                 midpoint_type        = "valley",          # valley-based fallback
             )
 
-            # our global target is the median location of each landmark
-            target_landmark = np.nanmedian(landmark_mat, axis=0).tolist()
+            # choose the *target* positions
+            if target_vec is None:                      # ► AUTOMATIC
+                target_landmark = np.nanmedian(landmark_mat, axis=0).tolist()
+            else:                                       # ► USER-SUPPLIED
+                need = _cols_for_align_mode(align_mode)
+                if len(target_vec) != len(need):
+                    st.error(
+                        f"Need {len(need)} values for '{align_mode}', "
+                        f"but got {len(target_vec)}."
+                    )
+                    st.stop()
+                target_landmark = target_vec            # <- exactly as typed
 
             # -------- run the warp, forcing ALL THREE landmarks ---------------------
             warped, warped_lm, warp_funs = align_distributions(
                 counts_all,
                 peaks_all,            # unused internally when landmark_mat supplied,
                 valleys_all,          # but kept for API compatibility
-                align_type      = "negPeak_valley_posPeak",
+                align_type      = align_mode,
                 landmark_matrix = landmark_mat,
                 target_landmark = target_landmark,
             )
@@ -707,45 +841,15 @@ if st.session_state.results:
     ac = st.session_state.get("aligned_counts")
     if ac:
         with dl_col:
-            out = io.BytesIO()
-            with zipfile.ZipFile(out, "w") as z:
-                for stem, arr in ac.items():
-                    bio = io.BytesIO()
-                    np.savetxt(bio, arr, delimiter=",")
-                    z.writestr(f"{stem}_aligned.csv", bio.getvalue())
-
-                # write PNGs just once
-                for fn, png in st.session_state.aligned_fig_pngs.items():
-                    z.writestr(fn, png)
-                if st.session_state.aligned_ridge_png:
-                    z.writestr("aligned_ridge.png",
-                            st.session_state.aligned_ridge_png)
-
-                # landmark matrix
-                lm_dict = {
-                    stem: row
-                    for stem, row
-                    in zip(st.session_state.results,
-                           st.session_state.aligned_landmarks)   # ← use session copy
-                }
-
-                # ensure every sample is present; pad with NaNs when a row is missing
-                for stem in st.session_state.results:
-                    lm_dict.setdefault(stem, [np.nan, np.nan, np.nan])
-
-                landmark_df = (
-                    pd.DataFrame
-                    .from_dict(lm_dict, orient="index",
-                                columns=["neg_peak", "valley", "pos_peak"])
-                    .sort_index()               # keep a stable order
-                )
-
-                # write to the zip
-                lm_csv = io.StringIO()
-                landmark_df.to_csv(lm_csv)
-                z.writestr("aligned_landmarks.csv", lm_csv.getvalue())
             st.download_button(
                 "⬇️ Download aligned ZIP",
-                out.getvalue(), "AlignedDistributions.zip",
+                _make_aligned_zip(),
+                "AlignedDistributions.zip",
+                mime="application/zip"
+            )
+            st.download_button(
+                "⬇️ Download per-sample xs / ys",
+                _make_curves_zip(),
+                "SampleCurves.zip",
                 mime="application/zip"
             )

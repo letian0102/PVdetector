@@ -18,6 +18,7 @@ from peak_valley import (
 from peak_valley.gpt_adapter import (
     ask_gpt_peak_count, ask_gpt_prominence, ask_gpt_bandwidth,
 )
+from peak_valley.alignment import align_distributions, fill_landmark_matrix
 
 # ────────────────────────── Streamlit page & state ──────────────────────────
 st.set_page_config("Peak & Valley Detector", "🔬", layout="wide")
@@ -25,6 +26,7 @@ st.title("🔬 Peak & Valley Detector — CSV *or* full dataset")
 
 for key, default in {
     "results":     {},         # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
+    "results_raw": {},         # stem → raw counts (np.ndarray)
     "fig_pngs":    {},         # stem.png → png bytes (latest)
     "params":      {},         # stem → {"bw":…, "prom":…, "n_peaks":…}
     "dirty":       {},         # stem → True if user edited params *or* positions
@@ -36,12 +38,32 @@ for key, default in {
     "pending":     [],         # list[io.BytesIO] still to process
     "total_todo":  0,
     "run_active":  False,
+    "aligned_counts":    None,
+    "aligned_landmarks": None,
+    "aligned_results": {},   # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
+    "aligned_fig_pngs": {},  # stem_aligned.png → bytes
+    "aligned_ridge_png":    None
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
 
 # ───────────────────────── helper: (re)plot a dataset ───────────────────────
+
+def _plot_png_fixed(stem, xs, ys, peaks, valleys,
+                    xlim, ylim) -> bytes:
+    """Same as _plot_png but with shared axes limits."""
+    fig, ax = plt.subplots(figsize=(5, 2.5), dpi=150)
+    ax.plot(xs, ys, color="orange")
+    ax.fill_between(xs, 0, ys, color="#FFA50088")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(0, ylim)
+    for p in peaks:   ax.axvline(p, color="black", ls="--", lw=1)
+    for v in valleys: ax.axvline(v, color="grey",  ls=":",  lw=1)
+    ax.set_yticks([]); ax.set_title(stem, fontsize=8)
+    fig.tight_layout()
+    out = fig_to_png(fig); plt.close(fig)
+    return out
 
 def _plot_png(stem: str, xs: np.ndarray, ys: np.ndarray,
               peaks: list[float], valleys: list[float]) -> bytes:
@@ -126,7 +148,7 @@ def _manual_editor(stem: str):
     with colR:
         png = _plot_png(stem, xs, ys, pk_list, vl_list)
         st.session_state.fig_pngs[f"{stem}.png"] = png
-        st.image(png, use_column_width=True)
+        st.image(png, use_container_width=True)
 
     # sync back to main result dict after UI elements update ----------------
     st.session_state.results[stem]["peaks"] = pk_list.copy()
@@ -134,6 +156,18 @@ def _manual_editor(stem: str):
     # st.session_state.dirty[stem] = False
 
 # ───────────────── helper: master results accordion ------------------------
+
+def render_aligned(container):
+    container.header("🔧 Aligned distributions")
+    if not st.session_state.aligned_results:
+        container.info("Run alignment first."); return
+
+    for stem, info in st.session_state.aligned_results.items():
+        with container.expander(stem, expanded=False):
+            st.image(st.session_state.aligned_fig_pngs.get(f"{stem}_aligned.png", b""),
+                     use_container_width=True)
+            st.write(f"**Peaks (after warp):** {info['peaks']}")
+            st.write(f"**Valleys (after warp):** {info['valleys']}")
 
 def render_results(container):
     container.header("📊 Processed datasets")
@@ -150,7 +184,7 @@ def render_results(container):
             tab_plot, tab_params, tab_manual = st.tabs(["Plot", "Parameters", "Manual"])
             with tab_plot:
                 st.image(st.session_state.fig_pngs.get(f"{stem}.png", b""),
-                         use_column_width=True)
+                         use_container_width=True)
                 st.write(f"**Peaks:** {info['peaks']}")
                 st.write(f"**Valleys:** {info['valleys']}")
             with tab_params:
@@ -330,9 +364,20 @@ with st.sidebar:
 # ───────────────── main buttons & global progress bar ────────────────────────
 run, clear_all = st.columns(2)
 if clear_all.button("🗑 Clear results"):
-    for bucket in ("results", "fig_pngs", "params", "dirty"):
-        st.session_state[bucket].clear()
+    # buckets that are always dict-like
+    for bucket in ("results", "fig_pngs", "params", "dirty",
+                   "aligned_results", "aligned_fig_pngs",
+                   "results_raw",          # ← keep as dict, not None
+                   ):
+        st.session_state[bucket] = {}       # {} stays {}
+
+    # scalar keys or arrays
+    for key in ("aligned_counts", "aligned_landmarks",
+                "aligned_ridge_png"):
+        st.session_state[key] = None
+
     st.session_state.pending.clear()
+    st.session_state.total_todo = 0
     st.session_state.run_active = False
     st.rerun()
 
@@ -372,6 +417,7 @@ if st.session_state.run_active and st.session_state.pending:
     f     = st.session_state.pending.pop(0)
     stem  = Path(f.name).stem
     cnts  = read_counts(f, header_row, skip_rows)
+    st.session_state.results_raw.setdefault(stem, cnts)
 
     over  = st.session_state.params.get(stem, {}) \
             if st.session_state.dirty.get(stem, False) else {}
@@ -494,6 +540,14 @@ if st.session_state.run_active and st.session_state.pending:
 results_container = st.container()
 render_results(results_container)
 
+# aligned_container = st.container()
+# render_aligned(aligned_container)
+
+if st.session_state.aligned_ridge_png:
+    st.subheader("📈 Stacked ridge-plot (aligned)")
+    st.image(st.session_state.aligned_ridge_png,
+             use_container_width=True)
+
 if st.session_state.results:
     df = pd.DataFrame([{"file": k, **v}
                        for k, v in st.session_state.results.items()])
@@ -507,3 +561,191 @@ if st.session_state.results:
                 z.writestr(fn, png)
         st.download_button("⬇️ Download ZIP", buf.getvalue(),
                            "PeakValleyResults.zip", "application/zip")
+
+
+if st.session_state.results:
+    st.markdown("---")
+    align_col, dl_col = st.columns([2, 1])
+    with align_col:
+        do_align = st.button("🔧 Align landmarks & normalise counts",
+                             type="primary")
+    if do_align:
+        with st.spinner("⌛ Running landmark alignment …"):
+            peaks_all   = [v["peaks"]   for v in st.session_state.results.values()]
+            valleys_all = [v["valleys"] for v in st.session_state.results.values()]
+            counts_all  = [st.session_state.results_raw[k]
+                        for k in st.session_state.results]
+
+            # —— 1. warp every distribution ---------------------------------------
+            # -------- deterministically build + fill landmark matrix ----------------
+            landmark_mat = fill_landmark_matrix(
+                peaks   = peaks_all,
+                valleys = valleys_all,
+                align_type  = "negPeak_valley_posPeak",
+                midpoint_type        = "valley",          # valley-based fallback
+            )
+
+            # our global target is the median location of each landmark
+            target_landmark = np.nanmedian(landmark_mat, axis=0).tolist()
+
+            # -------- run the warp, forcing ALL THREE landmarks ---------------------
+            warped, warped_lm, warp_funs = align_distributions(
+                counts_all,
+                peaks_all,            # unused internally when landmark_mat supplied,
+                valleys_all,          # but kept for API compatibility
+                align_type      = "negPeak_valley_posPeak",
+                landmark_matrix = landmark_mat,
+                target_landmark = target_landmark,
+            )
+
+            warped      = list(warped)                    # list of 1-D arrays
+            warp_funs   = list(warp_funs)                 # list of callables
+            warped_lm   = [list(row) for row in warped_lm]  # list of [neg, val, pos]
+
+            n_samples   = len(st.session_state.results)
+
+            # cohort mean location of the negative peak among samples that did warp
+            neg_peaks   = [lm[0] for lm in warped_lm]          # first column = neg-peak
+            target_neg  = float(np.nanmean(neg_peaks)) if neg_peaks else 0.0
+
+            for idx in range(n_samples):
+                if idx >= len(warp_funs):
+                    # sample idx was dropped  → fabricate a simple shift warp
+                    pks      = peaks_all[idx]
+                    offset   = (target_neg - pks[0]) if pks else 0.0
+                    warp_funs.append(lambda x, o=offset: x + o)
+                    warped.append(counts_all[idx] + offset)
+                    warped_lm.append([
+                        (pks[0] + offset) if pks else np.nan,  # neg-peak
+                        np.nan,                                # missing valley
+                        np.nan                                 # missing pos-peak
+                    ])
+
+            # global finite x-range ------------------------------------------------
+            all_xmin = float(np.nanmin([np.nanmin(w) for w in warped]))
+            all_xmax = float(np.nanmax([np.nanmax(w) for w in warped]))
+            if not np.isfinite(all_xmin) or not np.isfinite(all_xmax):
+                all_xmin, all_xmax = 0.0, 1.0                 # extreme fallback
+            x_grid        = np.linspace(all_xmin, all_xmax, 4000)
+            std_fallback  = 0.05 * (all_xmax - all_xmin or 1.0)
+
+            st.session_state.aligned_counts     = dict(zip(st.session_state.results,
+                                                        warped))
+            st.session_state.aligned_landmarks  = warped_lm
+            st.session_state.aligned_results    = {}
+            st.session_state.aligned_fig_pngs   = {}
+            st.session_state.aligned_ridge_png  = None
+
+            # —— 2. build KDE / fallback curve for *every* sample -----------------
+            kdes = {}
+            from scipy.stats import gaussian_kde
+            for idx, stem in enumerate(st.session_state.results):
+                wc   = warped[idx]
+                good = wc[~np.isnan(wc)]
+                if np.unique(good).size >= 2:
+                    try:
+                        kdes[stem] = gaussian_kde(good, bw_method="scott")(x_grid)
+                    except Exception:  # numerical failure
+                        kdes[stem] = np.exp(-(x_grid - good.mean())**2 / (2*std_fallback**2))
+                else:                  # single value or empty
+                    center = good[0] if good.size else 0.5*(all_xmin + all_xmax)
+                    kdes[stem] = np.exp(-(x_grid - center)**2 / (2*std_fallback**2))
+
+            all_ymax = max(ys.max() for ys in kdes.values())
+
+            # —— 3. per-sample PNGs & metadata ------------------------------------
+            for idx, stem in enumerate(st.session_state.results):
+                f        = warp_funs[idx]
+                ys       = kdes[stem]
+                pk_align = f(np.asarray(st.session_state.results[stem]["peaks"]))
+                vl_align = f(np.asarray(st.session_state.results[stem]["valleys"]))
+
+                png = _plot_png_fixed(
+                    f"{stem} (aligned)", x_grid, ys,
+                    pk_align[~np.isnan(pk_align)],
+                    vl_align[~np.isnan(vl_align)],
+                    (all_xmin, all_xmax), all_ymax
+                )
+
+                st.session_state.aligned_fig_pngs[f"{stem}_aligned.png"] = png
+                st.session_state.aligned_results[stem] = {
+                    "peaks":   pk_align.round(4).tolist(),
+                    "valleys": vl_align.round(4).tolist(),
+                    "xs": x_grid.tolist(),
+                    "ys": ys.tolist(),
+                }
+
+            # —— 4. stacked ridge-plot -------------------------------------------
+            gap = 1.2 * all_ymax
+            fig, ax = plt.subplots(figsize=(6, 0.8*len(kdes)), dpi=150, sharex=True)
+            for i, stem in enumerate(reversed(list(st.session_state.aligned_results))):
+                ys      = kdes[stem]
+                offset  = i * gap
+                ax.plot(x_grid, ys + offset, color="black", lw=1)
+                ax.fill_between(x_grid, offset, ys + offset, color="#FFA50088", lw=0)
+
+                info = st.session_state.aligned_results[stem]
+                for p in info["peaks"]:
+                    ax.vlines(p, offset, offset + ys.max(),
+                                color="black", lw=0.8)
+                for v in info["valleys"]:
+                    ax.vlines(v, offset, offset + ys.max(),
+                                color="grey",  lw=0.8, linestyles=":")
+
+                ax.text(all_xmin, offset + 0.5*all_ymax, stem,
+                        ha="right", va="center", fontsize=7)
+
+            ax.set_yticks([]); ax.set_xlim(all_xmin, all_xmax)
+            fig.tight_layout()
+            st.session_state.aligned_ridge_png = fig_to_png(fig)
+            plt.close(fig)
+
+            st.success("✓ Landmarks aligned – scroll down for the stacked view or download the ZIP!")
+            st.rerun()
+
+    # -------- download aligned results ----------------------------------
+    ac = st.session_state.get("aligned_counts")
+    if ac:
+        with dl_col:
+            out = io.BytesIO()
+            with zipfile.ZipFile(out, "w") as z:
+                for stem, arr in ac.items():
+                    bio = io.BytesIO()
+                    np.savetxt(bio, arr, delimiter=",")
+                    z.writestr(f"{stem}_aligned.csv", bio.getvalue())
+
+                # write PNGs just once
+                for fn, png in st.session_state.aligned_fig_pngs.items():
+                    z.writestr(fn, png)
+                if st.session_state.aligned_ridge_png:
+                    z.writestr("aligned_ridge.png",
+                            st.session_state.aligned_ridge_png)
+
+                # landmark matrix
+                lm_dict = {
+                    stem: row
+                    for stem, row
+                    in zip(st.session_state.results,
+                           st.session_state.aligned_landmarks)   # ← use session copy
+                }
+
+                # ensure every sample is present; pad with NaNs when a row is missing
+                for stem in st.session_state.results:
+                    lm_dict.setdefault(stem, [np.nan, np.nan, np.nan])
+
+                landmark_df = (
+                    pd.DataFrame
+                    .from_dict(lm_dict, orient="index",
+                                columns=["neg_peak", "valley", "pos_peak"])
+                    .sort_index()               # keep a stable order
+                )
+
+                # write to the zip
+                lm_csv = io.StringIO()
+                landmark_df.to_csv(lm_csv)
+                z.writestr("aligned_landmarks.csv", lm_csv.getvalue())
+            st.download_button(
+                "⬇️ Download aligned ZIP",
+                out.getvalue(), "AlignedDistributions.zip",
+                mime="application/zip"
+            )

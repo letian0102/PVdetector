@@ -26,6 +26,9 @@ from peak_valley.alignment import align_distributions, fill_landmark_matrix
 st.set_page_config("Peak & Valley Detector", "🔬", layout="wide")
 st.title("🔬 Peak & Valley Detector — CSV *or* full dataset")
 
+st.session_state.setdefault("active_sample", None)
+st.session_state.setdefault("active_subtab", {})   # stem → "plot" / "params" / "manual"
+
 for key, default in {
     "results":     {},         # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
     "results_raw": {},         # stem → raw counts (np.ndarray)
@@ -50,19 +53,89 @@ for key, default in {
         st.session_state[key] = default
 
 # ── helper #1 : aligned ZIP  (plots + aligned counts) ───────────────
+def _refresh_raw_ridge() -> None:
+    """Re-compute the stacked RAW ridge plot and store it in session_state."""
+    if not st.session_state.results:
+        st.session_state.raw_ridge_png = None
+        return
+
+    from scipy.stats import gaussian_kde
+    counts_all = list(st.session_state.results_raw.values())
+
+    x_min = float(min(np.nanmin(c) for c in counts_all))
+    x_max = float(max(np.nanmax(c) for c in counts_all))
+    x_grid = np.linspace(x_min, x_max, 4000)
+
+    # densities for every sample
+    kdes = {}
+    for stem, arr in st.session_state.results_raw.items():
+        good = arr[~np.isnan(arr)]
+        if np.unique(good).size >= 2:
+            kdes[stem] = gaussian_kde(good, bw_method="scott")(x_grid)
+        else:                               # fallback single value / empty
+            μ = good.mean() if good.size else 0.5 * (x_min + x_max)
+            σ = 0.05 * (x_max - x_min or 1.0)
+            kdes[stem] = np.exp(-(x_grid - μ) ** 2 / (2 * σ ** 2))
+
+    y_max = max(ys.max() for ys in kdes.values())
+    gap   = 1.2 * y_max
+
+    fig, ax = plt.subplots(figsize=(6, 0.8 * len(kdes)), dpi=150, sharex=True)
+
+    for i, stem in enumerate(st.session_state.results):
+        ys     = kdes[stem]
+        offset = i * gap
+
+        ax.plot(x_grid, ys + offset, color="black", lw=1)
+        ax.fill_between(x_grid, offset, ys + offset, color="#FFA50088", lw=0)
+
+        # current PEAK & VALLEY markers
+        info = st.session_state.results[stem]
+        for p in info["peaks"]:
+            ax.vlines(p, offset, offset + ys.max(), color="black", lw=0.8)
+        for v in info["valleys"]:
+            ax.vlines(v, offset, offset + ys.max(), color="grey",
+                      lw=0.8, linestyles=":")
+
+        ax.text(x_min, offset + 0.5 * y_max, stem,
+                ha="right", va="center", fontsize=7)
+
+    ax.set_yticks([]); ax.set_xlim(x_min, x_max); fig.tight_layout()
+    st.session_state.raw_ridge_png = fig_to_png(fig)
+    plt.close(fig)
+
 def _make_aligned_zip() -> bytes:
+    """Build a ZIP with *everything* related to the aligned data."""
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
-        # aligned counts
+
+        # 1️⃣  aligned counts (one CSV per sample)
         for stem, arr in st.session_state.aligned_counts.items():
-            bio = io.BytesIO(); np.savetxt(bio, arr, delimiter=",")
+            bio = io.BytesIO()
+            np.savetxt(bio, arr, delimiter=",")
             z.writestr(f"{stem}_aligned.csv", bio.getvalue())
-        # ridge & per-sample aligned plots
+
+        # 2️⃣  aligned figures (per-sample + ridge)
         for fn, png in st.session_state.aligned_fig_pngs.items():
             z.writestr(fn, png)
         if st.session_state.aligned_ridge_png:
-            z.writestr("aligned_ridge.png",
-                       st.session_state.aligned_ridge_png)
+            z.writestr("aligned_ridge.png", st.session_state.aligned_ridge_png)
+
+        # ───────────── 3️⃣  **NEW** overall summary ─────────────
+        if st.session_state.aligned_results:                 # make sure it exists
+            import pandas as pd                              # local import is fine
+            rows = [
+                {
+                    "file":    stem,
+                    "peaks":   info["peaks"],
+                    "valleys": info["valleys"],
+                }
+                for stem, info in st.session_state.aligned_results.items()
+            ]
+            df_sum = pd.DataFrame(rows)
+            z.writestr("aligned_summary.csv",
+                       df_sum.to_csv(index=False).encode())
+
     return out.getvalue()
 
 
@@ -139,6 +212,7 @@ def _manual_editor(stem: str):
             )
             if st.button(f"❌ Delete peak #{i+1}", key=f"{stem}_pk_del_{i}"):
                 pk_list.pop(i)
+                st.session_state.raw_ridge_png = None
                 st.rerun()
             else:
                 i += 1
@@ -189,7 +263,7 @@ def _manual_editor(stem: str):
     if st.button("✅ Apply changes", key=apply_key):
         st.session_state.results[stem]["peaks"]   = pk_list.copy()
         st.session_state.results[stem]["valleys"] = vl_list.copy()
-        st.session_state.dirty[stem] = True       # mark for slow re-run
+        _refresh_raw_ridge()                       # ← REBUILD HERE
         st.rerun()
 
 # ───────────────── helper: master results accordion ------------------------
@@ -253,7 +327,8 @@ def render_results(container):
             for bucket in ("results", "fig_pngs", "params", "dirty"):
                 st.session_state[bucket].pop(stem, None)
             for k in (f"{stem}__pk_list", f"{stem}__vl_list"):
-                st.session_state.pop(k, None)          # clear per‑dataset edits
+                st.session_state.pop(k, None)
+            _refresh_raw_ridge()                   # ← keep ridge in sync
             st.rerun()
 
 
@@ -490,6 +565,7 @@ if st.session_state.total_todo:
 # ───────────────────────────── incremental processing ───────────────────────
 # 1️⃣ User clicked RUN: prepare pending queue
 if run_clicked and not st.session_state.run_active:
+    st.session_state.raw_ridge_png = None
     csv_files = use_uploads + use_generated
     if not csv_files:
         st.error("No CSV files selected."); st.stop()
@@ -600,6 +676,9 @@ if st.session_state.run_active and st.session_state.pending:
         "xs": xs.tolist(),
         "ys": ys.tolist(),
     }
+    st.session_state.dirty[stem] = False
+
+    _refresh_raw_ridge()
 
     # plot
     pad = 0.05 * (xs.max() - xs.min())
@@ -639,17 +718,164 @@ if st.session_state.run_active and st.session_state.pending:
         st.rerun()
         st.stop()
 
+    # ── build a 'RAW' stacked ridge plot once we have ≥1 samples ─────────
+    if st.session_state.results and st.session_state.get("raw_ridge_png") is None:
+        from scipy.stats import gaussian_kde
+
+        # common x-grid across *all* raw counts
+        counts_all = list(st.session_state.results_raw.values())
+        x_min = float(min(np.nanmin(c) for c in counts_all))
+        x_max = float(max(np.nanmax(c) for c in counts_all))
+        x_grid = np.linspace(x_min, x_max, 4000)
+
+        # KDE for every sample
+        kdes = {}
+        for stem, arr in st.session_state.results_raw.items():
+            good = arr[~np.isnan(arr)]
+            if np.unique(good).size >= 2:
+                kdes[stem] = gaussian_kde(good, bw_method="scott")(x_grid)
+            else:                         # fallback single-value / empty
+                μ  = good.mean() if good.size else 0.5 * (x_min + x_max)
+                σ  = 0.05 * (x_max - x_min or 1.0)
+                kdes[stem] = np.exp(-(x_grid - μ) ** 2 / (2 * σ ** 2))
+
+        y_max = max(vals.max() for vals in kdes.values())
+        gap   = 1.2 * y_max
+
+        fig, ax = plt.subplots(
+            figsize=(6, 0.8 * len(kdes)),
+            dpi=150, sharex=True,
+        )
+
+        # ---------- draw every sample ----------
+        for i, stem in enumerate(st.session_state.results):
+            ys     = kdes[stem]
+            offset = i * gap
+
+            # density curve + fill
+            ax.plot(x_grid, ys + offset, color="black", lw=1)
+            ax.fill_between(x_grid, offset, ys + offset,
+                            color="#FFA50088", lw=0)
+
+            # PEAK / VALLEY markers  ↓↓↓  NEW
+            info = st.session_state.results[stem]
+            for p in info["peaks"]:
+                ax.vlines(p, offset, offset + ys.max(),
+                        color="black", lw=0.8)
+            for v in info["valleys"]:
+                ax.vlines(v, offset, offset + ys.max(),
+                        color="grey", lw=0.8, linestyles=":")
+
+            ax.text(x_min, offset + 0.5 * y_max, stem,
+                    ha="right", va="center", fontsize=7)
+
+        ax.set_yticks([]); ax.set_xlim(x_min, x_max)
+        fig.tight_layout()
+
+        st.session_state.raw_ridge_png = fig_to_png(fig)
+        plt.close(fig)
+
+
 # ────────────────────────── static results & download ────────────────────────
 results_container = st.container()
 render_results(results_container)
 
-# aligned_container = st.container()
-# render_aligned(aligned_container)
+# ──────────────  SUMMARY  +  RIDGE-PLOT TABS  ──────────────
+if st.session_state.results:
+    # summary table
+    df = pd.DataFrame(
+        [{
+            "file":     k,
+            "peaks":    v["peaks"],
+            "valleys":  v["valleys"],
+            "quality":  round(v.get("quality", np.nan), 4),
+        } for k, v in st.session_state.results.items()]
+    )
 
-if st.session_state.aligned_ridge_png:
-    st.subheader("📈 Stacked ridge-plot (aligned)")
-    st.image(st.session_state.aligned_ridge_png,
-             use_container_width=True)
+    # ZIP with per-sample PNGs + summary CSV  (same as before)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("summary.csv", df.to_csv(index=False).encode())
+        for fn, png in st.session_state.fig_pngs.items():
+            z.writestr(fn, png)
+    buf.seek(0)                             #  ← be sure to rewind!
+
+    # quality table for the extra download button
+    qual_df = df[["file", "quality"]]
+
+else:
+    df = pd.DataFrame()                     # empty placeholders
+    buf = io.BytesIO()
+    qual_df = pd.DataFrame()
+
+tab_sum, tab_raw, tab_aln, tab_cmp = st.tabs(
+    ["Summary ∣ downloads",
+     "Ridge (raw)", "Ridge (aligned)", "Comparison"]
+)
+
+# TAB 1  – summary table & the three download buttons
+with tab_sum:
+    if not df.empty:
+        st.dataframe(df, use_container_width=True)
+
+        # main ZIP (plots + summary)
+        st.download_button("⬇️ Download ZIP",
+                   buf.getvalue(),
+                   "PeakValleyResults.zip",
+                   "application/zip",
+                   key="zip_dl_tab")
+
+        # the two extra download buttons you already kept:
+        st.download_button("⬇️ Download per-sample xs / ys",
+                   _make_curves_zip(),
+                   "SampleCurves.zip",
+                   mime="application/zip",
+                   key="curves_dl_tab")
+
+        st.download_button("⬇️ Download quality table",
+                   qual_df.to_csv(index=False).encode(),
+                   "StainQuality.csv",
+                   "text/csv",
+                   key="qual_dl_tab")
+    else:
+        st.info("Run the detector first to see summary & downloads.")
+        # the two extra download buttons stay where they are ↓
+        # (nothing else to change here)
+
+# TAB 2  – raw ridge
+with tab_raw:
+    if st.session_state.get("raw_ridge_png") is None:
+        _refresh_raw_ridge()
+    if st.session_state.get("raw_ridge_png"):
+        st.image(st.session_state.raw_ridge_png,
+                 use_container_width=True,
+                 caption="Stacked densities – *before* alignment")
+
+# TAB 3  – aligned ridge
+with tab_aln:
+    if st.session_state.get("aligned_ridge_png"):
+        st.image(st.session_state.aligned_ridge_png,
+                 use_container_width=True,
+                 caption="Stacked densities – *after* alignment")
+        st.download_button("⬇️ Download Aligned Data",
+                   _make_aligned_zip(),
+                   "alignedData.zip",
+                   mime="application/zip",
+                   key="alignedDownload")
+    else:
+        st.markdown("You need to select 'Align landmarks * normalize counts' in order for graphs to generate.")
+
+# TAB 4  – side-by-side comparison
+with tab_cmp:
+    col1, col2 = st.columns(2, gap="small")
+    if st.session_state.get("raw_ridge_png"):
+        col1.image(st.session_state.raw_ridge_png,
+                   use_container_width=True,
+                   caption="Raw")
+    if st.session_state.get("aligned_ridge_png"):
+        col2.image(st.session_state.aligned_ridge_png,
+                   use_container_width=True,
+                   caption="Aligned")
 
 if st.session_state.results:
 
@@ -660,8 +886,6 @@ if st.session_state.results:
         "quality": round(v.get("quality", np.nan), 4)}    #  ← NEW col
         for k, v in st.session_state.results.items()]
     )
-    st.subheader("📋 Summary")
-    st.dataframe(df, use_container_width=True)
 
     with io.BytesIO() as buf:
         with zipfile.ZipFile(buf, "w") as z:
@@ -676,7 +900,7 @@ if st.session_state.results:
     st.markdown("---")
     align_col, dl_col = st.columns([2, 1])
     with align_col:
-        do_align = st.button("🔧 Align landmarks & normalise counts",
+        do_align = st.button("🔧 Align landmarks & normalize counts",
                              type="primary")
     if do_align:
         with st.spinner("⌛ Running landmark alignment …"):
@@ -827,38 +1051,5 @@ if st.session_state.results:
             st.session_state.aligned_ridge_png = fig_to_png(fig)
             plt.close(fig)
 
-            # aesthetics
-            ax.set_yticks([]); ax.set_xlim(all_xmin, all_xmax)
-
-            fig.tight_layout()
-            st.session_state.aligned_ridge_png = fig_to_png(fig)
-            plt.close(fig)
-
-            ax.set_yticks([]); ax.set_xlim(all_xmin, all_xmax)
-            fig.tight_layout()
-            st.session_state.aligned_ridge_png = fig_to_png(fig)
-            plt.close(fig)
-
             st.success("✓ Landmarks aligned – scroll down for the stacked view or download the ZIP!")
             st.rerun()
-
-    # -------- download aligned results ----------------------------------
-    ac = st.session_state.get("aligned_counts")
-    if ac:
-        with dl_col:
-            st.download_button(
-                "⬇️ Download aligned ZIP",
-                _make_aligned_zip(),
-                "AlignedDistributions.zip",
-                mime="application/zip"
-            )
-            st.download_button(
-                "⬇️ Download per-sample xs / ys",
-                _make_curves_zip(),
-                "SampleCurves.zip",
-                mime="application/zip"
-            )
-            qual_df = df[["file", "quality"]]
-            st.download_button("⬇️ Download quality table",
-                            qual_df.to_csv(index=False).encode(),
-                            "StainQuality.csv", "text/csv")

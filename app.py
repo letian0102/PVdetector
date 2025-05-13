@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 import streamlit as st
 from openai import OpenAI
 
+from peak_valley.quality import stain_quality
+
 from peak_valley import (
     arcsinh_transform, read_counts,
     kde_peaks_valleys, quick_peak_estimate,
@@ -47,61 +49,32 @@ for key, default in {
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ───────────────────────────── helpers for ZIPs ─────────────────────────────
+# ── helper #1 : aligned ZIP  (plots + aligned counts) ───────────────
 def _make_aligned_zip() -> bytes:
-    """
-    PNGs + aligned counts + landmark table.
-    """
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
-        # aligned counts (one CSV / sample)
+        # aligned counts
         for stem, arr in st.session_state.aligned_counts.items():
-            buf = io.BytesIO(); np.savetxt(buf, arr, delimiter=",")
-            z.writestr(f"{stem}_aligned.csv", buf.getvalue())
-
-        # plots --------------------------------------------------------------
+            bio = io.BytesIO(); np.savetxt(bio, arr, delimiter=",")
+            z.writestr(f"{stem}_aligned.csv", bio.getvalue())
+        # ridge & per-sample aligned plots
         for fn, png in st.session_state.aligned_fig_pngs.items():
             z.writestr(fn, png)
         if st.session_state.aligned_ridge_png:
             z.writestr("aligned_ridge.png",
                        st.session_state.aligned_ridge_png)
-
-        # landmarks table ----------------------------------------------------
-        lm_dict = {stem: row
-                   for stem, row
-                   in zip(st.session_state.results,
-                          st.session_state.aligned_landmarks)}
-        for stem in st.session_state.results:
-            lm_dict.setdefault(stem, [np.nan, np.nan, np.nan])
-
-        col_names = _cols_for_align_mode(st.session_state.align_mode)
-        # pad rows that are shorter than header length
-        for k, row in lm_dict.items():
-            if len(row) < len(col_names):
-                lm_dict[k] = list(row) + [np.nan]*(len(col_names)-len(row))
-
-        lm_df = (pd.DataFrame
-                 .from_dict(lm_dict, orient="index", columns=col_names)
-                 .sort_index())
-        csv_buf = io.StringIO(); lm_df.to_csv(csv_buf)
-        z.writestr("aligned_landmarks.csv", csv_buf.getvalue())
     return out.getvalue()
 
 
+# ── helper #2 : curves ZIP  (xs/ys for every sample) ────────────────
 def _make_curves_zip() -> bytes:
-    """
-    One *_xs.csv* (grid) and one *_ys.csv* (density) per sample.
-    """
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
-        for stem, info in st.session_state.aligned_results.items():
-            x_buf = io.BytesIO()
-            np.savetxt(x_buf, np.asarray(info["xs"]), delimiter=",")
-            z.writestr(f"{stem}_xs.csv", x_buf.getvalue())
-
-            y_buf = io.BytesIO()
-            np.savetxt(y_buf, np.asarray(info["ys"]), delimiter=",")
-            z.writestr(f"{stem}_ys.csv", y_buf.getvalue())
+        for stem, info in st.session_state.results.items():
+            bio_xs = io.BytesIO(); np.savetxt(bio_xs, info["xs"], delimiter=",")
+            bio_ys = io.BytesIO(); np.savetxt(bio_ys, info["ys"], delimiter=",")
+            z.writestr(f"{stem}_xs.csv", bio_xs.getvalue())
+            z.writestr(f"{stem}_ys.csv", bio_ys.getvalue())
     return out.getvalue()
 
 
@@ -257,9 +230,12 @@ def render_results(container):
             tab_plot, tab_params, tab_manual = st.tabs(["Plot", "Parameters", "Manual"])
             with tab_plot:
                 st.image(st.session_state.fig_pngs.get(f"{stem}.png", b""),
-                         use_container_width=True)
+                        use_container_width=True)
                 st.write(f"**Peaks:** {info['peaks']}")
                 st.write(f"**Valleys:** {info['valleys']}")
+                q = info.get("quality", np.nan)
+                if np.isfinite(q):
+                    st.write(f"**Stain-quality score:** {q:.4f}")
             with tab_params:
                 bw_new = st.text_input("Bandwidth", bw0, key=f"{stem}_bw")
                 pr_new = st.text_input("Prominence", pr0, key=f"{stem}_pr")
@@ -606,12 +582,24 @@ if st.session_state.run_active and st.session_state.pending:
         curvature_thresh = curv if curv > 0 else None,
         turning_peak     = tp
     )
+
     if len(peaks) == 1 and not valleys:
         p_idx = np.searchsorted(xs, peaks[0])
         y_pk  = ys[p_idx]
         drop  = np.where(ys[p_idx:] < (val_drop / 100) * y_pk)[0]
         if drop.size:
             valleys = [float(xs[p_idx + drop[0]])]
+
+    # quality
+    qual = stain_quality(cnts, peaks, valleys)
+    
+    st.session_state.results[stem] = {
+        "peaks": peaks,
+        "valleys": valleys,
+        "quality": qual,                             # ★ store it
+        "xs": xs.tolist(),
+        "ys": ys.tolist(),
+    }
 
     # plot
     pad = 0.05 * (xs.max() - xs.min())
@@ -627,11 +615,6 @@ if st.session_state.run_active and st.session_state.pending:
     st.session_state.fig_pngs[f"{stem}.png"] = fig_to_png(fig)
     plt.close(fig)
 
-    # st.session_state.results[stem] = {"peaks": peaks, "valleys": valleys}
-    st.session_state.results[stem] = {
-        "peaks": peaks, "valleys": valleys,
-        "xs": xs.tolist(), "ys": ys.tolist(),
-    }
     st.session_state[f"{stem}__pk_list"] = peaks.copy()
     st.session_state[f"{stem}__vl_list"] = valleys.copy()
     st.session_state.params [stem] = {
@@ -669,12 +652,14 @@ if st.session_state.aligned_ridge_png:
              use_container_width=True)
 
 if st.session_state.results:
-    df = pd.DataFrame([
-        {"file": k,
-         "peaks":   v["peaks"],
-         "valleys": v["valleys"]}
-        for k, v in st.session_state.results.items()
-    ])
+
+    df = pd.DataFrame(
+        [{"file": k,
+        "peaks": v["peaks"],
+        "valleys": v["valleys"],
+        "quality": round(v.get("quality", np.nan), 4)}    #  ← NEW col
+        for k, v in st.session_state.results.items()]
+    )
     st.subheader("📋 Summary")
     st.dataframe(df, use_container_width=True)
 
@@ -809,25 +794,45 @@ if st.session_state.results:
                     "ys": ys.tolist(),
                 }
 
-            # —— 4. stacked ridge-plot -------------------------------------------
+            # --- 4. stacked ridge-plot (plain) -----------------------------------
             gap = 1.2 * all_ymax
-            fig, ax = plt.subplots(figsize=(6, 0.8*len(kdes)), dpi=150, sharex=True)
-            for i, stem in enumerate(reversed(list(st.session_state.aligned_results))):
+            fig, ax = plt.subplots(
+                figsize=(6, 0.8 * len(st.session_state.results)),
+                dpi=150,
+                sharex=True,
+            )
+
+            for i, stem in enumerate(st.session_state.results):
                 ys      = kdes[stem]
                 offset  = i * gap
+
+                # KDE curve + fill
                 ax.plot(x_grid, ys + offset, color="black", lw=1)
-                ax.fill_between(x_grid, offset, ys + offset, color="#FFA50088", lw=0)
+                ax.fill_between(x_grid, offset, ys + offset,
+                                color="#FFA50088", lw=0)
 
                 info = st.session_state.aligned_results[stem]
                 for p in info["peaks"]:
-                    ax.vlines(p, offset, offset + ys.max(),
-                                color="black", lw=0.8)
+                    ax.vlines(p, offset, offset + ys.max(), color="black", lw=0.8)
                 for v in info["valleys"]:
-                    ax.vlines(v, offset, offset + ys.max(),
-                                color="grey",  lw=0.8, linestyles=":")
+                    ax.vlines(v, offset, offset + ys.max(), color="grey",
+                            lw=0.8, linestyles=":")
 
-                ax.text(all_xmin, offset + 0.5*all_ymax, stem,
+                ax.text(all_xmin, offset + 0.5 * all_ymax, stem,
                         ha="right", va="center", fontsize=7)
+
+            ax.set_yticks([]); ax.set_xlim(all_xmin, all_xmax)
+            fig.tight_layout()
+
+            st.session_state.aligned_ridge_png = fig_to_png(fig)
+            plt.close(fig)
+
+            # aesthetics
+            ax.set_yticks([]); ax.set_xlim(all_xmin, all_xmax)
+
+            fig.tight_layout()
+            st.session_state.aligned_ridge_png = fig_to_png(fig)
+            plt.close(fig)
 
             ax.set_yticks([]); ax.set_xlim(all_xmin, all_xmax)
             fig.tight_layout()
@@ -853,3 +858,7 @@ if st.session_state.results:
                 "SampleCurves.zip",
                 mime="application/zip"
             )
+            qual_df = df[["file", "quality"]]
+            st.download_button("⬇️ Download quality table",
+                            qual_df.to_csv(index=False).encode(),
+                            "StainQuality.csv", "text/csv")

@@ -7,11 +7,14 @@ from PIL import Image
 __all__ = ["fig_to_png", "thumb64"]
 
 
-def fig_to_png(fig) -> bytes:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", pad_inches=0.15)
-    buf.seek(0)
-    return buf.getvalue()
+def fig_to_png(fig):
+    try:
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png")
+        return buf.getvalue()
+    except Exception as e:
+        print(f"Failed to generate PNG: {e}")
+        return None
 
 
 def thumb64(png_bytes: bytes) -> str:

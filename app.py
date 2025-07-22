@@ -25,6 +25,9 @@ from peak_valley.alignment import align_distributions, fill_landmark_matrix
 # ────────────────────────── Streamlit page & state ──────────────────────────
 st.set_page_config("Peak & Valley Detector", "🔬", layout="wide")
 st.title("🔬 Peak & Valley Detector — CSV *or* full dataset")
+st.warning(
+    "⚠️ **Heads-up:** if you refresh or close this page, all of your uploaded data and results will be lost."
+)
 
 st.session_state.setdefault("active_sample", None)
 st.session_state.setdefault("active_subtab", {})   # stem → "plot" / "params" / "manual"
@@ -303,15 +306,45 @@ def render_results(container):
         with rowL.expander(stem, expanded=False):
             tab_plot, tab_params, tab_manual = st.tabs(["Plot", "Parameters", "Manual"])
             with tab_plot:
-                st.image(st.session_state.fig_pngs.get(f"{stem}.png", b""),
-                        use_container_width=True)
+                img_data = st.session_state.fig_pngs.get(f"{stem}.png")
+                if img_data:
+                    st.image(img_data, use_container_width=True)
+                else:
+                    st.warning(f"No image available for {stem}.")
                 st.write(f"**Peaks:** {info['peaks']}")
                 st.write(f"**Valleys:** {info['valleys']}")
                 q = info.get("quality", np.nan)
                 if np.isfinite(q):
                     st.write(f"**Stain-quality score:** {q:.4f}")
             with tab_params:
-                bw_new = st.text_input("Bandwidth", bw0, key=f"{stem}_bw")
+                # ——— BANDWIDTH: PRESET VS SLIDER ———
+                bw0 = st.session_state.params.get(stem, {}).get("bw", "scott")
+                # decide initial mode based on type of bw0
+                init_mode = "Numeric" if isinstance(bw0, (int, float)) or bw0.replace(".", "", 1).isdigit() else "Preset"
+                bw_input_type = st.selectbox(
+                    "Bandwidth input type",
+                    ["Preset", "Numeric"],
+                    index=0 if init_mode=="Preset" else 1,
+                    key=f"{stem}_bw_type"
+                )
+                if bw_input_type == "Preset":
+                    bw_opt = st.selectbox(
+                        "Preset rule",
+                        ["scott", "silverman", "0.5", "0.8", "1.0"],
+                        index=(["scott","silverman","0.5","0.8","1.0"].index(str(bw0))
+                            if str(bw0) in ["scott","silverman","0.5","0.8","1.0"] else 0),
+                        key=f"{stem}_bw_preset"
+                    )
+                    bw_new = bw_opt
+                else:
+                    bw_new = st.slider(
+                        "Custom bandwidth",
+                        min_value=0.01,
+                        max_value=5.0,
+                        value=float(bw0) if isinstance(bw0, (int, float)) or bw0.replace(".", "", 1).isdigit() else 1.0,
+                        step=0.01,
+                        key=f"{stem}_bw_slider"
+                    )
                 pr_new = st.text_input("Prominence", pr0, key=f"{stem}_pr")
                 k_new = st.number_input("# peaks", 1, 6, k0, key=f"{stem}_k")
                 if (bw_new != bw0) or (pr_new != pr0) or (k_new != k0):
@@ -444,8 +477,8 @@ with st.sidebar:
     # ───────────── Detection options ──────────────
     st.markdown("---\n### Detection")
     auto = st.selectbox("Number of peaks",
-                        ["Automatic", 1, 2, 3, 4, 5, 6])
-    n_fixed = None if auto == "Automatic" else int(auto)
+                        ["GPT Automatic", 1, 2, 3, 4, 5, 6])
+    n_fixed = None if auto == "GPT Automatic" else int(auto)
     cap_min = n_fixed if n_fixed else 1
     max_peaks = st.number_input("Maximum peaks (Automatic cap)",
                                 cap_min, 6, max(2, cap_min), step=1,
@@ -567,6 +600,27 @@ if st.session_state.total_todo:
 if run_clicked and not st.session_state.run_active:
     st.session_state.raw_ridge_png = None
     csv_files = use_uploads + use_generated
+
+    # ─── AUTO-GENERATE COUNTS WHEN IN WHOLE-DATASET MODE ───
+    if mode == "Whole dataset" and expr_df is not None and meta_df is not None:
+        # if the user has selected markers & samples but hasn't clicked the manual “Generate counts” button,
+        # build their CSVs automatically:
+        if sel_m and sel_s and not st.session_state.generated_csvs:
+            for m in sel_m:
+                for s in sel_s:
+                    stem = f"{s}_{m}"
+                    counts = arcsinh_transform(
+                        expr_df.loc[meta_df["sample"].eq(s), m]
+                    )
+                    bio = io.BytesIO()
+                    counts.to_csv(bio, index=False, header=False)
+                    bio.seek(0); bio.name = f"{stem}_raw_counts.csv"
+                    st.session_state.generated_csvs.append((stem, bio))
+        # treat all those auto-generated files as if they’d been “uploaded”
+        use_uploads = []
+        use_generated = [bio for _, bio in st.session_state.generated_csvs]
+        csv_files = use_uploads + use_generated
+
     if not csv_files:
         st.error("No CSV files selected."); st.stop()
 
@@ -818,13 +872,6 @@ with tab_sum:
     if not df.empty:
         st.dataframe(df, use_container_width=True)
 
-        # main ZIP (plots + summary)
-        st.download_button("⬇️ Download ZIP",
-                   buf.getvalue(),
-                   "PeakValleyResults.zip",
-                   "application/zip",
-                   key="zip_dl_tab")
-
         # the two extra download buttons you already kept:
         st.download_button("⬇️ Download per-sample xs / ys",
                    _make_curves_zip(),
@@ -842,28 +889,28 @@ with tab_sum:
         # the two extra download buttons stay where they are ↓
         # (nothing else to change here)
 
-# TAB 2  – raw ridge
-with tab_raw:
-    if st.session_state.get("raw_ridge_png") is None:
-        _refresh_raw_ridge()
-    if st.session_state.get("raw_ridge_png"):
-        st.image(st.session_state.raw_ridge_png,
-                 use_container_width=True,
-                 caption="Stacked densities – *before* alignment")
+# # TAB 2  – raw ridge
+# with tab_raw:
+#     if st.session_state.get("raw_ridge_png") is None:
+#         _refresh_raw_ridge()
+#     if st.session_state.get("raw_ridge_png"):
+#         st.image(st.session_state.raw_ridge_png,
+#                  use_container_width=True,
+#                  caption="Stacked densities – *before* alignment")
 
-# TAB 3  – aligned ridge
-with tab_aln:
-    if st.session_state.get("aligned_ridge_png"):
-        st.image(st.session_state.aligned_ridge_png,
-                 use_container_width=True,
-                 caption="Stacked densities – *after* alignment")
-        st.download_button("⬇️ Download Aligned Data",
-                   _make_aligned_zip(),
-                   "alignedData.zip",
-                   mime="application/zip",
-                   key="alignedDownload")
-    else:
-        st.markdown("You need to select 'Align landmarks * normalize counts' in order for graphs to generate.")
+# # TAB 3  – aligned ridge
+# with tab_aln:
+#     if st.session_state.get("aligned_ridge_png"):
+#         st.image(st.session_state.aligned_ridge_png,
+#                  use_container_width=True,
+#                  caption="Stacked densities – *after* alignment")
+#         st.download_button("⬇️ Download Aligned Data",
+#                    _make_aligned_zip(),
+#                    "alignedData.zip",
+#                    mime="application/zip",
+#                    key="alignedDownload")
+#     else:
+#         st.markdown("You need to select 'Align landmarks * normalize counts' in order for graphs to generate.")
 
 # TAB 4  – side-by-side comparison
 with tab_cmp:

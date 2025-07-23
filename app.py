@@ -32,6 +32,8 @@ st.warning(
 st.session_state.setdefault("active_sample", None)
 st.session_state.setdefault("active_subtab", {})   # stem → "plot" / "params" / "manual"
 
+st.session_state.setdefault("paused", False)
+
 for key, default in {
     "results":     {},         # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
     "results_raw": {},         # stem → raw counts (np.ndarray)
@@ -566,8 +568,8 @@ with st.sidebar:
 
 
 # ───────────────── main buttons & global progress bar ────────────────────────
-run, clear_all = st.columns(2)
-if clear_all.button("🗑 Clear results"):
+run_col, clear_col, pause_col = st.columns(3)
+if clear_col.button("🗑 Clear results"):
     # buckets that are always dict-like
     for bucket in ("results", "fig_pngs", "params", "dirty",
                    "aligned_results", "aligned_fig_pngs",
@@ -585,7 +587,24 @@ if clear_all.button("🗑 Clear results"):
     st.session_state.run_active = False
     st.rerun()
 
-run_clicked = run.button("🚀 Run detector")
+run_clicked = run_col.button("🚀 Run detector")
+
+# pause button (if run is active)
+pause_label = "⏸ Pause" if st.session_state.run_active else "▶ Resume"
+pause_disabled = not bool(st.session_state.pending)
+pause_clicked = pause_col.button(pause_label, disabled=pause_disabled)
+
+if pause_clicked:
+    if st.session_state.run_active:
+        # Pause mid-batch
+        st.session_state.run_active = False
+        st.session_state.paused     = True
+        st.rerun()
+    elif st.session_state.paused:
+        # Resume where you left off
+        st.session_state.run_active = True
+        st.session_state.paused     = False
+        st.rerun()
 
 # progress bar placeholder (top-level, reused)
 prog_placeholder = st.empty()
@@ -862,9 +881,10 @@ else:
     buf = io.BytesIO()
     qual_df = pd.DataFrame()
 
-tab_sum, tab_raw, tab_aln, tab_cmp = st.tabs(
+tab_sum, tab_quality, tab_cmp = st.tabs(
     ["Summary ∣ downloads",
-     "Ridge (raw)", "Ridge (aligned)", "Comparison"]
+    "Quality",
+    "Comparison"]
 )
 
 # TAB 1  – summary table & the three download buttons
@@ -888,6 +908,23 @@ with tab_sum:
         st.info("Run the detector first to see summary & downloads.")
         # the two extra download buttons stay where they are ↓
         # (nothing else to change here)
+
+# TAB 2 – quality‐score bar plot
+with tab_quality:
+    if not df.empty:
+        # build DataFrame of scores
+        qual_df = df[["file", "quality"]]
+        # plot
+        fig, ax = plt.subplots()
+        ax.bar(qual_df["file"], qual_df["quality"])
+        ax.set_xticks(range(len(qual_df)))
+        ax.set_xticklabels(qual_df["file"], rotation=45, ha="right")
+        ax.set_ylabel("Stain-quality score")
+        ax.set_title("Quality scores across samples")
+        fig.tight_layout()
+        st.pyplot(fig)
+    else:
+        st.info("Run the detector first to see quality scores.")
 
 # # TAB 2  – raw ridge
 # with tab_raw:

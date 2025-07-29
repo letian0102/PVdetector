@@ -106,7 +106,7 @@ def ask_gpt_peak_count(
     # ---------- GPT call (unchanged) ----------
     marker_txt = f"for the protein marker **{marker_name}** " if marker_name else ""
     prompt = (
-        f"How many density peaks (modes) should be visible in the following raw protein-count list? Remember this is  {marker_txt} (Give ONE integer ≤ {max_peaks}.)\n\n"
+        f"How many density peaks (modes) should be visible in the following raw protein-count list? Remember this is  {marker_txt} (Give a integer ≤ {max_peaks}. Normally it is not 1, but can be depending on the protein marker.)\n\n"
         f"{counts_full}"
     )
     try:
@@ -118,4 +118,5 @@ def ask_gpt_peak_count(
         n = int(re.findall(r"\d+", rsp.choices[0].message.content)[0])
         return min(max_peaks, n) if n > 0 else None
     except (OpenAIError, ValueError, IndexError):
-        return None
+        print("GPT peak count query failed")
+        return max_peaks

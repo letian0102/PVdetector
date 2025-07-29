@@ -101,11 +101,7 @@ def ask_gpt_peak_count(
     counts_full: np.ndarray | None = None,
     marker_name: str | None = None,
 ) -> int | None:
-    """As before but with a memoization layer."""
-    if counts_full is not None:
-        sig = shape_signature(counts_full)
-        if sig in _cache:                    # seen → reuse
-            return min(_cache[sig], max_peaks)
+    """Query GPT for the number of visible density peaks."""
 
     # ---------- GPT call (unchanged) ----------
     marker_txt = f"for the protein marker **{marker_name}** " if marker_name else ""
@@ -120,8 +116,6 @@ def ask_gpt_peak_count(
             messages=[{"role": "user", "content": prompt}],
         )
         n = int(re.findall(r"\d+", rsp.choices[0].message.content)[0])
-        if counts_full is not None:
-            _cache[sig] = n                  # store for future
         return min(max_peaks, n) if n > 0 else None
     except (OpenAIError, ValueError, IndexError):
         return None

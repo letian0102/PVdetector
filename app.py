@@ -698,19 +698,11 @@ if st.session_state.run_active and st.session_state.pending:
         )
 
     # peak count
-    if k_over is not None:
+    if k_over is not None:                  # manual override from per-file form
         n_use = int(k_over)
-    elif n_fixed is None:
-        n_est, confident = quick_peak_estimate(
-            cnts, prom_use, bw_use, min_w or None, grid_sz
-        )
-        n_use = n_est if confident else None
-        if n_use is not None:
-            n_use = min(n_use, max_peaks)
-    else:
+    elif n_fixed is not None:               # fixed via sidebar selector
         n_use = n_fixed
-
-    if n_use is None and n_fixed is None:
+    else:                                   # GPT automatic
         def _infer_marker(stem_: str) -> str | None:
             if stem_.endswith("_raw_counts"):
                 stem_ = stem_[:-11]
@@ -721,8 +713,16 @@ if st.session_state.run_active and st.session_state.pending:
             gpt_model, max_peaks, counts_full=cnts,
             marker_name=_infer_marker(stem)
         )
+        if n_use is None:                   # fallback to heuristic
+            n_est, confident = quick_peak_estimate(
+                cnts, prom_use, bw_use, min_w or None, grid_sz
+            )
+            n_use = n_est if confident else None
+
     if n_use is None:
         n_use = max_peaks
+    else:
+        n_use = min(n_use, max_peaks)
 
     peaks, valleys, xs, ys = kde_peaks_valleys(
         cnts, n_use, prom_use, bw_use, min_w or None, grid_sz,

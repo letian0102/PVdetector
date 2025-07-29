@@ -55,6 +55,37 @@ def _merge_close_peaks(xs: np.ndarray,
 
     return np.asarray(sorted(keep), dtype=int)
 
+def _mostly_small_discrete(x: np.ndarray, threshold: float = 0.9) -> bool:
+    """Heuristic to catch almost-discrete samples near zero (0..3).
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Input data (1‑D array).
+    threshold : float, optional
+        Fraction of points within ``0‥3`` required to trigger.
+
+    Returns
+    -------
+    bool
+        ``True`` if the majority of values are integers 0–3.
+    """
+    x = np.asarray(x, float)
+    if x.size == 0:
+        return False
+
+    good = x[np.isfinite(x)]
+    if good.size == 0:
+        return False
+
+    mask = (good >= 0) & (good <= 3)
+    if mask.sum() / good.size < threshold:
+        return False
+
+    uniq = np.unique(np.round(good[mask]))
+    return uniq.size <= 4
+
+
 def _valley_between(xs: np.ndarray,
                     ys: np.ndarray,
                     p_left: int,
@@ -150,6 +181,8 @@ def kde_peaks_valleys(
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
     kde = gaussian_kde(x, bw_method=bw)
+    if _mostly_small_discrete(x):
+        kde.set_bandwidth(kde.factor * 4.0)
     h   = kde.factor * x.std(ddof=1)
     xs  = np.linspace(x.min() - h, x.max() + h,
                       min(grid_size, max(4000, 4 * x.size)))

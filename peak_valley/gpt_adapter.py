@@ -106,7 +106,7 @@ def ask_gpt_peak_count(
     # ---------- GPT call (unchanged) ----------
     marker_txt = f"for the protein marker **{marker_name}** " if marker_name else ""
     prompt = (
-        f"How many density peaks (modes) should be visible in the following raw protein-count list? Remember this is  {marker_txt} (Give a integer ≤ {max_peaks}. Normally it is not 1, but can be depending on the protein marker.)\n\n"
+        f"How many density peaks (modes) should be visible in the following raw protein-count list? Remember this is  {marker_txt} (Give a integer ≤ {max_peaks}.)\n\n"
         f"{counts_full}"
     )
     try:

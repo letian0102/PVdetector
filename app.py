@@ -69,7 +69,8 @@ def _refresh_raw_ridge() -> None:
 
     x_min = float(min(np.nanmin(c) for c in counts_all))
     x_max = float(max(np.nanmax(c) for c in counts_all))
-    x_grid = np.linspace(x_min, x_max, 4000)
+    pad   = 0.05 * (x_max - x_min)
+    x_grid = np.linspace(x_min - pad, x_max + pad, 4000)
 
     # densities for every sample
     kdes = {}
@@ -105,7 +106,7 @@ def _refresh_raw_ridge() -> None:
         ax.text(x_min, offset + 0.5 * y_max, stem,
                 ha="right", va="center", fontsize=7)
 
-    ax.set_yticks([]); ax.set_xlim(x_min, x_max); fig.tight_layout()
+    ax.set_yticks([]); ax.set_xlim(x_min - pad, x_max + pad); fig.tight_layout()
     st.session_state.raw_ridge_png = fig_to_png(fig)
     plt.close(fig)
 
@@ -176,12 +177,12 @@ def _plot_png_fixed(stem, xs, ys, peaks, valleys,
 def _plot_png(stem: str, xs: np.ndarray, ys: np.ndarray,
               peaks: list[float], valleys: list[float]) -> bytes:
     """Return PNG bytes of the KDE plot with current peak/valley markers."""
-    data_min = float(np.min([xs.min()] + peaks + valleys)) if (peaks or valleys) else float(xs.min())
-    data_max = float(np.max([xs.max()] + peaks + valleys)) if (peaks or valleys) else float(xs.max())
-    pad = 0.05 * (data_max - data_min)
+    x_min = float(xs.min())
+    x_max = float(xs.max())
+    pad   = 0.05 * (x_max - x_min)
     fig, ax = plt.subplots(figsize=(5, 2.5), dpi=150)
     ax.plot(xs, ys, color="skyblue"); ax.fill_between(xs, 0, ys, color="#87CEEB88")
-    ax.set_xlim(data_min - pad, data_max + pad)
+    ax.set_xlim(x_min - pad, x_max + pad)
     for p in peaks:   ax.axvline(p, color="red",   ls="--", lw=1)
     for v in valleys: ax.axvline(v, color="green", ls=":",  lw=1)
     ax.set_xlabel("Arcsinh counts"); ax.set_ylabel("Density")
@@ -759,13 +760,13 @@ if st.session_state.run_active and st.session_state.pending:
     _refresh_raw_ridge()
 
     # plot
-    data_min = float(np.min([xs.min()] + peaks + valleys)) if (peaks or valleys) else float(xs.min())
-    data_max = float(np.max([xs.max()] + peaks + valleys)) if (peaks or valleys) else float(xs.max())
-    pad = 0.05 * (data_max - data_min)
+    x_min = float(xs.min())
+    x_max = float(xs.max())
+    pad   = 0.05 * (x_max - x_min)
     fig, ax = plt.subplots(figsize=(5, 2.5), dpi=150)
     cL, cF = ("skyblue", "#87CEEB88")
     ax.plot(xs, ys, color=cL); ax.fill_between(xs, 0, ys, color=cF)
-    ax.set_xlim(data_min - pad, data_max + pad)
+    ax.set_xlim(x_min - pad, x_max + pad)
     for p in peaks:   ax.axvline(p, color="red",   ls="--", lw=1)
     for v in valleys: ax.axvline(v, color="green", ls=":",  lw=1)
     ax.set_xlabel("Arcsinh counts"); ax.set_ylabel("Density")
@@ -852,6 +853,15 @@ with tab_sum:
                    "SampleCurves.zip",
                    mime="application/zip",
                    key="curves_dl_tab")
+        
+        if st.session_state.aligned_results:
+            st.download_button(
+                "⬇️ Download Aligned Data",
+                _make_aligned_zip(),
+                "alignedData.zip",
+                mime="application/zip",
+                key="aligned_dl_tab",
+            )
 
         st.download_button("⬇️ Download quality table",
                    qual_df.to_csv(index=False).encode(),
@@ -1064,7 +1074,7 @@ if st.session_state.results:
                     f"{stem} (aligned)", x_grid, ys,
                     pk_align[~np.isnan(pk_align)],
                     vl_align[~np.isnan(vl_align)],
-                    (all_xmin, all_xmax),
+                    (all_xmin - pad, all_xmax + pad),
                     all_ymax      # now guaranteed finite
                 )
 

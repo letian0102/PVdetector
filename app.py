@@ -176,10 +176,12 @@ def _plot_png_fixed(stem, xs, ys, peaks, valleys,
 def _plot_png(stem: str, xs: np.ndarray, ys: np.ndarray,
               peaks: list[float], valleys: list[float]) -> bytes:
     """Return PNG bytes of the KDE plot with current peak/valley markers."""
-    pad = 0.05 * (xs.max() - xs.min())
+    data_min = float(np.min([xs.min()] + peaks + valleys)) if (peaks or valleys) else float(xs.min())
+    data_max = float(np.max([xs.max()] + peaks + valleys)) if (peaks or valleys) else float(xs.max())
+    pad = 0.05 * (data_max - data_min)
     fig, ax = plt.subplots(figsize=(5, 2.5), dpi=150)
     ax.plot(xs, ys, color="skyblue"); ax.fill_between(xs, 0, ys, color="#87CEEB88")
-    ax.set_xlim(xs.min() - pad, xs.max() + pad)
+    ax.set_xlim(data_min - pad, data_max + pad)
     for p in peaks:   ax.axvline(p, color="red",   ls="--", lw=1)
     for v in valleys: ax.axvline(v, color="green", ls=":",  lw=1)
     ax.set_xlabel("Arcsinh counts"); ax.set_ylabel("Density")
@@ -192,7 +194,7 @@ def _plot_png(stem: str, xs: np.ndarray, ys: np.ndarray,
 def _manual_editor(stem: str):
     info  = st.session_state.results[stem]
     xs    = np.asarray(info["xs"]); ys = np.asarray(info["ys"])
-    xmin, xmax = float(xs.min()), float(xs.max())
+    xmin0, xmax0 = float(xs.min()), float(xs.max())
 
     pk_key, vl_key = f"{stem}__pk_list", f"{stem}__vl_list"
     if pk_key not in st.session_state:
@@ -202,6 +204,9 @@ def _manual_editor(stem: str):
 
     pk_list = st.session_state[pk_key]
     vl_list = st.session_state[vl_key]
+
+    xmin = float(min([xmin0] + pk_list + vl_list))
+    xmax = float(max([xmax0] + pk_list + vl_list))
 
     ### one single column for sliders + buttons
     colL, colR = st.columns([3, 5])
@@ -754,11 +759,13 @@ if st.session_state.run_active and st.session_state.pending:
     _refresh_raw_ridge()
 
     # plot
-    pad = 0.05 * (xs.max() - xs.min())
+    data_min = float(np.min([xs.min()] + peaks + valleys)) if (peaks or valleys) else float(xs.min())
+    data_max = float(np.max([xs.max()] + peaks + valleys)) if (peaks or valleys) else float(xs.max())
+    pad = 0.05 * (data_max - data_min)
     fig, ax = plt.subplots(figsize=(5, 2.5), dpi=150)
     cL, cF = ("skyblue", "#87CEEB88")
     ax.plot(xs, ys, color=cL); ax.fill_between(xs, 0, ys, color=cF)
-    ax.set_xlim(xs.min() - pad, xs.max() + pad)
+    ax.set_xlim(data_min - pad, data_max + pad)
     for p in peaks:   ax.axvline(p, color="red",   ls="--", lw=1)
     for v in valleys: ax.axvline(v, color="green", ls=":",  lw=1)
     ax.set_xlabel("Arcsinh counts"); ax.set_ylabel("Density")
@@ -793,60 +800,7 @@ if st.session_state.run_active and st.session_state.pending:
 
     # ── build a 'RAW' stacked ridge plot once we have ≥1 samples ─────────
     if st.session_state.results and st.session_state.get("raw_ridge_png") is None:
-        from scipy.stats import gaussian_kde
-
-        # common x-grid across *all* raw counts
-        counts_all = list(st.session_state.results_raw.values())
-        x_min = float(min(np.nanmin(c) for c in counts_all))
-        x_max = float(max(np.nanmax(c) for c in counts_all))
-        x_grid = np.linspace(x_min, x_max, 4000)
-
-        # KDE for every sample
-        kdes = {}
-        for stem, arr in st.session_state.results_raw.items():
-            good = arr[~np.isnan(arr)]
-            if np.unique(good).size >= 2:
-                kdes[stem] = gaussian_kde(good, bw_method="scott")(x_grid)
-            else:                         # fallback single-value / empty
-                μ  = good.mean() if good.size else 0.5 * (x_min + x_max)
-                σ  = 0.05 * (x_max - x_min or 1.0)
-                kdes[stem] = np.exp(-(x_grid - μ) ** 2 / (2 * σ ** 2))
-
-        y_max = max(vals.max() for vals in kdes.values())
-        gap   = 1.2 * y_max
-
-        fig, ax = plt.subplots(
-            figsize=(6, 0.8 * len(kdes)),
-            dpi=150, sharex=True,
-        )
-
-        # ---------- draw every sample ----------
-        for i, stem in enumerate(st.session_state.results):
-            ys     = kdes[stem]
-            offset = i * gap
-
-            # density curve + fill
-            ax.plot(x_grid, ys + offset, color="black", lw=1)
-            ax.fill_between(x_grid, offset, ys + offset,
-                            color="#FFA50088", lw=0)
-
-            # PEAK / VALLEY markers  ↓↓↓  NEW
-            info = st.session_state.results[stem]
-            for p in info["peaks"]:
-                ax.vlines(p, offset, offset + ys.max(),
-                        color="black", lw=0.8)
-            for v in info["valleys"]:
-                ax.vlines(v, offset, offset + ys.max(),
-                        color="grey", lw=0.8, linestyles=":")
-
-            ax.text(x_min, offset + 0.5 * y_max, stem,
-                    ha="right", va="center", fontsize=7)
-
-        ax.set_yticks([]); ax.set_xlim(x_min, x_max)
-        fig.tight_layout()
-
-        st.session_state.raw_ridge_png = fig_to_png(fig)
-        plt.close(fig)
+        _refresh_raw_ridge()
 
 
 # ────────────────────────── static results & download ────────────────────────
@@ -1048,13 +1002,23 @@ if st.session_state.results:
                         np.nan                                 # missing pos-peak
                     ])
 
-            # global finite x-range ------------------------------------------------
+            # —— 3. Compute finite x‐range, pad, and grid *before* any fallback to [0,1]
             all_xmin = float(np.nanmin([np.nanmin(w) for w in warped]))
             all_xmax = float(np.nanmax([np.nanmax(w) for w in warped]))
+
+            # if non‐finite or degenerate, give a tiny wiggle instead of full [0,1]
             if not np.isfinite(all_xmin) or not np.isfinite(all_xmax):
-                all_xmin, all_xmax = 0.0, 1.0                 # extreme fallback
-            x_grid        = np.linspace(all_xmin, all_xmax, 4000)
-            std_fallback  = 0.05 * (all_xmax - all_xmin or 1.0)
+                all_xmin, all_xmax = 0.0, 1.0
+            elif all_xmax == all_xmin:
+                d = abs(all_xmin) if all_xmin != 0 else 1.0
+                all_xmin -= 0.05 * d
+                all_xmax += 0.05 * d
+
+            # build the grid *after* fixing finite span
+            span = all_xmax - all_xmin
+            pad  = 0.05 * span
+            x_grid = np.linspace(all_xmin - pad, all_xmax + pad, 4000)
+            std_fallback = 0.05 * (span or 1.0)
 
             st.session_state.aligned_counts     = dict(zip(st.session_state.results,
                                                         warped))
@@ -1069,6 +1033,12 @@ if st.session_state.results:
             for idx, stem in enumerate(st.session_state.results):
                 wc   = warped[idx]
                 good = wc[~np.isnan(wc)]
+                bw   = st.session_state.params.get(stem, {}).get("bw", "scott")
+                try:
+                    bw_val = float(bw)
+                except Exception:
+                    bw_val = bw
+
                 if np.unique(good).size >= 2:
                     try:
                         kdes[stem] = gaussian_kde(good, bw_method="scott")(x_grid)
@@ -1079,6 +1049,9 @@ if st.session_state.results:
                     kdes[stem] = np.exp(-(x_grid - center)**2 / (2*std_fallback**2))
 
             all_ymax = max(ys.max() for ys in kdes.values())
+            if not np.isfinite(all_ymax):
+                # choose a sensible default—e.g. 1.0 or the next-largest finite value
+                all_ymax = 1.0
 
             # —— 3. per-sample PNGs & metadata ------------------------------------
             for idx, stem in enumerate(st.session_state.results):
@@ -1091,7 +1064,8 @@ if st.session_state.results:
                     f"{stem} (aligned)", x_grid, ys,
                     pk_align[~np.isnan(pk_align)],
                     vl_align[~np.isnan(vl_align)],
-                    (all_xmin, all_xmax), all_ymax
+                    (all_xmin, all_xmax),
+                    all_ymax      # now guaranteed finite
                 )
 
                 st.session_state.aligned_fig_pngs[f"{stem}_aligned.png"] = png

@@ -15,7 +15,7 @@ from peak_valley.quality import stain_quality
 from peak_valley import (
     arcsinh_transform, read_counts,
     kde_peaks_valleys, quick_peak_estimate,
-    fig_to_png,
+    fig_to_png, enforce_marker_consistency,
 )
 from peak_valley.gpt_adapter import (
     ask_gpt_peak_count, ask_gpt_prominence, ask_gpt_bandwidth,
@@ -756,6 +756,7 @@ if st.session_state.run_active and st.session_state.pending:
         "ys": ys.tolist(),
     }
     st.session_state.dirty[stem] = False
+    enforce_marker_consistency(st.session_state.results)
 
     _refresh_raw_ridge()
 

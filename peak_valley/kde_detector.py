@@ -86,6 +86,46 @@ def _mostly_small_discrete(x: np.ndarray, threshold: float = 0.9) -> bool:
     return uniq.size <= 4
 
 
+def _first_valley_slope(xs: np.ndarray,
+                        ys: np.ndarray,
+                        p_left: int,
+                        p_right: int | None = None) -> float | None:
+    """Pick first valley via maximum increase in slope.
+
+    Parameters
+    ----------
+    xs, ys : np.ndarray
+        Grid and KDE values.
+    p_left : int
+        Index of the first peak.
+    p_right : int | None, optional
+        Index of the next peak.  If ``None`` the search extends to the
+        end of the grid.
+
+    Returns
+    -------
+    float | None
+        X‑coordinate of the valley or ``None`` if the slope never
+        increases.
+    """
+    d2y = np.diff(ys, n=2)
+    if p_right is None:
+        seg = d2y[p_left:]
+        base = p_left
+    else:
+        if p_right - p_left <= 2:
+            return None
+        seg = d2y[p_left : p_right - 1]
+        base = p_left
+    if seg.size == 0:
+        return None
+    rel = np.argmax(seg)
+    if seg[rel] <= 0:
+        return None
+    idx = base + 1 + rel
+    return float(xs[idx])
+
+
 def _valley_between(xs: np.ndarray,
                     ys: np.ndarray,
                     p_left: int,
@@ -273,13 +313,25 @@ def kde_peaks_valleys(
     # ---------- *re-derive* indices for every peak we now have ----------
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
 
-    # ---------- valleys: ALWAYS between every consecutive pair ----------
+    # ---------- valleys ----------
     valleys_x: list[float] = []
     if len(peaks_idx) > 1:
-        for left, right in zip(peaks_idx[:-1], peaks_idx[1:]):
+        p0, p1 = peaks_idx[0], peaks_idx[1]
+        val = _first_valley_slope(xs, ys, p0, p1)
+        if val is None:
+            val = _valley_between(xs, ys, p0, p1, drop_frac)
+        valleys_x.append(val)
+
+        # remaining valleys (if any): classic rule
+        for left, right in zip(peaks_idx[1:-1], peaks_idx[2:]):
             valleys_x.append(
                 _valley_between(xs, ys, left, right, drop_frac)
             )
+    elif len(peaks_idx) == 1:
+        p0 = peaks_idx[0]
+        val = _first_valley_slope(xs, ys, p0)
+        if val is not None:
+            valleys_x.append(val)
 
     return np.round(peaks_x, 10).tolist(), valleys_x, xs, ys
 

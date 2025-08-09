@@ -26,21 +26,21 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
                                window: float | None = None) -> None:
     """Detect and correct peak/valley outliers within each marker group.
 
-    Samples may contain data for multiple protein markers.  The marker name is
-    inferred from the sample key: if the key contains an underscore, the text
-    after the final underscore is used; otherwise, all-uppercase keys (e.g.
-    ``"CD8"``) are treated as separate markers, while other keys fall into a
-    single unnamed group.  Samples sharing the same marker are compared against
-    marker-wide median landmark positions.  Outliers are snapped to local
-    extremes near the consensus position and missing peaks/valleys are added in
-    the same way,
+    Samples may contain data for multiple protein markers.  Each entry in
+    ``results`` may therefore include a ``"marker"`` field identifying the
+    protein marker for that sample.  Landmarks are aligned only among samples
+    sharing the same marker value.  Samples lacking a ``"marker"`` entry are
+    grouped together and treated as a single marker.  Outliers are snapped to
+    local extremes near the consensus position and missing peaks/valleys are
+    added in the same way,
     **except** for the first peak and first valley which are left untouched.
 
     Parameters
     ----------
     results : dict
         Mapping of sample name to the detector output.  Each value must
-        contain ``peaks``, ``valleys``, ``xs`` and ``ys`` entries.
+        contain ``peaks``, ``valleys``, ``xs`` and ``ys`` entries and may
+        optionally define ``marker`` with the associated protein marker name.
     tol : float, optional
         Deviation from the consensus beyond which a landmark is treated
         as an outlier.  Expressed in the same units as ``peaks``.
@@ -100,15 +100,9 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
     if len(results) < 2:
         return
 
-    groups: Dict[str, Dict[str, Dict[str, Sequence[float]]]] = {}
+    groups: Dict[str | None, Dict[str, Dict[str, Sequence[float]]]] = {}
     for stem, info in results.items():
-        if "_" in stem:
-            marker = stem.rsplit("_", 1)[-1]
-        elif stem.upper() == stem:
-            # treat all-uppercase names (e.g. "CD8") as distinct markers
-            marker = stem
-        else:
-            marker = ""
+        marker = info.get("marker")
         groups.setdefault(marker, {})[stem] = info
 
     for group in groups.values():

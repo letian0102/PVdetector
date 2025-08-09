@@ -472,7 +472,9 @@ with st.sidebar:
                         )
                         bio = io.BytesIO()
                         counts.to_csv(bio, index=False, header=False)
-                        bio.seek(0); bio.name = f"{stem}_raw_counts.csv"
+                        bio.seek(0)
+                        bio.name = f"{stem}_raw_counts.csv"
+                        setattr(bio, "marker", m)
                         st.session_state.generated_csvs.append((stem, bio))
                         bar.progress(idx / tot,
                                      f"Added {stem} ({idx}/{tot})")
@@ -639,7 +641,9 @@ if run_clicked and not st.session_state.run_active:
                     )
                     bio = io.BytesIO()
                     counts.to_csv(bio, index=False, header=False)
-                    bio.seek(0); bio.name = f"{stem}_raw_counts.csv"
+                    bio.seek(0)
+                    bio.name = f"{stem}_raw_counts.csv"
+                    setattr(bio, "marker", m)
                     st.session_state.generated_csvs.append((stem, bio))
         # treat all those auto-generated files as if they’d been “uploaded”
         use_uploads = []
@@ -665,9 +669,10 @@ if run_clicked and not st.session_state.run_active:
 
 # 2️⃣ Queue active → process ONE file then rerun
 if st.session_state.run_active and st.session_state.pending:
-    f     = st.session_state.pending.pop(0)
-    stem  = Path(f.name).stem
-    cnts  = read_counts(f, header_row, skip_rows)
+    f      = st.session_state.pending.pop(0)
+    stem   = Path(f.name).stem
+    marker = getattr(f, "marker", None)
+    cnts   = read_counts(f, header_row, skip_rows)
     st.session_state.results_raw.setdefault(stem, cnts)
 
     over  = st.session_state.params.get(stem, {}) \
@@ -709,15 +714,10 @@ if st.session_state.run_active and st.session_state.pending:
     elif n_fixed is not None:               # fixed via sidebar selector
         n_use = n_fixed
     else:                                   # GPT automatic
-        def _infer_marker(stem_: str) -> str | None:
-            if stem_.endswith("_raw_counts"):
-                stem_ = stem_[:-11]
-            parts = stem_.split("_")
-            return parts[-1] if parts else None
         n_use = ask_gpt_peak_count(
             OpenAI(api_key=api_key) if api_key else None,
             gpt_model, max_peaks, counts_full=cnts,
-            marker_name=_infer_marker(stem)
+            marker_name=marker
         )
         if n_use is None:                   # fallback to heuristic
             n_est, confident = quick_peak_estimate(
@@ -747,13 +747,14 @@ if st.session_state.run_active and st.session_state.pending:
 
     # quality
     qual = stain_quality(cnts, peaks, valleys)
-    
+
     st.session_state.results[stem] = {
         "peaks": peaks,
         "valleys": valleys,
         "quality": qual,                             # ★ store it
         "xs": xs.tolist(),
         "ys": ys.tolist(),
+        "marker": marker,
     }
     st.session_state.dirty[stem] = False
     enforce_marker_consistency(st.session_state.results)

@@ -16,15 +16,16 @@ def test_enforce_marker_consistency_handles_multiple_landmarks():
         "s1": {"xs": xs.tolist(), "ys": ys.tolist(),
                 "peaks": [1.0, 3.0], "valleys": [2.0]},
         "s2": {"xs": xs.tolist(), "ys": ys.tolist(),
-                "peaks": [1.0, 2.0], "valleys": [2.0]},
+                "peaks": [1.4, 2.0], "valleys": [2.3]},
         "s3": {"xs": xs.tolist(), "ys": ys.tolist(),
                 "peaks": [1.0], "valleys": []},
     }
 
     enforce_marker_consistency(results, tol=0.3, window=1.0)
 
+    assert abs(results["s2"]["peaks"][0] - 1.4) < 1e-6
+    assert abs(results["s2"]["valleys"][0] - 2.3) < 1e-6
     assert abs(results["s2"]["peaks"][1] - 3.0) < 0.1
     assert len(results["s3"]["peaks"]) == 2
     assert abs(results["s3"]["peaks"][1] - 3.0) < 0.1
-    assert len(results["s3"]["valleys"]) == 1
-    assert abs(results["s3"]["valleys"][0] - 2.0) < 0.1
+    assert results["s3"]["valleys"] == []

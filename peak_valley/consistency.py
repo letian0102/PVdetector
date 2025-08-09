@@ -28,7 +28,8 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
 
     All samples in ``results`` are compared against marker-wide median
     landmark positions.  Outliers are snapped to local extremes near the
-    consensus position and missing peaks/valleys are added in the same way.
+    consensus position and missing peaks/valleys are added in the same way,
+    **except** for the first peak and first valley which are left untouched.
 
     Parameters
     ----------
@@ -69,18 +70,20 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
         pk = list(info.get("peaks", []))
         vl = list(info.get("valleys", []))
 
-        for i, exp in enumerate(pk_cons):
-            if i < len(pk):
-                if abs(pk[i] - exp) > tol:
-                    pk[i] = _local_extreme(xs, ys, exp, win, True)
-            else:
-                pk.append(_local_extreme(xs, ys, exp, win, True))
+        if pk:
+            for i, exp in enumerate(pk_cons[1:], start=1):
+                if i < len(pk):
+                    if abs(pk[i] - exp) > tol:
+                        pk[i] = _local_extreme(xs, ys, exp, win, True)
+                else:
+                    pk.append(_local_extreme(xs, ys, exp, win, True))
 
-        for i, exp in enumerate(vl_cons):
-            if i < len(vl):
-                if abs(vl[i] - exp) > tol:
-                    vl[i] = _local_extreme(xs, ys, exp, win, False)
-            else:
-                vl.append(_local_extreme(xs, ys, exp, win, False))
+        if vl:
+            for i, exp in enumerate(vl_cons[1:], start=1):
+                if i < len(vl):
+                    if abs(vl[i] - exp) > tol:
+                        vl[i] = _local_extreme(xs, ys, exp, win, False)
+                else:
+                    vl.append(_local_extreme(xs, ys, exp, win, False))
 
         info["peaks"], info["valleys"] = pk, vl

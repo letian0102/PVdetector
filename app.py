@@ -758,30 +758,27 @@ if st.session_state.run_active and st.session_state.pending:
     st.session_state.dirty[stem] = False
     enforce_marker_consistency(st.session_state.results)
 
+    # redraw plots for **all** samples so individual views reflect
+    # any peak/valley adjustments made by the consistency pass
+    for stem2, info2 in st.session_state.results.items():
+        xs2 = np.asarray(info2.get("xs", []), float)
+        ys2 = np.asarray(info2.get("ys", []), float)
+        pk2 = info2.get("peaks", [])
+        vl2 = info2.get("valleys", [])
+        st.session_state.fig_pngs[f"{stem2}.png"] = _plot_png(
+            stem2, xs2, ys2, pk2, vl2
+        )
+        st.session_state[f"{stem2}__pk_list"] = pk2.copy()
+        st.session_state[f"{stem2}__vl_list"] = vl2.copy()
+
     _refresh_raw_ridge()
 
-    # plot
-    x_min = float(xs.min())
-    x_max = float(xs.max())
-    pad   = 0.05 * (x_max - x_min)
-    fig, ax = plt.subplots(figsize=(5, 2.5), dpi=150)
-    cL, cF = ("skyblue", "#87CEEB88")
-    ax.plot(xs, ys, color=cL); ax.fill_between(xs, 0, ys, color=cF)
-    ax.set_xlim(x_min - pad, x_max + pad)
-    for p in peaks:   ax.axvline(p, color="red",   ls="--", lw=1)
-    for v in valleys: ax.axvline(v, color="green", ls=":",  lw=1)
-    ax.set_xlabel("Arcsinh counts"); ax.set_ylabel("Density")
-    ax.set_title(stem, fontsize=9); fig.tight_layout()
-
-    st.session_state.fig_pngs[f"{stem}.png"] = fig_to_png(fig)
-    plt.close(fig)
-
-    st.session_state[f"{stem}__pk_list"] = peaks.copy()
-    st.session_state[f"{stem}__vl_list"] = valleys.copy()
-    st.session_state.params [stem] = {
-        "bw": bw_use, "prom": prom_use, "n_peaks": n_use,
+    st.session_state.params[stem] = {
+        "bw": bw_use,
+        "prom": prom_use,
+        "n_peaks": n_use,
     }
-    st.session_state.dirty  [stem] = False
+    st.session_state.dirty[stem] = False
 
     # progress update
     done = st.session_state.total_todo - len(st.session_state.pending)

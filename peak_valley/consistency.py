@@ -27,10 +27,13 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
     """Detect and correct peak/valley outliers within each marker group.
 
     Samples may contain data for multiple protein markers.  The marker name is
-    inferred from the sample key by taking the text after the final underscore.
-    Samples sharing the same marker are compared against marker-wide median
-    landmark positions.  Outliers are snapped to local extremes near the
-    consensus position and missing peaks/valleys are added in the same way,
+    inferred from the sample key: if the key contains an underscore, the text
+    after the final underscore is used; otherwise, all-uppercase keys (e.g.
+    ``"CD8"``) are treated as separate markers, while other keys fall into a
+    single unnamed group.  Samples sharing the same marker are compared against
+    marker-wide median landmark positions.  Outliers are snapped to local
+    extremes near the consensus position and missing peaks/valleys are added in
+    the same way,
     **except** for the first peak and first valley which are left untouched.
 
     Parameters
@@ -99,8 +102,13 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
 
     groups: Dict[str, Dict[str, Dict[str, Sequence[float]]]] = {}
     for stem, info in results.items():
-        parts = stem.rsplit("_", 1)
-        marker = parts[-1] if len(parts) > 1 else ""
+        if "_" in stem:
+            marker = stem.rsplit("_", 1)[-1]
+        elif stem.upper() == stem:
+            # treat all-uppercase names (e.g. "CD8") as distinct markers
+            marker = stem
+        else:
+            marker = ""
         groups.setdefault(marker, {})[stem] = info
 
     for group in groups.values():

@@ -26,6 +26,10 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
                                window: float | None = None) -> None:
     """Detect and correct peak/valley outliers across samples of a marker.
 
+    All samples in ``results`` are compared against marker-wide median
+    landmark positions.  Outliers are snapped to local extremes near the
+    consensus position and missing peaks/valleys are added in the same way.
+
     Parameters
     ----------
     results : dict
@@ -45,16 +49,13 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
     if len(results) < 2:
         return
 
-    pk_lists = [info["peaks"] for info in results.values() if info.get("peaks")]
-    vl_lists = [info["valleys"] for info in results.values() if info.get("valleys")]
+    pk_lists = [info["peaks"] for info in results.values() if info.get("peaks") is not None]
+    vl_lists = [info["valleys"] for info in results.values() if info.get("valleys") is not None]
     if not pk_lists:
         return
 
-    n_peaks = min(len(p) for p in pk_lists)
-    n_valleys = min(len(v) for v in vl_lists) if vl_lists else 0
-    if n_peaks == 0:
-        return
-
+    n_peaks = max(len(p) for p in pk_lists)
+    n_valleys = max((len(v) for v in vl_lists), default=0)
     pk_cons = [float(np.median([p[i] for p in pk_lists if len(p) > i]))
                for i in range(n_peaks)]
     vl_cons = [float(np.median([v[i] for v in vl_lists if len(v) > i]))
@@ -69,11 +70,17 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
         vl = list(info.get("valleys", []))
 
         for i, exp in enumerate(pk_cons):
-            if i < len(pk) and abs(pk[i] - exp) > tol:
-                pk[i] = _local_extreme(xs, ys, exp, win, True)
+            if i < len(pk):
+                if abs(pk[i] - exp) > tol:
+                    pk[i] = _local_extreme(xs, ys, exp, win, True)
+            else:
+                pk.append(_local_extreme(xs, ys, exp, win, True))
 
         for i, exp in enumerate(vl_cons):
-            if i < len(vl) and abs(vl[i] - exp) > tol:
-                vl[i] = _local_extreme(xs, ys, exp, win, False)
+            if i < len(vl):
+                if abs(vl[i] - exp) > tol:
+                    vl[i] = _local_extreme(xs, ys, exp, win, False)
+            else:
+                vl.append(_local_extreme(xs, ys, exp, win, False))
 
         info["peaks"], info["valleys"] = pk, vl

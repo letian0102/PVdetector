@@ -42,6 +42,7 @@ for key, default in {
     "dirty":       {},         # stem → True if user edited params *or* positions
     "cached_uploads": [],
     "generated_csvs": [],
+    "sel_markers": [], "sel_samples": [],
     "expr_df": None, "meta_df": None,
     "expr_name": None, "meta_name": None,
     # incremental‑run machinery
@@ -155,6 +156,51 @@ def _make_curves_zip() -> bytes:
             z.writestr(f"{stem}_xs.csv", bio_xs.getvalue())
             z.writestr(f"{stem}_ys.csv", bio_ys.getvalue())
     return out.getvalue()
+
+
+def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
+                           expr_df: pd.DataFrame, meta_df: pd.DataFrame) -> None:
+    """Refresh cached CSVs to match the current marker/sample selection."""
+    desired = {f"{s}_{m}_raw_counts": (s, m) for m in sel_m for s in sel_s}
+
+    # remove stale combinations
+    st.session_state.generated_csvs = [
+        (stem, bio) for stem, bio in st.session_state.generated_csvs
+        if stem in desired
+    ]
+
+    # drop outdated results
+    keep = set(desired)
+    for bucket in ("results", "results_raw", "params", "dirty",
+                   "aligned_results"):
+        st.session_state[bucket] = {
+            k: v for k, v in st.session_state[bucket].items() if k in keep
+        }
+    st.session_state.fig_pngs = {
+        fn: png for fn, png in st.session_state.fig_pngs.items()
+        if fn.split(".")[0] in keep
+    }
+    st.session_state.aligned_fig_pngs = {
+        fn: png for fn, png in st.session_state.aligned_fig_pngs.items()
+        if fn.rsplit("_aligned", 1)[0] in keep
+    }
+    st.session_state.aligned_counts = None
+    st.session_state.aligned_landmarks = None
+    st.session_state.aligned_ridge_png = None
+
+    existing = {stem for stem, _ in st.session_state.generated_csvs}
+    for stem, (s, m) in desired.items():
+        if stem in existing:
+            continue
+        counts = arcsinh_transform(
+            expr_df.loc[meta_df["sample"].eq(s), m]
+        )
+        bio = io.BytesIO()
+        counts.to_csv(bio, index=False, header=False)
+        bio.seek(0)
+        bio.name = f"{stem}.csv"
+        setattr(bio, "marker", m)
+        st.session_state.generated_csvs.append((stem, bio))
 
 
 # ───────────────────────── helper: (re)plot a dataset ───────────────────────
@@ -411,7 +457,7 @@ with st.sidebar:
                                      key="pick_gen2")
             for stem, bio in st.session_state.generated_csvs:
                 if stem in pick_g:
-                    bio.seek(0); bio.name = f"{stem}_raw_counts.csv"
+                    bio.seek(0); bio.name = f"{stem}.csv"
                     use_generated.append(bio)
 
         header_row = st.number_input("Header row (−1 = none)", 0, step=1,
@@ -454,6 +500,8 @@ with st.sidebar:
             all_s = st.checkbox("All samples", False, key="chk_s")
             sel_m = markers if all_m else st.multiselect("Marker(s)", markers)
             sel_s = samples if all_s else st.multiselect("Sample(s)", samples)
+            st.session_state.sel_markers = sel_m
+            st.session_state.sel_samples = sel_s
 
             if sel_m and sel_s and st.button("Generate counts CSVs"):
                 tot = len(sel_m) * len(sel_s)
@@ -462,7 +510,7 @@ with st.sidebar:
                 for i, m in enumerate(sel_m, 1):
                     for j, s in enumerate(sel_s, 1):
                         idx  = (i - 1) * len(sel_s) + j
-                        stem = f"{s}_{m}"
+                        stem = f"{s}_{m}_raw_counts"
                         if stem in exist:
                             bar.progress(idx / tot,
                                          f"Skip {stem} (exists)")
@@ -473,7 +521,7 @@ with st.sidebar:
                         bio = io.BytesIO()
                         counts.to_csv(bio, index=False, header=False)
                         bio.seek(0)
-                        bio.name = f"{stem}_raw_counts.csv"
+                        bio.name = f"{stem}.csv"
                         setattr(bio, "marker", m)
                         st.session_state.generated_csvs.append((stem, bio))
                         bar.progress(idx / tot,
@@ -627,25 +675,11 @@ if st.session_state.total_todo:
 if run_clicked and not st.session_state.run_active:
     st.session_state.raw_ridge_png = None
     csv_files = use_uploads + use_generated
-
-    # ─── AUTO-GENERATE COUNTS WHEN IN WHOLE-DATASET MODE ───
     if mode == "Whole dataset" and expr_df is not None and meta_df is not None:
-        # if the user has selected markers & samples but hasn't clicked the manual “Generate counts” button,
-        # build their CSVs automatically:
-        if sel_m and sel_s and not st.session_state.generated_csvs:
-            for m in sel_m:
-                for s in sel_s:
-                    stem = f"{s}_{m}"
-                    counts = arcsinh_transform(
-                        expr_df.loc[meta_df["sample"].eq(s), m]
-                    )
-                    bio = io.BytesIO()
-                    counts.to_csv(bio, index=False, header=False)
-                    bio.seek(0)
-                    bio.name = f"{stem}_raw_counts.csv"
-                    setattr(bio, "marker", m)
-                    st.session_state.generated_csvs.append((stem, bio))
-        # treat all those auto-generated files as if they’d been “uploaded”
+        sel_m = st.session_state.get("sel_markers", [])
+        sel_s = st.session_state.get("sel_samples", [])
+        if sel_m and sel_s:
+            _sync_generated_counts(sel_m, sel_s, expr_df, meta_df)
         use_uploads = []
         use_generated = [bio for _, bio in st.session_state.generated_csvs]
         csv_files = use_uploads + use_generated

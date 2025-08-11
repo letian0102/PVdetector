@@ -161,7 +161,7 @@ def _make_curves_zip() -> bytes:
 def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
                            expr_df: pd.DataFrame, meta_df: pd.DataFrame) -> None:
     """Refresh cached CSVs to match the current marker/sample selection."""
-    desired = {f"{s}_{m}": (s, m) for m in sel_m for s in sel_s}
+    desired = {f"{s}_{m}_raw_counts": (s, m) for m in sel_m for s in sel_s}
 
     # remove stale combinations
     st.session_state.generated_csvs = [
@@ -198,7 +198,7 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         bio = io.BytesIO()
         counts.to_csv(bio, index=False, header=False)
         bio.seek(0)
-        bio.name = f"{stem}_raw_counts.csv"
+        bio.name = f"{stem}.csv"
         setattr(bio, "marker", m)
         st.session_state.generated_csvs.append((stem, bio))
 
@@ -457,7 +457,7 @@ with st.sidebar:
                                      key="pick_gen2")
             for stem, bio in st.session_state.generated_csvs:
                 if stem in pick_g:
-                    bio.seek(0); bio.name = f"{stem}_raw_counts.csv"
+                    bio.seek(0); bio.name = f"{stem}.csv"
                     use_generated.append(bio)
 
         header_row = st.number_input("Header row (−1 = none)", 0, step=1,
@@ -510,7 +510,7 @@ with st.sidebar:
                 for i, m in enumerate(sel_m, 1):
                     for j, s in enumerate(sel_s, 1):
                         idx  = (i - 1) * len(sel_s) + j
-                        stem = f"{s}_{m}"
+                        stem = f"{s}_{m}_raw_counts"
                         if stem in exist:
                             bar.progress(idx / tot,
                                          f"Skip {stem} (exists)")
@@ -521,7 +521,7 @@ with st.sidebar:
                         bio = io.BytesIO()
                         counts.to_csv(bio, index=False, header=False)
                         bio.seek(0)
-                        bio.name = f"{stem}_raw_counts.csv"
+                        bio.name = f"{stem}.csv"
                         setattr(bio, "marker", m)
                         st.session_state.generated_csvs.append((stem, bio))
                         bar.progress(idx / tot,

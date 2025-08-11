@@ -53,7 +53,8 @@ for key, default in {
     "aligned_landmarks": None,
     "aligned_results": {},   # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
     "aligned_fig_pngs": {},  # stem_aligned.png → bytes
-    "aligned_ridge_png":    None
+    "aligned_ridge_png":    None,
+    "apply_consistency": True,  # enforce marker consistency across samples
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -568,6 +569,11 @@ with st.sidebar:
     grid_sz  = st.slider("Max KDE grid", 4_000, 40_000, 20_000, 1_000)
     val_drop = st.slider("Valley drop (% of peak)", 1, 50, 10, 1)
 
+    st.checkbox(
+        "Enforce marker consistency across samples",
+        key="apply_consistency",
+    )
+
     # ───────────── Alignment options ──────────────
     st.markdown("---\n### Alignment")
 
@@ -791,11 +797,14 @@ if st.session_state.run_active and st.session_state.pending:
         "marker": marker,
     }
     st.session_state.dirty[stem] = False
-    enforce_marker_consistency(st.session_state.results)
+    if st.session_state.get("apply_consistency", True):
+        enforce_marker_consistency(st.session_state.results)
+        stems = st.session_state.results.items()
+    else:
+        stems = [(stem, st.session_state.results[stem])]
 
-    # redraw plots for **all** samples so individual views reflect
-    # any peak/valley adjustments made by the consistency pass
-    for stem2, info2 in st.session_state.results.items():
+    # redraw plots so views reflect any peak/valley adjustments
+    for stem2, info2 in stems:
         xs2 = np.asarray(info2.get("xs", []), float)
         ys2 = np.asarray(info2.get("ys", []), float)
         pk2 = info2.get("peaks", [])

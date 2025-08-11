@@ -42,7 +42,7 @@ for key, default in {
     "dirty":       {},         # stem → True if user edited params *or* positions
     "cached_uploads": [],
     "generated_csvs": [],
-    "sel_markers": [], "sel_samples": [],
+    "sel_markers": [], "sel_samples": [], "sel_batches": [],
     "expr_df": None, "meta_df": None,
     "expr_name": None, "meta_name": None,
     # incremental‑run machinery
@@ -160,8 +160,13 @@ def _make_curves_zip() -> bytes:
 
 
 def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
-                           expr_df: pd.DataFrame, meta_df: pd.DataFrame) -> None:
-    """Refresh cached CSVs to match the current marker/sample selection."""
+                           expr_df: pd.DataFrame, meta_df: pd.DataFrame,
+                           sel_b: list[str] | None = None) -> None:
+    """Refresh cached CSVs to match the current marker/sample selection.
+
+    If ``sel_b`` is provided, only cells belonging to those batches will
+    contribute to the generated counts.
+    """
     desired = {f"{s}_{m}_raw_counts": (s, m) for m in sel_m for s in sel_s}
 
     # remove stale combinations
@@ -190,11 +195,14 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
     st.session_state.aligned_ridge_png = None
 
     existing = {stem for stem, _ in st.session_state.generated_csvs}
+    batch_mask = (meta_df["batch"].isin(sel_b)
+                  if sel_b else pd.Series(True, index=meta_df.index))
     for stem, (s, m) in desired.items():
         if stem in existing:
             continue
+        mask = batch_mask & meta_df["sample"].eq(s)
         counts = arcsinh_transform(
-            expr_df.loc[meta_df["sample"].eq(s), m]
+            expr_df.loc[mask, m]
         )
         bio = io.BytesIO()
         counts.to_csv(bio, index=False, header=False)
@@ -495,7 +503,17 @@ with st.sidebar:
         expr_df, meta_df = st.session_state.expr_df, st.session_state.meta_df
         if expr_df is not None and meta_df is not None:
             markers = [c for c in expr_df.columns if c != "cell_id"]
-            samples = meta_df["sample"].unique().tolist()
+            if "batch" in meta_df.columns:
+                batches = meta_df["batch"].unique().tolist()
+                all_b = st.checkbox("All batches", True, key="chk_b")
+                sel_b = batches if all_b else st.multiselect("Batch(es)", batches)
+                st.session_state.sel_batches = sel_b
+                meta_use = (meta_df if (all_b or not sel_b)
+                            else meta_df[meta_df["batch"].isin(sel_b)])
+            else:
+                st.session_state.sel_batches = []
+                meta_use = meta_df
+            samples = meta_use["sample"].unique().tolist()
 
             all_m = st.checkbox("All markers", False, key="chk_m")
             all_s = st.checkbox("All samples", False, key="chk_s")
@@ -508,6 +526,9 @@ with st.sidebar:
                 tot = len(sel_m) * len(sel_s)
                 bar = st.progress(0.0, "Generating …")
                 exist = {s for s, _ in st.session_state.generated_csvs}
+                sel_b = st.session_state.get("sel_batches", [])
+                batch_mask = (meta_df["batch"].isin(sel_b)
+                              if sel_b else pd.Series(True, index=meta_df.index))
                 for i, m in enumerate(sel_m, 1):
                     for j, s in enumerate(sel_s, 1):
                         idx  = (i - 1) * len(sel_s) + j
@@ -516,8 +537,9 @@ with st.sidebar:
                             bar.progress(idx / tot,
                                          f"Skip {stem} (exists)")
                             continue
+                        mask = batch_mask & meta_df["sample"].eq(s)
                         counts = arcsinh_transform(
-                            expr_df.loc[meta_df["sample"].eq(s), m]
+                            expr_df.loc[mask, m]
                         )
                         bio = io.BytesIO()
                         counts.to_csv(bio, index=False, header=False)
@@ -684,8 +706,9 @@ if run_clicked and not st.session_state.run_active:
     if mode == "Whole dataset" and expr_df is not None and meta_df is not None:
         sel_m = st.session_state.get("sel_markers", [])
         sel_s = st.session_state.get("sel_samples", [])
+        sel_b = st.session_state.get("sel_batches", [])
         if sel_m and sel_s:
-            _sync_generated_counts(sel_m, sel_s, expr_df, meta_df)
+            _sync_generated_counts(sel_m, sel_s, expr_df, meta_df, sel_b)
         use_uploads = []
         use_generated = [bio for _, bio in st.session_state.generated_csvs]
         csv_files = use_uploads + use_generated

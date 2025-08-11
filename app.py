@@ -797,23 +797,18 @@ if st.session_state.run_active and st.session_state.pending:
         "marker": marker,
     }
     st.session_state.dirty[stem] = False
-    if st.session_state.get("apply_consistency", True):
-        enforce_marker_consistency(st.session_state.results)
-        stems = st.session_state.results.items()
-    else:
-        stems = [(stem, st.session_state.results[stem])]
 
-    # redraw plots so views reflect any peak/valley adjustments
-    for stem2, info2 in stems:
-        xs2 = np.asarray(info2.get("xs", []), float)
-        ys2 = np.asarray(info2.get("ys", []), float)
-        pk2 = info2.get("peaks", [])
-        vl2 = info2.get("valleys", [])
-        st.session_state.fig_pngs[f"{stem2}.png"] = _plot_png(
-            stem2, xs2, ys2, pk2, vl2
-        )
-        st.session_state[f"{stem2}__pk_list"] = pk2.copy()
-        st.session_state[f"{stem2}__vl_list"] = vl2.copy()
+    # draw only this sample for now; full consistency applied later
+    info1 = st.session_state.results[stem]
+    xs1 = np.asarray(info1.get("xs", []), float)
+    ys1 = np.asarray(info1.get("ys", []), float)
+    pk1 = info1.get("peaks", [])
+    vl1 = info1.get("valleys", [])
+    st.session_state.fig_pngs[f"{stem}.png"] = _plot_png(
+        stem, xs1, ys1, pk1, vl1
+    )
+    st.session_state[f"{stem}__pk_list"] = pk1.copy()
+    st.session_state[f"{stem}__vl_list"] = vl1.copy()
 
     _refresh_raw_ridge()
 
@@ -831,6 +826,19 @@ if st.session_state.run_active and st.session_state.pending:
 
     # finished queue?
     if not st.session_state.pending:
+        if st.session_state.get("apply_consistency", True):
+            enforce_marker_consistency(st.session_state.results)
+            for stem2, info2 in st.session_state.results.items():
+                xs2 = np.asarray(info2.get("xs", []), float)
+                ys2 = np.asarray(info2.get("ys", []), float)
+                pk2 = info2.get("peaks", [])
+                vl2 = info2.get("valleys", [])
+                st.session_state.fig_pngs[f"{stem2}.png"] = _plot_png(
+                    stem2, xs2, ys2, pk2, vl2
+                )
+                st.session_state[f"{stem2}__pk_list"] = pk2.copy()
+                st.session_state[f"{stem2}__vl_list"] = vl2.copy()
+            _refresh_raw_ridge()
         st.session_state.run_active = False
         st.success("All files processed!")
 

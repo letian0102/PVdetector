@@ -32,8 +32,9 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
     sharing the same marker value.  Samples lacking a ``"marker"`` entry are
     grouped together and treated as a single marker.  Outliers are snapped to
     local extremes near the consensus position and missing peaks/valleys are
-    added in the same way,
-    **except** for the first peak and first valley which are left untouched.
+    added in the same way.  After landmarks beyond the first are corrected,
+    the first peak and valley are adjusted using the final consensus so that
+    every sample in a marker group is treated consistently.
 
     Parameters
     ----------
@@ -94,6 +95,29 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
                             vl[i] = _local_extreme(xs, ys, exp, win, False)
                     else:
                         vl.append(_local_extreme(xs, ys, exp, win, False))
+
+            info["peaks"], info["valleys"] = pk, vl
+
+        # After processing later landmarks, revisit the first peak/valley
+        pk_lists = [info["peaks"] for info in group.values()
+                    if info.get("peaks") is not None]
+        vl_lists = [info["valleys"] for info in group.values()
+                    if info.get("valleys") is not None]
+        pk_cons0 = float(np.median([p[0] for p in pk_lists if len(p) > 0]))
+        vl_cons0 = (float(np.median([v[0] for v in vl_lists if len(v) > 0]))
+                    if vl_lists else None)
+
+        for info in group.values():
+            xs = np.asarray(info.get("xs", []), float)
+            ys = np.asarray(info.get("ys", []), float)
+            pk = list(info.get("peaks", []))
+            vl = list(info.get("valleys", []))
+
+            if pk and abs(pk[0] - pk_cons0) > tol:
+                pk[0] = _local_extreme(xs, ys, pk_cons0, win, True)
+
+            if vl and vl_cons0 is not None and abs(vl[0] - vl_cons0) > tol:
+                vl[0] = _local_extreme(xs, ys, vl_cons0, win, False)
 
             info["peaks"], info["valleys"] = pk, vl
 

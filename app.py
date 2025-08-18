@@ -23,10 +23,10 @@ from peak_valley.gpt_adapter import (
 from peak_valley.alignment import align_distributions, fill_landmark_matrix
 
 # ────────────────────────── Streamlit page & state ──────────────────────────
-st.set_page_config("Peak & Valley Detector", "🔬", layout="wide")
-st.title("🔬 Peak & Valley Detector — CSV *or* full dataset")
+st.set_page_config("Peak & Valley Detector", None, layout="wide")
+st.title("Peak & Valley Detector — CSV *or* full dataset")
 st.warning(
-    "⚠️ **Heads-up:** if you refresh or close this page, all of your uploaded data and results will be lost."
+    "**Heads-up:** if you refresh or close this page, all of your uploaded data and results will be lost."
 )
 
 st.session_state.setdefault("active_sample", None)
@@ -117,19 +117,19 @@ def _make_aligned_zip() -> bytes:
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
 
-        # 1️⃣  aligned counts (one CSV per sample)
+        # 1  aligned counts (one CSV per sample)
         for stem, arr in st.session_state.aligned_counts.items():
             bio = io.BytesIO()
             np.savetxt(bio, arr, delimiter=",")
             z.writestr(f"{stem}_aligned.csv", bio.getvalue())
 
-        # 2️⃣  aligned figures (per-sample + ridge)
+        # 2  aligned figures (per-sample + ridge)
         for fn, png in st.session_state.aligned_fig_pngs.items():
             z.writestr(fn, png)
         if st.session_state.aligned_ridge_png:
             z.writestr("aligned_ridge.png", st.session_state.aligned_ridge_png)
 
-        # ───────────── 3️⃣  **NEW** overall summary ─────────────
+        # ───────────── 3  **NEW** overall summary ─────────────
         if st.session_state.aligned_results:                 # make sure it exists
             import pandas as pd                              # local import is fine
             rows = [
@@ -277,14 +277,14 @@ def _manual_editor(stem: str):
                 key=f"{stem}_pk_slider_{i}",
                 help="Adjust the position of this peak."
             )
-            if st.button(f"❌ Delete peak #{i+1}", key=f"{stem}_pk_del_{i}"):
+            if st.button(f"Delete peak #{i+1}", key=f"{stem}_pk_del_{i}"):
                 pk_list.pop(i)
                 st.session_state.raw_ridge_png = None
                 st.rerun()
             else:
                 i += 1
 
-        if st.button("➕ Add peak", key=f"{stem}_add_pk"):
+        if st.button("Add peak", key=f"{stem}_add_pk"):
             pk_list.append((xmin + xmax) / 2)
             st.rerun()
 
@@ -297,13 +297,13 @@ def _manual_editor(stem: str):
                 key=f"{stem}_vl_slider_{i}",
                 help="Adjust the position of this valley."
             )
-            if st.button(f"❌ Delete valley #{i+1}", key=f"{stem}_vl_del_{i}"):
+            if st.button(f"Delete valley #{i+1}", key=f"{stem}_vl_del_{i}"):
                 vl_list.pop(i)
                 st.rerun()
             else:
                 i += 1
 
-        if st.button("➕ Add valley", key=f"{stem}_add_vl"):
+        if st.button("Add valley", key=f"{stem}_add_vl"):
             vl_list.append((xmin + xmax) / 2)
             st.rerun()
 
@@ -328,7 +328,7 @@ def _manual_editor(stem: str):
     # st.session_state.dirty[stem] = False
 
     apply_key = f"{stem}_apply_edits"
-    if st.button("✅ Apply changes", key=apply_key):
+    if st.button("Apply changes", key=apply_key):
         st.session_state.results[stem]["peaks"]   = pk_list.copy()
         st.session_state.results[stem]["valleys"] = vl_list.copy()
         _refresh_raw_ridge()                       # ← REBUILD HERE
@@ -346,7 +346,7 @@ def _cols_for_align_mode(mode: str) -> list[str]:
     }[mode]
 
 def render_aligned(container):
-    container.header("🔧 Aligned distributions")
+    container.header("Aligned distributions")
     if not st.session_state.aligned_results:
         container.info("Run alignment first."); return
 
@@ -358,7 +358,7 @@ def render_aligned(container):
             st.write(f"**Valleys (after warp):** {info['valleys']}")
 
 def render_results(container):
-    container.header("📊 Processed datasets")
+    container.header("Processed datasets")
     if not st.session_state.results:
         container.info("No results yet."); return
 
@@ -430,7 +430,7 @@ def render_results(container):
                 else:
                     _manual_editor(stem)
         # delete button ------------------------------------------------------
-        if rowR.button("❌", key=f"del_{stem}"):
+        if rowR.button("", key=f"del_{stem}"):
             for bucket in ("results", "fig_pngs", "params", "dirty"):
                 st.session_state[bucket].pop(stem, None)
             for k in (f"{stem}__pk_list", f"{stem}__vl_list"):
@@ -446,7 +446,7 @@ with st.sidebar:
         help="Work with individual counts files or an entire dataset."
     )
 
-    # 1️⃣  Counts-CSV workflow
+    # 1 Counts-CSV workflow
     if mode == "Counts CSV files":
         uploaded_now = st.file_uploader(
             "Upload *_raw_counts.csv*", type=["csv"],
@@ -472,7 +472,7 @@ with st.sidebar:
             for f in st.session_state.cached_uploads:
                 if Path(f.name).stem in pick:
                     use_uploads.append(f)
-            if st.button("🗑 Clear cached uploads"):
+            if st.button("Clear cached uploads"):
                 st.session_state.cached_uploads.clear(); st.rerun()
 
         use_generated: list[io.BytesIO] = []
@@ -497,7 +497,7 @@ with st.sidebar:
             help="Number of initial rows to ignore in each file."
         )
 
-    # 2️⃣  Whole-dataset workflow
+    # 2 Whole-dataset workflow
     else:
         expr_file = st.file_uploader(
             "expression_matrix_combined.csv", type=["csv"],
@@ -509,7 +509,7 @@ with st.sidebar:
         )
 
         if st.session_state.expr_df is not None:
-            if st.button("🗑 Clear loaded dataset"):
+            if st.button("Clear loaded dataset"):
                 for k in ("expr_df", "meta_df", "expr_name", "meta_name"):
                     st.session_state[k] = None
                 st.rerun()
@@ -519,7 +519,7 @@ with st.sidebar:
                     expr_file.name != st.session_state.expr_name or
                     meta_file.name != st.session_state.meta_name)
             if need:
-                with st.spinner("⌛ Parsing expression / metadata …"):
+                with st.spinner("Parsing expression / metadata …"):
                     st.session_state.expr_df = pd.read_csv(expr_file,
                                                            low_memory=False)
                     st.session_state.meta_df = pd.read_csv(meta_file,
@@ -596,7 +596,7 @@ with st.sidebar:
                         bar.progress(idx / tot,
                                      f"Added {stem} ({idx}/{tot})")
                 bar.empty()
-                st.success("✓ CSVs cached – switch to **Counts CSV files**")
+                st.success("CSVs cached – switch to **Counts CSV files**")
 
         header_row, skip_rows = -1, 0
         use_uploads, use_generated = [], []
@@ -752,7 +752,7 @@ with st.sidebar:
 
 # ───────────────── main buttons & global progress bar ────────────────────────
 run_col, clear_col, pause_col = st.columns(3)
-if clear_col.button("🗑 Clear results"):
+if clear_col.button("Clear results"):
     # buckets that are always dict-like
     for bucket in ("results", "fig_pngs", "params", "dirty",
                    "aligned_results", "aligned_fig_pngs",
@@ -770,10 +770,10 @@ if clear_col.button("🗑 Clear results"):
     st.session_state.run_active = False
     st.rerun()
 
-run_clicked = run_col.button("🚀 Run detector")
+run_clicked = run_col.button("Run detector")
 
 # pause button (if run is active)
-pause_label = "⏸ Pause" if st.session_state.run_active else "▶ Resume"
+pause_label = "Pause" if st.session_state.run_active else "Resume"
 pause_disabled = not bool(st.session_state.pending)
 pause_clicked = pause_col.button(pause_label, disabled=pause_disabled)
 
@@ -798,7 +798,7 @@ if st.session_state.total_todo:
 
 
 # ───────────────────────────── incremental processing ───────────────────────
-# 1️⃣ User clicked RUN: prepare pending queue
+# 1 User clicked RUN: prepare pending queue
 if run_clicked and not st.session_state.run_active:
     st.session_state.raw_ridge_png = None
     csv_files = use_uploads + use_generated
@@ -829,7 +829,7 @@ if run_clicked and not st.session_state.run_active:
     st.session_state.run_active = bool(todo)
     st.rerun()
 
-# 2️⃣ Queue active → process ONE file then rerun
+# 2 Queue active → process ONE file then rerun
 if st.session_state.run_active and st.session_state.pending:
     f      = st.session_state.pending.pop(0)
     stem   = Path(f.name).stem
@@ -914,7 +914,7 @@ if st.session_state.run_active and st.session_state.pending:
     st.session_state.results[stem] = {
         "peaks": peaks,
         "valleys": valleys,
-        "quality": qual,                             # ★ store it
+        "quality": qual,                             #  store it
         "xs": xs.tolist(),
         "ys": ys.tolist(),
         "marker": marker,
@@ -1021,7 +1021,7 @@ with tab_sum:
         st.dataframe(df, use_container_width=True)
 
         # the two extra download buttons you already kept:
-        st.download_button("⬇️ Download per-sample xs / ys",
+        st.download_button("Download per-sample xs / ys",
                    _make_curves_zip(),
                    "SampleCurves.zip",
                    mime="application/zip",
@@ -1029,21 +1029,21 @@ with tab_sum:
         
         if st.session_state.aligned_results:
             st.download_button(
-                "⬇️ Download Aligned Data",
+                "Download Aligned Data",
                 _make_aligned_zip(),
                 "alignedData.zip",
                 mime="application/zip",
                 key="aligned_dl_tab",
             )
 
-        st.download_button("⬇️ Download quality table",
+        st.download_button("Download quality table",
                    qual_df.to_csv(index=False).encode(),
                    "StainQuality.csv",
                    "text/csv",
                    key="qual_dl_tab")
     else:
         st.info("Run the detector first to see summary & downloads.")
-        # the two extra download buttons stay where they are ↓
+        # the two extra download buttons stay where they are
         # (nothing else to change here)
 
 # TAB 2 – quality‐score bar plot
@@ -1078,7 +1078,7 @@ with tab_quality:
 #         st.image(st.session_state.aligned_ridge_png,
 #                  use_container_width=True,
 #                  caption="Stacked densities – *after* alignment")
-#         st.download_button("⬇️ Download Aligned Data",
+#         st.download_button("Download Aligned Data",
 #                    _make_aligned_zip(),
 #                    "alignedData.zip",
 #                    mime="application/zip",
@@ -1113,7 +1113,7 @@ if st.session_state.results:
             z.writestr("summary.csv", df.to_csv(index=False).encode())
             for fn, png in st.session_state.fig_pngs.items():
                 z.writestr(fn, png)
-        st.download_button("⬇️ Download ZIP", buf.getvalue(),
+        st.download_button("Download ZIP", buf.getvalue(),
                            "PeakValleyResults.zip", "application/zip")
 
 
@@ -1121,10 +1121,10 @@ if st.session_state.results:
     st.markdown("---")
     align_col, dl_col = st.columns([2, 1])
     with align_col:
-        do_align = st.button("🔧 Align landmarks & normalize counts",
+        do_align = st.button("Align landmarks & normalize counts",
                              type="primary")
     if do_align:
-        with st.spinner("⌛ Running landmark alignment …"):
+        with st.spinner("Running landmark alignment …"):
             peaks_all   = [v["peaks"]   for v in st.session_state.results.values()]
             valleys_all = [v["valleys"] for v in st.session_state.results.values()]
             counts_all  = [st.session_state.results_raw[k]
@@ -1292,5 +1292,5 @@ if st.session_state.results:
             st.session_state.aligned_ridge_png = fig_to_png(fig)
             plt.close(fig)
 
-            st.success("✓ Landmarks aligned – scroll down for the stacked view or download the ZIP!")
+            st.success("Landmarks aligned – scroll down for the stacked view or download the ZIP!")
             st.rerun()

@@ -311,7 +311,7 @@ def kde_peaks_valleys(
     
     peaks_x = xs[peaks_idx].tolist()
 
-    if (min_x_sep is not None) and (len(peaks_x) > 1):   # 2️⃣ safe now
+    if (min_x_sep is not None) and (len(peaks_x) > 1):   # 2 safe now
         peaks_x.sort()
         keep = [peaks_x[0]]
         for px in peaks_x[1:]:

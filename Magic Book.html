@@ -30,6 +30,7 @@
     <li>Pick detection settings (see “Controls” below), then click <strong>Run detector</strong>.</li>
     <li>Inspect results under <strong>Processed datasets</strong> → <em>Plot</em> / <em>Parameters</em> / <em>Manual</em>.</li>
   </ol>
+  <p><img src="images/countsCSV.png" alt="Counts CSV workflow" style="max-width:100%;"></p>
 
   <h3>Path B — Whole dataset</h3>
   <ol class="list-tight">
@@ -38,6 +39,7 @@
     <li>(Optional) Filter by <strong>batch</strong>. Then select <strong>Marker(s)</strong> and <strong>Sample(s)</strong>.</li>
     <li>Click <strong>Generate counts CSVs</strong> to cache per-sample counts. You can switch to <strong>Counts CSV files</strong> or just hit <strong>Run detector</strong> (it auto-uses the generated counts).</li>
   </ol>
+  <p><img src="images/WholeDataset.png" alt="Whole dataset workflow" style="max-width:100%;"></p>
 
   <div class="note" role="note">
     <strong>Expected columns</strong>
@@ -59,6 +61,7 @@
     <thead>
       <tr>
         <th scope="col">Control</th>
+        <th scope="col">Screenshot</th>
         <th scope="col">What it does</th>
         <th scope="col">When to increase / decrease</th>
         <th scope="col">Practical tips</th>
@@ -67,60 +70,70 @@
     <tbody>
       <tr>
         <td><strong>Number of peaks</strong><br><code>Number of peaks</code> (fixed 1–6 or “GPT Automatic”)<span class="pill">Key</span></td>
+        <td><img src="images/numberPeaks.png" alt="Number of peaks" style="max-width:100%;"><br><img src="images/maxPeaks.png" alt="Maximum peaks" style="max-width:100%;"></td>
         <td>How many peaks to target. In GPT mode, the model estimates up to <em>Maximum peaks</em>.</td>
         <td><strong>Increase</strong> if you clearly see separate subpopulations.<br><strong>Decrease</strong> if peaks are being split by noise.</td>
         <td>Set a realistic <em>Maximum peaks</em> cap (e.g., 3–4) so auto-mode doesn’t over-segment.</td>
       </tr>
       <tr>
         <td><strong>Bandwidth</strong><br><code>Bandwidth mode</code> → Manual (“scott”, “silverman”, or numeric 0.5–1.0) or GPT</td>
+        <td><img src="images/bandwidth.png" alt="Bandwidth" style="max-width:100%;"></td>
         <td>KDE smoothness. Larger bandwidth → smoother curve; smaller → more detail.</td>
         <td><strong>Increase</strong> for noisy, jagged histograms (e.g., tiny n, many zeroes).<br><strong>Decrease</strong> to separate close peaks.</td>
         <td><code>scott</code> = robust default; <code>silverman</code> slightly smoother. Numeric like <code>0.8</code> or <code>1.0</code> applies a scale factor.</td>
       </tr>
       <tr>
         <td><strong>Prominence</strong><br><code>Prominence</code> (0.00–0.30) or GPT</td>
+        <td><img src="images/prominence.png" alt="Prominence" style="max-width:100%;"></td>
         <td>How tall a candidate peak must be above surroundings.</td>
         <td><strong>Increase</strong> to suppress tiny ripples / background.<br><strong>Decrease</strong> to keep shallow shoulders in heterogeneous samples.</td>
         <td>Start around <code>0.05</code>. If you lose a known small peak, step down to <code>0.03</code>.</td>
       </tr>
       <tr>
         <td><strong>Minimum peak width</strong><br><code>Min peak width</code> (0–6)</td>
+        <td><img src="images/minPeakWidth.png" alt="Minimum peak width" style="max-width:100%;"></td>
         <td>Rejects peaks narrower than this width (KDE grid units).</td>
         <td><strong>Increase</strong> to remove needle-like false positives.<br><strong>Decrease</strong> to allow sharp, narrow peaks.</td>
         <td>Try <code>1–2</code> for spiky data; keep <code>0</code> if genuine peaks are tight.</td>
       </tr>
       <tr>
         <td><strong>Curvature threshold</strong><br><code>Curvature thresh</code> (0 = off)</td>
+        <td><img src="images/curvature.png" alt="Curvature threshold" style="max-width:100%;"></td>
         <td>Filters out peaks with too-flat curvature near the top.</td>
         <td><strong>Increase</strong> to avoid broad, flat plateaus being mis-called.<br><strong>Decrease</strong> (toward <code>0</code>) for flat-topped biology that’s still meaningful.</td>
         <td>Small but non-zero (<code>0.0001–0.001</code>) often stabilizes calls.</td>
       </tr>
       <tr>
         <td><strong>Turning points as peaks</strong><br><code>Treat concave-down turning points as peaks</code></td>
+        <td><img src="images/turningPoint.png" alt="Turning points as peaks" style="max-width:100%;"></td>
         <td>Allows shoulders/inflections to count as peaks.</td>
         <td>Turn <strong>on</strong> for plateau + shoulder shapes.<br>Turn <strong>off</strong> if it over-splits broad peaks.</td>
         <td>Pairs well with a slightly higher <em>Min peak width</em> to avoid tiny shoulders.</td>
       </tr>
       <tr>
         <td><strong>Minimum peak separation</strong><br><code>Min peak separation</code></td>
+        <td><img src="images/minPeakSep.png" alt="Minimum peak separation" style="max-width:100%;"></td>
         <td>Forbids peaks closer than this distance (data units).</td>
         <td><strong>Increase</strong> to merge twins into a single broad peak.<br><strong>Decrease</strong> to allow very close doublets.</td>
         <td>If two true peaks keep merging, lower separation and slightly lower bandwidth.</td>
       </tr>
       <tr>
         <td><strong>Max KDE grid</strong><br><code>Max KDE grid</code> (4k–40k)</td>
+        <td><img src="images/maxKDE.png" alt="Max KDE grid" style="max-width:100%;"></td>
         <td>Resolution of the KDE x-grid.</td>
         <td><strong>Increase</strong> for fine detail on tightly packed peaks.<br><strong>Decrease</strong> to speed up large runs.</td>
         <td><code>20,000</code> is a good default; go <code>≥30,000</code> for ultra-close peaks.</td>
       </tr>
       <tr>
         <td><strong>Valley drop</strong><br><code>Valley drop (% of peak)</code></td>
+        <td><img src="images/ValleyDrop.png" alt="Valley drop" style="max-width:100%;"></td>
         <td>For single-peak cases, forces a valley where the curve falls to X% of the peak height (to the right).</td>
         <td><strong>Increase</strong> (e.g., 20–30%) if a tail never dips low enough to mark a valley.<br><strong>Decrease</strong> to demand a deeper dip.</td>
         <td>Useful for gating downstream even when only one clear mode exists.</td>
       </tr>
       <tr>
         <td><strong>Marker consistency</strong><br><code>Enforce marker consistency across samples</code></td>
+        <td><img src="images/consistency.png" alt="Marker consistency" style="max-width:100%;"></td>
         <td>Harmonizes peak/valley counts and ordering for the same marker across samples after all files finish.</td>
         <td>Keep <strong>on</strong> when you compare samples; turn <strong>off</strong> for unrelated markers or exploratory runs.</td>
         <td>After harmonization, per-sample plots update to reflect the consistent set.</td>
@@ -143,6 +156,7 @@
   <div class="grid cols-2">
       <div class="panel">
       <h4>Parameters tab (per-sample overrides)</h4>
+      <img src="images/parameters.png" alt="Parameters tab" style="max-width:100%;">
       <ul class="list-tight">
         <li>Choose <em>Preset</em> vs <em>Numeric</em> for bandwidth, set <em>Prominence</em>, and <em># peaks</em>.</li>
         <li>Any change marks the sample <em>dirty</em>; the next <strong>Run detector</strong> re-processes it with your overrides.</li>
@@ -150,6 +164,7 @@
     </div>
       <div class="panel">
       <h4>Manual tab (drag &amp; drop markers)</h4>
+      <img src="images/manual.png" alt="Manual tab" style="max-width:100%;">
       <ul class="list-tight">
         <li>Move existing <strong>Peak</strong> and <strong>Valley</strong> sliders; <em>Add</em> or <em>Delete</em>.</li>
         <li>Click <strong>Apply changes</strong> to finalize and refresh ridge plots.</li>
@@ -162,6 +177,7 @@
 
 <section id="alignment" aria-labelledby="alignment-heading">
   <h2 id="alignment-heading">Alignment &amp; normalization (cross-sample harmonization)</h2>
+  <p><img src="images/AlignmentParameters.png" alt="Alignment parameters" style="max-width:100%;"></p>
   <ol class="list-tight">
     <li>Pick a <strong>Landmark set</strong>:
       <ul class="list-tight">
@@ -177,7 +193,7 @@
         <li><em>Custom</em> — type exact numeric targets (defaults shown when selected: e.g., 2.0, 3.0, 5.0).</li>
       </ul>
     </li>
-    <li>Click <strong>Align landmarks &amp; normalize counts</strong>.</li>
+    <li>Click <strong>Align landmarks &amp; normalize counts</strong>.<br><img src="images/alignmentButton.png" alt="Align button" style="max-width:100%;"></li>
     <li>Review <em>Aligned</em> per-sample plots and the stacked ridge under <strong>Comparison</strong> (<em>Raw</em> vs <em>Aligned</em>).</li>
     <li>Export <strong>alignedData.zip</strong> (aligned counts per sample, aligned per-sample PNGs, aligned ridge, and <code>aligned_summary.csv</code>).</li>
   </ol>
@@ -192,6 +208,7 @@
 
 <section id="outputs" aria-labelledby="outputs-heading">
   <h2 id="outputs-heading">Outputs &amp; where to find them</h2>
+  <p><img src="images/output.png" alt="Outputs" style="max-width:100%;"></p>
   <ul class="list-tight">
     <li><strong>Processed datasets</strong> → <em>Plot</em>: per-sample KDE with peak (dashed) and valley (dotted) markers; <em>Parameters</em>: the values used; <em>Manual</em>: editor.</li>
     <li><strong>Summary ∣ downloads</strong> tab:
@@ -266,6 +283,7 @@
 
 <section id="gpt" aria-labelledby="gpt-heading">
   <h2 id="gpt-heading">Using the GPT helper (optional)</h2>
+  <p><img src="images/gpt.png" alt="GPT helper" style="max-width:100%;"></p>
   <ul class="list-tight">
     <li>Pick a <strong>Model</strong> (e.g., <code>o4-mini</code>, <code>gpt-4o-mini</code>, <code>gpt-4-turbo-preview</code>, or <em>Custom</em>), and paste your <strong>OpenAI API key</strong>.</li>
     <li>Enable “GPT automatic” for <em>Number of peaks</em>, <em>Bandwidth</em>, and/or <em>Prominence</em>.</li>
@@ -277,6 +295,7 @@
 
 <section id="lifecycle" aria-labelledby="lifecycle-heading">
   <h2 id="lifecycle-heading">Run lifecycle, pausing, and clearing</h2>
+  <p><img src="images/lifecycle.png" alt="Run lifecycle" style="max-width:100%;"></p>
   <ul class="list-tight">
     <li><strong>Run detector</strong> queues unprocessed or “dirty” files and processes them one-by-one.</li>
     <li><strong>Pause / Resume</strong> toggles mid-batch; progress bar shows <em>done/total</em>.</li>

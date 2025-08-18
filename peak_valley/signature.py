@@ -11,7 +11,7 @@ def shape_signature(counts: np.ndarray) -> str:
 
     • 16-bin histogram of z-scored data, normalised to sum-1  
     • 3 robust quantiles (q25,q50,q75)  
-    • md5 of the concatenated float32 vector ➜ 10-byte digest
+    • md5 of the concatenated float32 vector -> 10-byte digest
     """
     x = counts.astype("float32")
     if x.size > 2000:                         # subsample for speed

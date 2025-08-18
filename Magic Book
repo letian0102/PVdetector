@@ -1,4 +1,4 @@
-<!DOCTYPE html> <html lang="en"> <head> <meta charset="utf-8" /> <title>🔬 Peak &amp; Valley Detector — User Manual</title> <meta name="viewport" content="width=device-width, initial-scale=1" /> <style> :root{ --ink:#0f172a; --muted:#475569; --accent:#ef7d00; --bg:#fffaf3; --line:#e2e8f0; } *{box-sizing:border-box} body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ink);line-height:1.55;margin:0;background:#fff} header{background:var(--bg);border-bottom:1px solid var(--line);padding:28px 20px} h1{margin:0 0 6px;font-size:28px} h2{margin:28px 0 12px;font-size:22px} h3{margin:22px 0 8px;font-size:18px} h4{margin:16px 0 6px;font-size:16px} p{margin:10px 0} code,.kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f8fafc;border:1px solid var(--line);border-radius:6px;padding:0 4px} .note,.tip,.warn{border-left:4px solid;padding:12px 14px;background:#f8fafc;margin:14px 0;border-radius:6px} .note{border-color:#94a3b8} .tip{border-color:#10b981;background:#f0fdf4} .warn{border-color:#f59e0b;background:#fffbeb} .grid{display:grid;gap:14px} @media (min-width:960px){.grid.cols-2{grid-template-columns:1fr 1fr}} table{border-collapse:collapse;width:100%;margin:12px 0} th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top} th{background:#f8fafc} .panel{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:#fff} .panel h4{margin-top:0} .kbd{padding:2px 6px;border-radius:4px} .small{color:var(--muted);font-size:12px} .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#fff1e6;border:1px solid #ffd7b3;color:#6b3b00;font-size:12px;margin-left:6px} .list-tight li{margin:6px 0} .hr{border-top:1px dashed var(--line);margin:18px 0} main{padding:22px 20px;max-width:1080px;margin:0 auto} nav ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:6px} nav a{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:999px;text-decoration:none;color:var(--ink)} nav a:hover{border-color:var(--accent)} section{scroll-margin-top:80px} caption{caption-side:top;text-align:left;font-weight:600;margin-bottom:6px} </style> </head> <body> <header> <h1>Peak&nbsp;&amp;&nbsp;Valley Detector User Manual</h1> <p class="small">A practical, step-by-step guide to using the Streamlit interface.</p> <div class="warn"><strong>Heads-up:</strong> Refreshing or closing the page clears all uploaded data and results. Download what you need before you leave.</div> </header> <main role="main"> <nav aria-label="On this page"> <ul> <li><a href="#overview">Overview</a></li> <li><a href="#quickstart">Quick Start</a></li> <li><a href="#controls">Controls</a></li> <li><a href="#per-sample">Per-sample Tuning</a></li> <li><a href="#alignment">Alignment</a></li> <li><a href="#outputs">Outputs</a></li> <li><a href="#recipes">Quick Recipes</a></li> <li><a href="#gpt">GPT Helper</a></li> <li><a href="#lifecycle">Run Lifecycle</a></li> </ul> </nav>
+<!DOCTYPE html> <html lang="en"> <head> <meta charset="utf-8" /> <title> Peak &amp; Valley Detector — User Manual</title> <meta name="viewport" content="width=device-width, initial-scale=1" /> <style> :root{ --ink:#0f172a; --muted:#475569; --accent:#ef7d00; --bg:#fffaf3; --line:#e2e8f0; } *{box-sizing:border-box} body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ink);line-height:1.55;margin:0;background:#fff} header{background:var(--bg);border-bottom:1px solid var(--line);padding:28px 20px} h1{margin:0 0 6px;font-size:28px} h2{margin:28px 0 12px;font-size:22px} h3{margin:22px 0 8px;font-size:18px} h4{margin:16px 0 6px;font-size:16px} p{margin:10px 0} code,.kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f8fafc;border:1px solid var(--line);border-radius:6px;padding:0 4px} .note,.tip,.warn{border-left:4px solid;padding:12px 14px;background:#f8fafc;margin:14px 0;border-radius:6px} .note{border-color:#94a3b8} .tip{border-color:#10b981;background:#f0fdf4} .warn{border-color:#f59e0b;background:#fffbeb} .grid{display:grid;gap:14px} @media (min-width:960px){.grid.cols-2{grid-template-columns:1fr 1fr}} table{border-collapse:collapse;width:100%;margin:12px 0} th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top} th{background:#f8fafc} .panel{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:#fff} .panel h4{margin-top:0} .kbd{padding:2px 6px;border-radius:4px} .small{color:var(--muted);font-size:12px} .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#fff1e6;border:1px solid #ffd7b3;color:#6b3b00;font-size:12px;margin-left:6px} .list-tight li{margin:6px 0} .hr{border-top:1px dashed var(--line);margin:18px 0} main{padding:22px 20px;max-width:1080px;margin:0 auto} nav ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:6px} nav a{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:999px;text-decoration:none;color:var(--ink)} nav a:hover{border-color:var(--accent)} section{scroll-margin-top:80px} caption{caption-side:top;text-align:left;font-weight:600;margin-bottom:6px} </style> </head> <body> <header> <h1>Peak&nbsp;&amp;&nbsp;Valley Detector User Manual</h1> <p class="small">A practical, step-by-step guide to using the Streamlit interface.</p> <div class="warn"><strong>Heads-up:</strong> Refreshing or closing the page clears all uploaded data and results. Download what you need before you leave.</div> </header> <main role="main"> <nav aria-label="On this page"> <ul> <li><a href="#overview">Overview</a></li> <li><a href="#quickstart">Quick Start</a></li> <li><a href="#controls">Controls</a></li> <li><a href="#per-sample">Per-sample Tuning</a></li> <li><a href="#alignment">Alignment</a></li> <li><a href="#outputs">Outputs</a></li> <li><a href="#recipes">Quick Recipes</a></li> <li><a href="#gpt">GPT Helper</a></li> <li><a href="#lifecycle">Run Lifecycle</a></li> </ul> </nav>
 
     <section id="overview" aria-labelledby="overview-heading">
   <h2 id="overview-heading">What this app does (in one breath)</h2>
@@ -14,7 +14,7 @@
     </div>
     <div class="tip" role="note">
       <strong>Incremental engine</strong><br>
-      Files are processed one-by-one; you’ll see live plots and a progress bar. You can <span class="kbd">⏸ Pause</span> and <span class="kbd">▶ Resume</span> mid-run.
+      Files are processed one-by-one; you’ll see live plots and a progress bar. You can <span class="kbd">Pause</span> and <span class="kbd">Resume</span> mid-run.
     </div>
   </div>
 </section>
@@ -27,8 +27,8 @@
     <li>In the sidebar, choose <strong>Counts CSV files</strong>.</li>
     <li><strong>Upload</strong> your <code>_raw_counts.csv</code> files and select which to use.</li>
     <li>Set <strong>Header row</strong> (e.g., <code>-1</code> for no header) and <strong>Rows to skip</strong> if needed.</li>
-    <li>Pick detection settings (see “Controls” below), then click <strong>🚀 Run detector</strong>.</li>
-    <li>Inspect results under <strong>📊 Processed datasets</strong> → <em>Plot</em> / <em>Parameters</em> / <em>Manual</em>.</li>
+    <li>Pick detection settings (see “Controls” below), then click <strong>Run detector</strong>.</li>
+    <li>Inspect results under <strong>Processed datasets</strong> → <em>Plot</em> / <em>Parameters</em> / <em>Manual</em>.</li>
   </ol>
 
   <h3>Path B — Whole dataset</h3>
@@ -36,7 +36,7 @@
     <li>In the sidebar, choose <strong>Whole dataset</strong>.</li>
     <li>Upload <code>expression_matrix_combined.csv</code> and <code>cell_metadata_combined.csv</code>.</li>
     <li>(Optional) Filter by <strong>batch</strong>. Then select <strong>Marker(s)</strong> and <strong>Sample(s)</strong>.</li>
-    <li>Click <strong>Generate counts CSVs</strong> to cache per-sample counts. You can switch to <strong>Counts CSV files</strong> or just hit <strong>🚀 Run detector</strong> (it auto-uses the generated counts).</li>
+    <li>Click <strong>Generate counts CSVs</strong> to cache per-sample counts. You can switch to <strong>Counts CSV files</strong> or just hit <strong>Run detector</strong> (it auto-uses the generated counts).</li>
   </ol>
 
   <div class="note" role="note">
@@ -145,14 +145,14 @@
       <h4>Parameters tab (per-sample overrides)</h4>
       <ul class="list-tight">
         <li>Choose <em>Preset</em> vs <em>Numeric</em> for bandwidth, set <em>Prominence</em>, and <em># peaks</em>.</li>
-        <li>Any change marks the sample <em>dirty</em>; the next <strong>🚀 Run detector</strong> re-processes it with your overrides.</li>
+        <li>Any change marks the sample <em>dirty</em>; the next <strong>Run detector</strong> re-processes it with your overrides.</li>
       </ul>
     </div>
       <div class="panel">
       <h4>Manual tab (drag &amp; drop markers)</h4>
       <ul class="list-tight">
-        <li>Move existing <strong>Peak</strong> and <strong>Valley</strong> sliders; <em>➕ Add</em> or <em>❌ Delete</em>.</li>
-        <li>Click <strong>✅ Apply changes</strong> to finalize and refresh ridge plots.</li>
+        <li>Move existing <strong>Peak</strong> and <strong>Valley</strong> sliders; <em>Add</em> or <em>Delete</em>.</li>
+        <li>Click <strong>Apply changes</strong> to finalize and refresh ridge plots.</li>
       </ul>
     </div>
   </div>
@@ -177,7 +177,7 @@
         <li><em>Custom</em> — type exact numeric targets (defaults shown when selected: e.g., 2.0, 3.0, 5.0).</li>
       </ul>
     </li>
-    <li>Click <strong>🔧 Align landmarks &amp; normalize counts</strong>.</li>
+    <li>Click <strong>Align landmarks &amp; normalize counts</strong>.</li>
     <li>Review <em>Aligned</em> per-sample plots and the stacked ridge under <strong>Comparison</strong> (<em>Raw</em> vs <em>Aligned</em>).</li>
     <li>Export <strong>alignedData.zip</strong> (aligned counts per sample, aligned per-sample PNGs, aligned ridge, and <code>aligned_summary.csv</code>).</li>
   </ol>
@@ -193,7 +193,7 @@
 <section id="outputs" aria-labelledby="outputs-heading">
   <h2 id="outputs-heading">Outputs &amp; where to find them</h2>
   <ul class="list-tight">
-    <li><strong>📊 Processed datasets</strong> → <em>Plot</em>: per-sample KDE with peak (dashed) and valley (dotted) markers; <em>Parameters</em>: the values used; <em>Manual</em>: editor.</li>
+    <li><strong>Processed datasets</strong> → <em>Plot</em>: per-sample KDE with peak (dashed) and valley (dotted) markers; <em>Parameters</em>: the values used; <em>Manual</em>: editor.</li>
     <li><strong>Summary ∣ downloads</strong> tab:
       <ul class="list-tight">
         <li><strong>summary.csv</strong> (file, peaks, valleys, quality).</li>
@@ -204,7 +204,7 @@
     </li>
     <li><strong>Quality</strong> tab: bar chart of stain-quality scores (higher ≈ cleaner separation / contrast).</li>
     <li><strong>Comparison</strong> tab: stacked ridge plots (<em>Raw</em> vs <em>Aligned</em>).</li>
-    <li>Top-level <strong>⬇️ PeakValleyResults.zip</strong>: <code>summary.csv</code> + all per-sample PNGs.</li>
+    <li>Top-level <strong>PeakValleyResults.zip</strong>: <code>summary.csv</code> + all per-sample PNGs.</li>
   </ul>
 
   <div class="hr" aria-hidden="true"></div>
@@ -278,9 +278,9 @@
 <section id="lifecycle" aria-labelledby="lifecycle-heading">
   <h2 id="lifecycle-heading">Run lifecycle, pausing, and clearing</h2>
   <ul class="list-tight">
-    <li><strong>🚀 Run detector</strong> queues unprocessed or “dirty” files and processes them one-by-one.</li>
-    <li><strong>⏸ Pause / ▶ Resume</strong> toggles mid-batch; progress bar shows <em>done/total</em>.</li>
-    <li><strong>🗑 Clear results</strong> wipes results, plots, parameters, alignment artifacts, and queue (but not your cached uploads).</li>
+    <li><strong>Run detector</strong> queues unprocessed or “dirty” files and processes them one-by-one.</li>
+    <li><strong>Pause / Resume</strong> toggles mid-batch; progress bar shows <em>done/total</em>.</li>
+    <li><strong>Clear results</strong> wipes results, plots, parameters, alignment artifacts, and queue (but not your cached uploads).</li>
     <li>Cached uploads/dataset: clear them in the sidebar (<em>Clear cached uploads</em> / <em>Clear loaded dataset</em>).</li>
   </ul>
 

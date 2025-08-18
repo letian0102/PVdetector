@@ -590,6 +590,11 @@ with st.sidebar:
     min_sep   = st.slider("Min peak separation", 0.0, 10.0, 0.7, 0.1)
     grid_sz  = st.slider("Max KDE grid", 4_000, 40_000, 20_000, 1_000)
     val_drop = st.slider("Valley drop (% of peak)", 1, 50, 10, 1)
+    val_mode = st.radio(
+        "First valley method",
+        ["Slope change", "Valley drop"],
+        horizontal=True,
+    )
 
     st.checkbox(
         "Enforce marker consistency across samples",
@@ -798,7 +803,8 @@ if st.session_state.run_active and st.session_state.pending:
         drop_frac=val_drop / 100.0,
         min_x_sep=min_sep,
         curvature_thresh = curv if curv > 0 else None,
-        turning_peak     = tp
+        turning_peak     = tp,
+        first_valley     = "drop" if val_mode == "Valley drop" else "slope",
     )
 
     if len(peaks) == 1 and not valleys:

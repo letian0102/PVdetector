@@ -44,7 +44,7 @@ PVdetector is a Streamlit application for detecting density peaks and valleys in
 ### Detection settings
 - **Number of peaks** – enter a fixed value or select “GPT Automatic” with a user-defined maximum.
 - **Bandwidth** and **Prominence** – choose manual presets/scales or allow GPT to suggest values.
-- Additional controls include minimum peak width, curvature threshold, concave turning points, minimum separation, KDE grid size, valley drop, and marker-consistency enforcement.
+- Additional controls include minimum peak width, curvature threshold, concave turning points, minimum separation, KDE grid size, valley drop, first-valley method selection, and marker-consistency enforcement.
 
 ### Running the detector
 - Click **🚀 Run detector** to process selected files. A progress bar tracks the queue, and a Pause/Resume button provides mid-run control.

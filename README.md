@@ -44,11 +44,11 @@ PVdetector is a Streamlit application for detecting density peaks and valleys in
 ### Detection settings
 - **Number of peaks** – enter a fixed value or select “GPT Automatic” with a user-defined maximum.
 - **Bandwidth** and **Prominence** – choose manual presets/scales or allow GPT to suggest values.
-- Additional controls include minimum peak width, curvature threshold, concave turning points, minimum separation, KDE grid size, valley drop, and marker-consistency enforcement.
+- Additional controls include minimum peak width, curvature threshold, concave turning points, minimum separation, KDE grid size, valley drop, first-valley method selection, and marker-consistency enforcement.
 
 ### Running the detector
-- Click **🚀 Run detector** to process selected files. A progress bar tracks the queue, and a Pause/Resume button provides mid-run control.
-- Use **🗑 Clear results** to reset all session data.
+- Click **Run detector** to process selected files. A progress bar tracks the queue, and a Pause/Resume button provides mid-run control.
+- Use **Clear results** to reset all session data.
 
 ### Viewing and editing results
 Each processed sample appears under **Processed datasets** with three tabs:
@@ -58,7 +58,7 @@ Each processed sample appears under **Processed datasets** with three tabs:
 
 ### Alignment & normalization
 - Choose a landmark set and specify target positions (automatic or manual).
-- After detection, click **🔧 Align landmarks & normalize counts** to apply piece-wise linear warping across samples.
+- After detection, click **Align landmarks & normalize counts** to apply piece-wise linear warping across samples.
 - A comparison tab shows raw versus aligned ridge plots when alignment results exist.
 
 ### Downloads

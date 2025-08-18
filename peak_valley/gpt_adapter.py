@@ -13,7 +13,7 @@ def ask_gpt_bandwidth(
     client:      OpenAI,
     model_name:  str,
     counts_full: np.ndarray,
-    peak_amount: int,               # 🔸 NEW – expected modes
+    peak_amount: int,               #  NEW – expected modes
     default:     float = 'scott',
 ) -> float:
     """
@@ -69,7 +69,7 @@ def ask_gpt_prominence(
     """
     sig = shape_signature(counts_full)
     key = ("prom", sig)
-    if key in _cache:                       # ← cached ✔
+    if key in _cache:                       # ← cached 
         return _cache[key]
 
     # small numeric summary = prompt token-friendly

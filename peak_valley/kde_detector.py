@@ -126,6 +126,32 @@ def _first_valley_slope(xs: np.ndarray,
     return float(xs[idx])
 
 
+def _first_valley_drop(xs: np.ndarray,
+                       ys: np.ndarray,
+                       p_left: int,
+                       drop_frac: float) -> float | None:
+    """Pick first valley via drop‑fraction rule.
+
+    Searches to the right of ``p_left`` for the first turning point where
+    the KDE falls below ``drop_frac`` of the peak height.  If no such point
+    exists, the absolute minimum in the tail is returned.
+    """
+    seg = np.arange(p_left + 1, len(xs))
+    if seg.size == 0:
+        return None
+
+    y_thr = drop_frac * ys[p_left]
+    dy = np.diff(ys[seg])
+    turn = np.where((dy[:-1] < 0) & (dy[1:] >= 0))[0] + 1
+    turn = turn[ys[seg[turn]] <= y_thr]
+
+    if turn.size:
+        idx_val = seg[turn[0]]
+    else:
+        idx_val = seg[np.argmin(ys[seg])]
+    return float(xs[idx_val])
+
+
 def _valley_between(xs: np.ndarray,
                     ys: np.ndarray,
                     p_left: int,
@@ -212,6 +238,7 @@ def kde_peaks_valleys(
     min_valley_drop: float        = 0.15,
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,
+    first_valley   : str = "slope",
 ):
     x = np.asarray(data, float)
     if x.size == 0:
@@ -317,9 +344,12 @@ def kde_peaks_valleys(
     valleys_x: list[float] = []
     if len(peaks_idx) > 1:
         p0, p1 = peaks_idx[0], peaks_idx[1]
-        val = _first_valley_slope(xs, ys, p0, p1)
-        if val is None:
+        if first_valley == "drop":
             val = _valley_between(xs, ys, p0, p1, drop_frac)
+        else:
+            val = _first_valley_slope(xs, ys, p0, p1)
+            if val is None:
+                val = _valley_between(xs, ys, p0, p1, drop_frac)
         valleys_x.append(val)
 
         # remaining valleys (if any): classic rule
@@ -329,7 +359,10 @@ def kde_peaks_valleys(
             )
     elif len(peaks_idx) == 1:
         p0 = peaks_idx[0]
-        val = _first_valley_slope(xs, ys, p0)
+        if first_valley == "drop":
+            val = _first_valley_drop(xs, ys, p0, drop_frac)
+        else:
+            val = _first_valley_slope(xs, ys, p0)
         if val is not None:
             valleys_x.append(val)
 

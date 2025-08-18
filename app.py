@@ -430,7 +430,7 @@ def render_results(container):
                 else:
                     _manual_editor(stem)
         # delete button ------------------------------------------------------
-        if rowR.button("", key=f"del_{stem}"):
+        if rowR.button("❌", key=f"del_{stem}", help="Delete sample"):
             for bucket in ("results", "fig_pngs", "params", "dirty"):
                 st.session_state[bucket].pop(stem, None)
             for k in (f"{stem}__pk_list", f"{stem}__vl_list"):

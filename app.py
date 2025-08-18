@@ -274,7 +274,8 @@ def _manual_editor(stem: str):
         while i < len(pk_list):
             pk_list[i] = st.slider(
                 f"Peak #{i+1}", xmin, xmax, float(pk_list[i]), 0.01,
-                key=f"{stem}_pk_slider_{i}"
+                key=f"{stem}_pk_slider_{i}",
+                help="Adjust the position of this peak."
             )
             if st.button(f"❌ Delete peak #{i+1}", key=f"{stem}_pk_del_{i}"):
                 pk_list.pop(i)
@@ -293,7 +294,8 @@ def _manual_editor(stem: str):
         while i < len(vl_list):
             vl_list[i] = st.slider(
                 f"Valley #{i+1}", xmin, xmax, float(vl_list[i]), 0.01,
-                key=f"{stem}_vl_slider_{i}"
+                key=f"{stem}_vl_slider_{i}",
+                help="Adjust the position of this valley."
             )
             if st.button(f"❌ Delete valley #{i+1}", key=f"{stem}_vl_del_{i}"):
                 vl_list.pop(i)
@@ -388,7 +390,8 @@ def render_results(container):
                     "Bandwidth input type",
                     ["Preset", "Numeric"],
                     index=0 if init_mode=="Preset" else 1,
-                    key=f"{stem}_bw_type"
+                    key=f"{stem}_bw_type",
+                    help="Use a preset rule or enter a numeric bandwidth value."
                 )
                 if bw_input_type == "Preset":
                     bw_opt = st.selectbox(
@@ -396,7 +399,8 @@ def render_results(container):
                         ["scott", "silverman", "0.5", "0.8", "1.0"],
                         index=(["scott","silverman","0.5","0.8","1.0"].index(str(bw0))
                             if str(bw0) in ["scott","silverman","0.5","0.8","1.0"] else 0),
-                        key=f"{stem}_bw_preset"
+                        key=f"{stem}_bw_preset",
+                        help="Bandwidth rule or scaling factor for KDE smoothing."
                     )
                     bw_new = bw_opt
                 else:
@@ -406,10 +410,17 @@ def render_results(container):
                         max_value=5.0,
                         value=float(bw0) if isinstance(bw0, (int, float)) or bw0.replace(".", "", 1).isdigit() else 1.0,
                         step=0.01,
-                        key=f"{stem}_bw_slider"
+                        key=f"{stem}_bw_slider",
+                        help="Set the KDE bandwidth manually; higher values smooth more."
                     )
-                pr_new = st.text_input("Prominence", pr0, key=f"{stem}_pr")
-                k_new = st.number_input("# peaks", 1, 6, k0, key=f"{stem}_k")
+                pr_new = st.text_input(
+                    "Prominence", pr0, key=f"{stem}_pr",
+                    help="Minimum relative drop from peak to surrounding valleys."
+                )
+                k_new = st.number_input(
+                    "# peaks", 1, 6, k0, key=f"{stem}_k",
+                    help="Expected number of peaks to detect."
+                )
                 if (bw_new != bw0) or (pr_new != pr0) or (k_new != k0):
                     st.session_state.params[stem] = {"bw": bw_new, "prom": pr_new, "n_peaks": k_new}
                     st.session_state.dirty[stem] = True
@@ -430,13 +441,17 @@ def render_results(container):
 
 # ─────────────────────────────── SIDEBAR ─────────────────────────────────────
 with st.sidebar:
-    mode = st.radio("Choose mode", ["Counts CSV files", "Whole dataset"])
+    mode = st.radio(
+        "Choose mode", ["Counts CSV files", "Whole dataset"],
+        help="Work with individual counts files or an entire dataset."
+    )
 
     # 1️⃣  Counts-CSV workflow
     if mode == "Counts CSV files":
         uploaded_now = st.file_uploader(
             "Upload *_raw_counts.csv*", type=["csv"],
-            accept_multiple_files=True, key="csv_up"
+            accept_multiple_files=True, key="csv_up",
+            help="Add one or more raw counts CSV files."
         )
         if uploaded_now:
             names = {f.name for f in st.session_state.cached_uploads}
@@ -450,8 +465,10 @@ with st.sidebar:
         if st.session_state.cached_uploads:
             st.markdown("**Uploaded CSVs (cached)**")
             stems = [Path(f.name).stem for f in st.session_state.cached_uploads]
-            pick  = st.multiselect("Choose uploaded files", stems, stems,
-                                   key="pick_up2")
+            pick  = st.multiselect(
+                "Choose uploaded files", stems, stems,
+                key="pick_up2", help="Select cached uploads to include in analysis."
+            )
             for f in st.session_state.cached_uploads:
                 if Path(f.name).stem in pick:
                     use_uploads.append(f)
@@ -462,23 +479,34 @@ with st.sidebar:
         if st.session_state.generated_csvs:
             st.markdown("**Generated CSVs (from dataset)**")
             stems_g = [s for s, _ in st.session_state.generated_csvs]
-            pick_g  = st.multiselect("Choose generated files", stems_g, stems_g,
-                                     key="pick_gen2")
+            pick_g  = st.multiselect(
+                "Choose generated files", stems_g, stems_g,
+                key="pick_gen2", help="Select generated files from the dataset to use."
+            )
             for stem, bio in st.session_state.generated_csvs:
                 if stem in pick_g:
                     bio.seek(0); bio.name = f"{stem}.csv"
                     use_generated.append(bio)
 
-        header_row = st.number_input("Header row (−1 = none)", 0, step=1,
-                                     key="hdr")
-        skip_rows  = st.number_input("Rows to skip", 0, step=1, key="skip")
+        header_row = st.number_input(
+            "Header row (−1 = none)", 0, step=1,
+            key="hdr", help="Row index containing column names; -1 if absent."
+        )
+        skip_rows  = st.number_input(
+            "Rows to skip", 0, step=1, key="skip",
+            help="Number of initial rows to ignore in each file."
+        )
 
     # 2️⃣  Whole-dataset workflow
     else:
-        expr_file = st.file_uploader("expression_matrix_combined.csv",
-                                     type=["csv"])
-        meta_file = st.file_uploader("cell_metadata_combined.csv",
-                                     type=["csv"])
+        expr_file = st.file_uploader(
+            "expression_matrix_combined.csv", type=["csv"],
+            help="Upload the expression matrix CSV."
+        )
+        meta_file = st.file_uploader(
+            "cell_metadata_combined.csv", type=["csv"],
+            help="Upload the cell metadata CSV."
+        )
 
         if st.session_state.expr_df is not None:
             if st.button("🗑 Clear loaded dataset"):
@@ -505,8 +533,14 @@ with st.sidebar:
             markers = [c for c in expr_df.columns if c != "cell_id"]
             if "batch" in meta_df.columns:
                 batches = meta_df["batch"].unique().tolist()
-                all_b = st.checkbox("All batches", True, key="chk_b")
-                sel_b = batches if all_b else st.multiselect("Batch(es)", batches)
+                all_b = st.checkbox(
+                    "All batches", True, key="chk_b",
+                    help="Use every batch in the dataset."
+                )
+                sel_b = batches if all_b else st.multiselect(
+                    "Batch(es)", batches,
+                    help="Select which batches to include."
+                )
                 st.session_state.sel_batches = sel_b
                 meta_use = (meta_df if (all_b or not sel_b)
                             else meta_df[meta_df["batch"].isin(sel_b)])
@@ -515,10 +549,22 @@ with st.sidebar:
                 meta_use = meta_df
             samples = meta_use["sample"].unique().tolist()
 
-            all_m = st.checkbox("All markers", False, key="chk_m")
-            all_s = st.checkbox("All samples", False, key="chk_s")
-            sel_m = markers if all_m else st.multiselect("Marker(s)", markers)
-            sel_s = samples if all_s else st.multiselect("Sample(s)", samples)
+            all_m = st.checkbox(
+                "All markers", False, key="chk_m",
+                help="Include every marker without selecting individually."
+            )
+            all_s = st.checkbox(
+                "All samples", False, key="chk_s",
+                help="Include every sample without selecting individually."
+            )
+            sel_m = markers if all_m else st.multiselect(
+                "Marker(s)", markers,
+                help="Choose specific markers to process."
+            )
+            sel_s = samples if all_s else st.multiselect(
+                "Sample(s)", samples,
+                help="Choose specific samples to process."
+            )
             st.session_state.sel_markers = sel_m
             st.session_state.sel_samples = sel_s
 
@@ -557,48 +603,83 @@ with st.sidebar:
 
     # ───────────── Detection options ──────────────
     st.markdown("---\n### Detection")
-    auto = st.selectbox("Number of peaks",
-                        ["GPT Automatic", 1, 2, 3, 4, 5, 6])
+    auto = st.selectbox(
+        "Number of peaks", ["GPT Automatic", 1, 2, 3, 4, 5, 6],
+        help="Let GPT guess peak count or fix it manually."
+    )
     n_fixed = None if auto == "GPT Automatic" else int(auto)
     cap_min = n_fixed if n_fixed else 1
-    max_peaks = st.number_input("Maximum peaks (Automatic cap)",
-                                cap_min, 6, max(2, cap_min), step=1,
-                                disabled=(n_fixed is not None))
+    max_peaks = st.number_input(
+        "Maximum peaks (Automatic cap)",
+        cap_min, 6, max(2, cap_min), step=1,
+        disabled=(n_fixed is not None),
+        help="Upper limit when GPT determines peak count."
+    )
 
     # Bandwidth
-    bw_mode = st.selectbox("Bandwidth mode",
-                           ["Manual", "GPT automatic"])
+    bw_mode = st.selectbox(
+        "Bandwidth mode", ["Manual", "GPT automatic"],
+        help="Choose manual bandwidth or let GPT estimate it."
+    )
     if bw_mode == "Manual":
-        bw_opt = st.selectbox("Rule / scale",
-                              ["scott", "silverman",
-                               "0.5", "0.8", "1.0"],
-                              key="bw_sel")
+        bw_opt = st.selectbox(
+            "Rule / scale",
+            ["scott", "silverman", "0.5", "0.8", "1.0"],
+            key="bw_sel",
+            help="Bandwidth rule or multiplier when set manually."
+        )
         bw_val = (float(bw_opt)
                   if bw_opt.replace(".", "", 1).isdigit() else bw_opt)
     else:
         bw_val = None  # GPT later
 
     # Prominence
-    prom_mode = st.selectbox("Prominence",
-                             ["Manual", "GPT automatic"], key="prom_sel")
-    prom_val = (st.slider("Prominence value", 0.00, 0.30, 0.05, 0.01)
-                if prom_mode == "Manual" else None)
+    prom_mode = st.selectbox(
+        "Prominence", ["Manual", "GPT automatic"], key="prom_sel",
+        help="Set prominence threshold yourself or let GPT decide."
+    )
+    prom_val = (
+        st.slider(
+            "Prominence value", 0.00, 0.30, 0.05, 0.01,
+            help="Minimum relative drop from peak to valley."
+        )
+        if prom_mode == "Manual" else None
+    )
 
-    min_w    = st.slider("Min peak width", 0, 6, 0, 1)
-    curv = st.slider("Curvature thresh (0 = off)", 0.0000, 0.005, 0.0001, 0.0001)
-    tp   = st.checkbox("Treat concave-down turning points as peaks", False)
-    min_sep   = st.slider("Min peak separation", 0.0, 10.0, 0.7, 0.1)
-    grid_sz  = st.slider("Max KDE grid", 4_000, 40_000, 20_000, 1_000)
-    val_drop = st.slider("Valley drop (% of peak)", 1, 50, 10, 1)
+    min_w    = st.slider(
+        "Min peak width", 0, 6, 0, 1,
+        help="Smallest allowable width for detected peaks."
+    )
+    curv = st.slider(
+        "Curvature thresh (0 = off)", 0.0000, 0.005, 0.0001, 0.0001,
+        help="Filter out peaks with curvature below this value; 0 disables."
+    )
+    tp   = st.checkbox(
+        "Treat concave-down turning points as peaks", False,
+        help="Count concave-down turning points as valid peaks."
+    )
+    min_sep   = st.slider(
+        "Min peak separation", 0.0, 10.0, 0.7, 0.1,
+        help="Minimum distance required between peaks."
+    )
+    grid_sz  = st.slider(
+        "Max KDE grid", 4_000, 40_000, 20_000, 1_000,
+        help="Number of grid points for KDE; higher is slower but finer."
+    )
+    val_drop = st.slider(
+        "Valley drop (% of peak)", 1, 50, 10, 1,
+        help="Required drop from peak height to qualify as a valley."
+    )
     val_mode = st.radio(
-        "First valley method",
-        ["Slope change", "Valley drop"],
+        "First valley method", ["Slope change", "Valley drop"],
         horizontal=True,
+        help="How to determine the first valley after a peak."
     )
 
     st.checkbox(
         "Enforce marker consistency across samples",
         key="apply_consistency",
+        help="Use the same marker selection for all samples."
     )
 
     # ───────────── Alignment options ──────────────
@@ -608,6 +689,7 @@ with st.sidebar:
         "Landmark set",
         ["negPeak_valley_posPeak", "negPeak_valley", "negPeak", "valley"],
         index=0, key="align_mode",
+        help="Choose which landmarks to align across samples."
     )
 
     col_names = _cols_for_align_mode(
@@ -619,13 +701,15 @@ with st.sidebar:
         "Target landmark positions",
         ["Automatic (median across samples)", "Custom (enter numbers)"],
         horizontal=True, key="target_mode",
+        help="Use automatic median positions or provide custom targets."
     )
 
     def _ask_numbers(labels: list[str], defaults: list[float], prefix: str) -> list[float]:
         vals = []
         for lab, d, i in zip(labels, defaults, range(len(labels))):
             v = st.number_input(
-                f"Target {lab}", value=float(d), key=f"{prefix}_{i}"
+                f"Target {lab}", value=float(d), key=f"{prefix}_{i}",
+                help="Desired position for this landmark after alignment."
             )
             vals.append(float(v))
         return vals
@@ -649,11 +733,21 @@ with st.sidebar:
 
 
     st.markdown("---\n### GPT helper")
-    pick = st.selectbox("Model",
-                        ["o4-mini", "gpt-4o-mini",
-                         "gpt-4-turbo-preview", "Custom"])
-    gpt_model = st.text_input("Custom model") if pick == "Custom" else pick
-    api_key   = st.text_input("OpenAI API key", type="password")
+    pick = st.selectbox(
+        "Model",
+        ["o4-mini", "gpt-4o-mini", "gpt-4-turbo-preview", "Custom"],
+        help="GPT model used for automatic parameter suggestions."
+    )
+    gpt_model = (
+        st.text_input(
+            "Custom model", help="Name of OpenAI model when using 'Custom'."
+        )
+        if pick == "Custom" else pick
+    )
+    api_key   = st.text_input(
+        "OpenAI API key", type="password",
+        help="Key for accessing the OpenAI API."
+    )
 
 
 # ───────────────── main buttons & global progress bar ────────────────────────

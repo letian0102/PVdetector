@@ -1,4 +1,4 @@
-<!DOCTYPE html> <html lang="en"> <head> <meta charset="utf-8" /> <title>🔬 Peak &amp; Valley Detector — The Muggle’s Book of Charms</title> <meta name="viewport" content="width=device-width, initial-scale=1" /> <style> :root{ --ink:#0f172a; --muted:#475569; --accent:#ef7d00; --bg:#fffaf3; --line:#e2e8f0; } *{box-sizing:border-box} body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ink);line-height:1.55;margin:0;background:#fff} header{background:var(--bg);border-bottom:1px solid var(--line);padding:28px 20px} h1{margin:0 0 6px;font-size:28px} h2{margin:28px 0 12px;font-size:22px} h3{margin:22px 0 8px;font-size:18px} h4{margin:16px 0 6px;font-size:16px} p{margin:10px 0} code,.kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f8fafc;border:1px solid var(--line);border-radius:6px;padding:0 4px} .note,.tip,.warn{border-left:4px solid;padding:12px 14px;background:#f8fafc;margin:14px 0;border-radius:6px} .note{border-color:#94a3b8} .tip{border-color:#10b981;background:#f0fdf4} .warn{border-color:#f59e0b;background:#fffbeb} .grid{display:grid;gap:14px} @media (min-width:960px){.grid.cols-2{grid-template-columns:1fr 1fr}} table{border-collapse:collapse;width:100%;margin:12px 0} th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top} th{background:#f8fafc} .spell{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:#fff} .spell h4{margin-top:0} .kbd{padding:2px 6px;border-radius:4px} .small{color:var(--muted);font-size:12px} .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#fff1e6;border:1px solid #ffd7b3;color:#6b3b00;font-size:12px;margin-left:6px} .list-tight li{margin:6px 0} .hr{border-top:1px dashed var(--line);margin:18px 0} main{padding:22px 20px;max-width:1080px;margin:0 auto} nav ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:6px} nav a{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:999px;text-decoration:none;color:var(--ink)} nav a:hover{border-color:var(--accent)} section{scroll-margin-top:80px} caption{caption-side:top;text-align:left;font-weight:600;margin-bottom:6px} </style> </head> <body> <header> <h1>🔮 The Muggle’s Book of Charms for the Peak&nbsp;&amp;&nbsp;Valley Detector</h1> <p class="small">A practical, step-by-step guide to mastering the Streamlit interface — with a sprinkle of magic, zero fluff.</p> <div class="warn"><strong>Heads-up:</strong> Refreshing or closing the page clears all uploaded data and results. Download what you need before you leave.</div> </header> <main role="main"> <nav aria-label="On this page"> <ul> <li><a href="#overview">Overview</a></li> <li><a href="#quickstart">Quick Start</a></li> <li><a href="#charms">Charms (Controls)</a></li> <li><a href="#per-sample">Per-sample Tuning</a></li> <li><a href="#alignment">Alignment</a></li> <li><a href="#outputs">Outputs</a></li> <li><a href="#recipes">Quick Recipes</a></li> <li><a href="#gpt">GPT Helper</a></li> <li><a href="#lifecycle">Run Lifecycle</a></li> <li><a href="#troubleshooting">Troubleshooting</a></li> <li><a href="#glossary">Glossary</a></li> <li><a href="#checklist">Checklist</a></li> </ul> </nav>
+<!DOCTYPE html> <html lang="en"> <head> <meta charset="utf-8" /> <title>🔬 Peak &amp; Valley Detector — User Manual</title> <meta name="viewport" content="width=device-width, initial-scale=1" /> <style> :root{ --ink:#0f172a; --muted:#475569; --accent:#ef7d00; --bg:#fffaf3; --line:#e2e8f0; } *{box-sizing:border-box} body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ink);line-height:1.55;margin:0;background:#fff} header{background:var(--bg);border-bottom:1px solid var(--line);padding:28px 20px} h1{margin:0 0 6px;font-size:28px} h2{margin:28px 0 12px;font-size:22px} h3{margin:22px 0 8px;font-size:18px} h4{margin:16px 0 6px;font-size:16px} p{margin:10px 0} code,.kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f8fafc;border:1px solid var(--line);border-radius:6px;padding:0 4px} .note,.tip,.warn{border-left:4px solid;padding:12px 14px;background:#f8fafc;margin:14px 0;border-radius:6px} .note{border-color:#94a3b8} .tip{border-color:#10b981;background:#f0fdf4} .warn{border-color:#f59e0b;background:#fffbeb} .grid{display:grid;gap:14px} @media (min-width:960px){.grid.cols-2{grid-template-columns:1fr 1fr}} table{border-collapse:collapse;width:100%;margin:12px 0} th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top} th{background:#f8fafc} .panel{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:#fff} .panel h4{margin-top:0} .kbd{padding:2px 6px;border-radius:4px} .small{color:var(--muted);font-size:12px} .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#fff1e6;border:1px solid #ffd7b3;color:#6b3b00;font-size:12px;margin-left:6px} .list-tight li{margin:6px 0} .hr{border-top:1px dashed var(--line);margin:18px 0} main{padding:22px 20px;max-width:1080px;margin:0 auto} nav ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:6px} nav a{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:999px;text-decoration:none;color:var(--ink)} nav a:hover{border-color:var(--accent)} section{scroll-margin-top:80px} caption{caption-side:top;text-align:left;font-weight:600;margin-bottom:6px} </style> </head> <body> <header> <h1>Peak&nbsp;&amp;&nbsp;Valley Detector User Manual</h1> <p class="small">A practical, step-by-step guide to using the Streamlit interface.</p> <div class="warn"><strong>Heads-up:</strong> Refreshing or closing the page clears all uploaded data and results. Download what you need before you leave.</div> </header> <main role="main"> <nav aria-label="On this page"> <ul> <li><a href="#overview">Overview</a></li> <li><a href="#quickstart">Quick Start</a></li> <li><a href="#controls">Controls</a></li> <li><a href="#per-sample">Per-sample Tuning</a></li> <li><a href="#alignment">Alignment</a></li> <li><a href="#outputs">Outputs</a></li> <li><a href="#recipes">Quick Recipes</a></li> <li><a href="#gpt">GPT Helper</a></li> <li><a href="#lifecycle">Run Lifecycle</a></li> </ul> </nav>
 
     <section id="overview" aria-labelledby="overview-heading">
   <h2 id="overview-heading">What this app does (in one breath)</h2>
@@ -20,14 +20,14 @@
 </section>
 
 <section id="quickstart" aria-labelledby="quickstart-heading">
-  <h2 id="quickstart-heading">Quick Start (no wand license required)</h2>
+  <h2 id="quickstart-heading">Quick Start</h2>
 
   <h3>Path A — Counts CSV files</h3>
   <ol class="list-tight">
     <li>In the sidebar, choose <strong>Counts CSV files</strong>.</li>
     <li><strong>Upload</strong> your <code>_raw_counts.csv</code> files and select which to use.</li>
     <li>Set <strong>Header row</strong> (e.g., <code>-1</code> for no header) and <strong>Rows to skip</strong> if needed.</li>
-    <li>Pick detection settings (see “Charms” below), then click <strong>🚀 Run detector</strong>.</li>
+    <li>Pick detection settings (see “Controls” below), then click <strong>🚀 Run detector</strong>.</li>
     <li>Inspect results under <strong>📊 Processed datasets</strong> → <em>Plot</em> / <em>Parameters</em> / <em>Manual</em>.</li>
   </ol>
 
@@ -50,15 +50,15 @@
   <div class="hr" aria-hidden="true"></div>
 </section>
 
-<section id="charms" aria-labelledby="charms-heading">
-  <h2 id="charms-heading">The Charms (controls) and when to cast them</h2>
-  <p class="small">Think of each control as a spell. The table shows what it does and how to tune it for typical data patterns.</p>
+<section id="controls" aria-labelledby="controls-heading">
+  <h2 id="controls-heading">Controls and when to adjust them</h2>
+  <p class="small">The table shows what each control does and how to tune it for typical data patterns.</p>
 
-  <table aria-describedby="charms-desc">
-    <caption id="charms-desc">Controls, effects, and tuning guidance</caption>
+  <table aria-describedby="controls-desc">
+    <caption id="controls-desc">Controls, effects, and tuning guidance</caption>
     <thead>
       <tr>
-        <th scope="col">Charm (control)</th>
+        <th scope="col">Control</th>
         <th scope="col">What it does</th>
         <th scope="col">When to increase / decrease</th>
         <th scope="col">Practical tips</th>
@@ -66,61 +66,61 @@
     </thead>
     <tbody>
       <tr>
-        <td><strong>Lumos Peaks</strong><br><code>Number of peaks</code> (fixed 1–6 or “GPT Automatic”)<span class="pill">Key</span></td>
+        <td><strong>Number of peaks</strong><br><code>Number of peaks</code> (fixed 1–6 or “GPT Automatic”)<span class="pill">Key</span></td>
         <td>How many peaks to target. In GPT mode, the model estimates up to <em>Maximum peaks</em>.</td>
         <td><strong>Increase</strong> if you clearly see separate subpopulations.<br><strong>Decrease</strong> if peaks are being split by noise.</td>
         <td>Set a realistic <em>Maximum peaks</em> cap (e.g., 3–4) so auto-mode doesn’t over-segment.</td>
       </tr>
       <tr>
-        <td><strong>Alohomora Bandwidth</strong><br><code>Bandwidth mode</code> → Manual (“scott”, “silverman”, or numeric 0.5–1.0) or GPT</td>
+        <td><strong>Bandwidth</strong><br><code>Bandwidth mode</code> → Manual (“scott”, “silverman”, or numeric 0.5–1.0) or GPT</td>
         <td>KDE smoothness. Larger bandwidth → smoother curve; smaller → more detail.</td>
         <td><strong>Increase</strong> for noisy, jagged histograms (e.g., tiny n, many zeroes).<br><strong>Decrease</strong> to separate close peaks.</td>
         <td><code>scott</code> = robust default; <code>silverman</code> slightly smoother. Numeric like <code>0.8</code> or <code>1.0</code> applies a scale factor.</td>
       </tr>
       <tr>
-        <td><strong>Sonorus Prominence</strong><br><code>Prominence</code> (0.00–0.30) or GPT</td>
+        <td><strong>Prominence</strong><br><code>Prominence</code> (0.00–0.30) or GPT</td>
         <td>How tall a candidate peak must be above surroundings.</td>
         <td><strong>Increase</strong> to suppress tiny ripples / background.<br><strong>Decrease</strong> to keep shallow shoulders in heterogeneous samples.</td>
         <td>Start around <code>0.05</code>. If you lose a known small peak, step down to <code>0.03</code>.</td>
       </tr>
       <tr>
-        <td><strong>Colovaria Width</strong><br><code>Min peak width</code> (0–6)</td>
+        <td><strong>Minimum peak width</strong><br><code>Min peak width</code> (0–6)</td>
         <td>Rejects peaks narrower than this width (KDE grid units).</td>
         <td><strong>Increase</strong> to remove needle-like false positives.<br><strong>Decrease</strong> to allow sharp, narrow peaks.</td>
         <td>Try <code>1–2</code> for spiky data; keep <code>0</code> if genuine peaks are tight.</td>
       </tr>
       <tr>
-        <td><strong>Curvatura</strong><br><code>Curvature thresh</code> (0 = off)</td>
+        <td><strong>Curvature threshold</strong><br><code>Curvature thresh</code> (0 = off)</td>
         <td>Filters out peaks with too-flat curvature near the top.</td>
         <td><strong>Increase</strong> to avoid broad, flat plateaus being mis-called.<br><strong>Decrease</strong> (toward <code>0</code>) for flat-topped biology that’s still meaningful.</td>
         <td>Small but non-zero (<code>0.0001–0.001</code>) often stabilizes calls.</td>
       </tr>
       <tr>
-        <td><strong>Inflectio</strong><br><code>Treat concave-down turning points as peaks</code></td>
+        <td><strong>Turning points as peaks</strong><br><code>Treat concave-down turning points as peaks</code></td>
         <td>Allows shoulders/inflections to count as peaks.</td>
         <td>Turn <strong>on</strong> for plateau + shoulder shapes.<br>Turn <strong>off</strong> if it over-splits broad peaks.</td>
         <td>Pairs well with a slightly higher <em>Min peak width</em> to avoid tiny shoulders.</td>
       </tr>
       <tr>
-        <td><strong>Separare</strong><br><code>Min peak separation</code></td>
+        <td><strong>Minimum peak separation</strong><br><code>Min peak separation</code></td>
         <td>Forbids peaks closer than this distance (data units).</td>
         <td><strong>Increase</strong> to merge twins into a single broad peak.<br><strong>Decrease</strong> to allow very close doublets.</td>
         <td>If two true peaks keep merging, lower separation and slightly lower bandwidth.</td>
       </tr>
       <tr>
-        <td><strong>Gridio</strong><br><code>Max KDE grid</code> (4k–40k)</td>
+        <td><strong>Max KDE grid</strong><br><code>Max KDE grid</code> (4k–40k)</td>
         <td>Resolution of the KDE x-grid.</td>
         <td><strong>Increase</strong> for fine detail on tightly packed peaks.<br><strong>Decrease</strong> to speed up large runs.</td>
         <td><code>20,000</code> is a good default; go <code>≥30,000</code> for ultra-close peaks.</td>
       </tr>
       <tr>
-        <td><strong>Defluo Valley</strong><br><code>Valley drop (% of peak)</code></td>
+        <td><strong>Valley drop</strong><br><code>Valley drop (% of peak)</code></td>
         <td>For single-peak cases, forces a valley where the curve falls to X% of the peak height (to the right).</td>
         <td><strong>Increase</strong> (e.g., 20–30%) if a tail never dips low enough to mark a valley.<br><strong>Decrease</strong> to demand a deeper dip.</td>
         <td>Useful for gating downstream even when only one clear mode exists.</td>
       </tr>
       <tr>
-        <td><strong>Concordia</strong><br><code>Enforce marker consistency across samples</code></td>
+        <td><strong>Marker consistency</strong><br><code>Enforce marker consistency across samples</code></td>
         <td>Harmonizes peak/valley counts and ordering for the same marker across samples after all files finish.</td>
         <td>Keep <strong>on</strong> when you compare samples; turn <strong>off</strong> for unrelated markers or exploratory runs.</td>
         <td>After harmonization, per-sample plots update to reflect the consistent set.</td>
@@ -138,17 +138,17 @@
 </section>
 
 <section id="per-sample" aria-labelledby="per-sample-heading">
-  <h2 id="per-sample-heading">Per-sample tuning (hands-on wandwork)</h2>
+  <h2 id="per-sample-heading">Per-sample tuning</h2>
 
   <div class="grid cols-2">
-    <div class="spell">
+      <div class="panel">
       <h4>Parameters tab (per-sample overrides)</h4>
       <ul class="list-tight">
         <li>Choose <em>Preset</em> vs <em>Numeric</em> for bandwidth, set <em>Prominence</em>, and <em># peaks</em>.</li>
         <li>Any change marks the sample <em>dirty</em>; the next <strong>🚀 Run detector</strong> re-processes it with your overrides.</li>
       </ul>
     </div>
-    <div class="spell">
+      <div class="panel">
       <h4>Manual tab (drag &amp; drop markers)</h4>
       <ul class="list-tight">
         <li>Move existing <strong>Peak</strong> and <strong>Valley</strong> sliders; <em>➕ Add</em> or <em>❌ Delete</em>.</li>
@@ -285,50 +285,6 @@
   </ul>
 
   <div class="hr" aria-hidden="true"></div>
-</section>
-
-<section id="troubleshooting" aria-labelledby="troubleshooting-heading">
-  <h2 id="troubleshooting-heading">Troubleshooting (counter-spells)</h2>
-  <ul class="list-tight">
-    <li><strong>“I see jagged ripples everywhere.”</strong> Raise bandwidth (≤ <code>1.0</code>), bump <em>Prominence</em> to <code>0.08–0.12</code>, set <em>Min peak width</em> to <code>1–2</code>.</li>
-    <li><strong>“Two true peaks keep merging.”</strong> Lower bandwidth (<code>0.5–0.7</code>), reduce <em>Min separation</em>, ensure <em>Prominence</em> ≤ <code>0.06</code>, increase <em>Grid</em> to ≥ <code>30k</code>.</li>
-    <li><strong>“It calls a fake second peak on a broad top.”</strong> Increase <em>Curvature</em> to ~<code>0.0005</code> or turn off “Turning points as peaks”.</li>
-    <li><strong>“Single peak but no valley detected.”</strong> Increase <em>Valley drop</em> to <code>20–30%</code>.</li>
-    <li><strong>“Different samples have different counts of peaks.”</strong> Turn on <em>Enforce marker consistency across samples</em>; re-run.</li>
-    <li><strong>“It’s slow on big batches.”</strong> Reduce <em>Grid</em> size (e.g., to <code>12–16k</code>); prefer manual settings over GPT; pause/resume as needed.</li>
-    <li><strong>“Header/skip rows look wrong.”</strong> In <em>Counts CSV files</em>, set <em>Header row</em> to <code>-1</code> if there is no header; use <em>Rows to skip</em> for preambles.</li>
-  </ul>
-
-  <div class="hr" aria-hidden="true"></div>
-</section>
-
-<section id="glossary" aria-labelledby="glossary-heading">
-  <h2 id="glossary-heading">Mini-glossary</h2>
-  <ul class="list-tight">
-    <li><strong>KDE (Kernel Density Estimate)</strong>: a smoothed curve approximating the distribution of transformed counts.</li>
-    <li><strong>Bandwidth</strong>: smoothing strength for KDE.</li>
-    <li><strong>Prominence</strong>: how much a peak stands out above its surroundings.</li>
-    <li><strong>Peaks / Valleys</strong>: local maxima / minima on the KDE.</li>
-    <li><strong>Landmarks</strong>: special positions (negative peak, valley, positive peak) used for cross-sample alignment.</li>
-    <li><strong>Stain-quality score</strong>: a scalar quality indicator per sample (higher ≈ cleaner separation / more informative signal).</li>
-  </ul>
-
-  <div class="hr" aria-hidden="true"></div>
-</section>
-
-<section id="checklist" aria-labelledby="checklist-heading">
-  <h2 id="checklist-heading">Final pre-flight checklist</h2>
-  <ul class="list-tight">
-    <li>Choose your workflow (CSV vs Whole dataset) and load data.</li>
-    <li>Set peak strategy (fixed vs GPT), bandwidth, and prominence.</li>
-    <li>Tune width/separation/curvature for your pattern.</li>
-    <li>Run, inspect plots, adjust per-sample if needed.</li>
-    <li>(Optional) Align landmarks for cross-sample comparability.</li>
-    <li>Download summary, curves, quality table, and aligned ZIPs.</li>
-  </ul>
-
-  <p class="small" style="margin-top:18px;color:#64748b">That’s it. You’re now licensed to cast data-analysis charms responsibly. 🪄</p>
-</section>
-
+  </section>
 
 </main> </body> </html>

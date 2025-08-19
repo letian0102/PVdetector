@@ -3,53 +3,77 @@ import re, textwrap
 from openai import OpenAI, OpenAIError
 import numpy as np
 from .signature import shape_signature
+from .kde_detector import quick_peak_estimate
 
 __all__ = ["ask_gpt_peak_count", "ask_gpt_prominence", "ask_gpt_bandwidth"]
 
 # keep a simple run-time cache; survives a single Streamlit run
-_cache: dict[tuple[str, str], float | int] = {}  # (tag, sig) → value
+_cache: dict[tuple, float | int | str] = {}  # (tag, sig[, extra]) → value
 
 def ask_gpt_bandwidth(
-    client:      OpenAI,
-    model_name:  str,
+    client: OpenAI,
+    model_name: str,
     counts_full: np.ndarray,
-    peak_amount: int,               #  NEW – expected modes
-    default:     float = 'scott',
-) -> float:
+    peak_amount: int,
+    default: float | str = "scott",
+) -> float | str:
     """
-    Return a KDE bandwidth *scale factor* in **[0.1 … 0.5]** that makes the
-    KDE reveal *about* ``peak_amount`` peaks.
-    The answer is memo-cached by the (signature, expected_peaks) pair.
+    Return a KDE bandwidth *scale factor* in **[0.10‥0.50]**.
+
+    The function scans a few candidate scale factors, estimates how many
+    peaks each reveals, and asks GPT to pick the value that should yield
+    roughly ``peak_amount`` peaks.  The result is memo‑cached by the
+    (distribution signature, expected peak count) pair.
     """
+
+    if client is None:
+        return default
+
     sig = shape_signature(counts_full)
     key = ("bw", sig, peak_amount)
-    if key in _cache:                      # reuse identical call
+    if key in _cache:
         return _cache[key]
 
-    # ── construct a compact prompt ───────────────────────────────────────
-    #  • Give GPT a concise numeric summary (5-number summary + length)
-    #  • State the desired number of peaks explicitly
+    # down-sample for speed and avoid huge prompts
+    x = counts_full.astype("float64")
+    if x.size > 2000:
+        x = np.random.choice(x, 2000, replace=False)
+
+    # evaluate a small grid of candidate bandwidth scale factors
+    scales = np.round(np.linspace(0.10, 0.50, 9), 2)
+    peak_counts: list[int] = []
+    for s in scales:
+        try:
+            n, _ = quick_peak_estimate(x, prominence=0.05, bw=s,
+                                       min_width=None, grid_size=256)
+        except Exception:
+            n = 0
+        peak_counts.append(int(n))
+
+    q = np.percentile(x, [5, 25, 50, 75, 95]).round(2).tolist()
+    table = ", ".join(f"{s:.2f}\u2192{p}" for s, p in zip(scales, peak_counts))
     prompt = textwrap.dedent(f"""
-        You are tuning the bandwidth for a 1-D Gaussian KDE.
-        The data is {counts_full}
+        We are tuning the scale factor for a 1-D Gaussian KDE bandwidth.
+        Data summary: n={x.size}, p5={q[0]}, p25={q[1]}, median={q[2]},
+        p75={q[3]}, p95={q[4]}.
 
-        Choose a *scale factor* in the **0.10-0.50** range
-        so that the KDE curve shows **≈ {peak_amount} distinct peaks**:
-        ─ if the bandwidth is too small the curve will be noisy (too many peaks),
-        ─ if it is too large it will merge peaks.
+        Candidate scale factors and their estimated peak counts:
+        {table}
 
-        Reply with just a number with two decimal places, nothing else.
+        Choose a scale factor between 0.10 and 0.50 so that about
+        {peak_amount} peaks appear.  Reply with only the number using
+        two decimals.
     """).strip()
 
     try:
-        rsp  = client.chat.completions.create(
+        rsp = client.chat.completions.create(
             model=model_name,
             seed=2025,
             timeout=45,
             messages=[{"role": "user", "content": prompt}],
         )
         val = float(re.findall(r"\d*\.?\d+", rsp.choices[0].message.content)[0])
-        val = float(np.clip(val, 0.10, 0.50))      # final safety clamp
+        val = float(np.clip(val, 0.10, 0.50))
     except Exception:
         val = default
 

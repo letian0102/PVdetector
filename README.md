@@ -4,7 +4,7 @@ PVdetector is a Streamlit application for detecting density peaks and valleys in
 
 ## Features
 - Upload raw counts or full datasets (expression matrix + metadata).
-- Automatic or manual control over KDE bandwidth, peak count, and prominence. GPT-based suggestions are available when an OpenAI API key is provided.
+- Automatic or manual control over KDE bandwidth, peak count, and prominence. GPT-based suggestions (bandwidth scans multiple candidates for optimal peak separation) are available when an OpenAI API key is provided.
 - Interactive per-sample visualization with manual editing of peaks and valleys.
 - Optional enforcement of marker consistency across samples.
 - Landmark alignment and piece-wise linear normalization across samples.

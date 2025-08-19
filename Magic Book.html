@@ -1,4 +1,4 @@
-<!DOCTYPE html> <html lang="en"> <head> <meta charset="utf-8" /> <title> Peak &amp; Valley Detector — User Manual</title> <meta name="viewport" content="width=device-width, initial-scale=1" /> <style> :root{ --ink:#0f172a; --muted:#475569; --accent:#ef7d00; --bg:#fffaf3; --line:#e2e8f0; } *{box-sizing:border-box} body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ink);line-height:1.55;margin:0;background:#fff} header{background:var(--bg);border-bottom:1px solid var(--line);padding:28px 20px} h1{margin:0 0 6px;font-size:28px} h2{margin:28px 0 12px;font-size:22px} h3{margin:22px 0 8px;font-size:18px} h4{margin:16px 0 6px;font-size:16px} p{margin:10px 0} code,.kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f8fafc;border:1px solid var(--line);border-radius:6px;padding:0 4px} .note,.tip,.warn{border-left:4px solid;padding:12px 14px;background:#f8fafc;margin:14px 0;border-radius:6px} .note{border-color:#94a3b8} .tip{border-color:#10b981;background:#f0fdf4} .warn{border-color:#f59e0b;background:#fffbeb} .grid{display:grid;gap:14px} @media (min-width:960px){.grid.cols-2{grid-template-columns:1fr 1fr}} table{border-collapse:collapse;width:100%;margin:12px 0} th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top} th{background:#f8fafc} .panel{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:#fff} .panel h4{margin-top:0} .kbd{padding:2px 6px;border-radius:4px} .small{color:var(--muted);font-size:12px} .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#fff1e6;border:1px solid #ffd7b3;color:#6b3b00;font-size:12px;margin-left:6px} .list-tight li{margin:6px 0} .hr{border-top:1px dashed var(--line);margin:18px 0} main{padding:22px 20px;max-width:1080px;margin:0 auto} nav ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:6px} nav a{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:999px;text-decoration:none;color:var(--ink)} nav a:hover{border-color:var(--accent)} section{scroll-margin-top:80px} caption{caption-side:top;text-align:left;font-weight:600;margin-bottom:6px} </style> </head> <body> <header> <h1>Peak&nbsp;&amp;&nbsp;Valley Detector User Manual</h1> <p class="small">A practical, step-by-step guide to using the Streamlit interface.</p> <div class="warn"><strong>Heads-up:</strong> Refreshing or closing the page clears all uploaded data and results. Download what you need before you leave.</div> </header> <main role="main"> <nav aria-label="On this page"> <ul> <li><a href="#overview">Overview</a></li> <li><a href="#quickstart">Quick Start</a></li> <li><a href="#controls">Controls</a></li> <li><a href="#per-sample">Per-sample Tuning</a></li> <li><a href="#alignment">Alignment</a></li> <li><a href="#outputs">Outputs</a></li> <li><a href="#recipes">Quick Recipes</a></li> <li><a href="#gpt">GPT Helper</a></li> <li><a href="#lifecycle">Run Lifecycle</a></li> </ul> </nav>
+<!DOCTYPE html> <html lang="en"> <head> <meta charset="utf-8" /> <title> Peak &amp; Valley Detector — User Manual</title> <meta name="viewport" content="width=device-width, initial-scale=1" /> <style> :root{ --ink:#0f172a; --muted:#475569; --accent:#ef7d00; --bg:#fffaf3; --line:#e2e8f0; } *{box-sizing:border-box} body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ink);line-height:1.55;margin:0;background:#fff} header{background:var(--bg);border-bottom:1px solid var(--line);padding:28px 20px} h1{margin:0 0 6px;font-size:28px} h2{margin:28px 0 12px;font-size:22px} h3{margin:22px 0 8px;font-size:18px} h4{margin:16px 0 6px;font-size:16px} p{margin:10px 0} code,.kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f8fafc;border:1px solid var(--line);border-radius:6px;padding:0 4px} .note,.tip,.warn{border-left:4px solid;padding:12px 14px;background:#f8fafc;margin:14px 0;border-radius:6px} .note{border-color:#94a3b8} .tip{border-color:#10b981;background:#f0fdf4} .warn{border-color:#f59e0b;background:#fffbeb} .grid{display:grid;gap:14px} @media (min-width:960px){.grid.cols-2{grid-template-columns:1fr 1fr}} table{border-collapse:collapse;width:100%;margin:12px 0} th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top} th{background:#f8fafc} .panel{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:#fff} .panel h4{margin-top:0} .kbd{padding:2px 6px;border-radius:4px} .small{color:var(--muted);font-size:12px} .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#fff1e6;border:1px solid #ffd7b3;color:#6b3b00;font-size:12px;margin-left:6px} .list-tight li{margin:6px 0} .hr{border-top:1px dashed var(--line);margin:18px 0} main{padding:22px 20px;max-width:1080px;margin:0 auto} nav ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:6px} nav a{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:999px;text-decoration:none;color:var(--ink)} nav a:hover{border-color:var(--accent)} section{scroll-margin-top:80px} caption{caption-side:top;text-align:left;font-weight:600;margin-bottom:6px} table img{width:200px !important;max-width:200px !important;height:auto} </style> </head> <body> <header> <h1>Peak&nbsp;&amp;&nbsp;Valley Detector User Manual</h1> <p class="small">A practical, step-by-step guide to using the Streamlit interface.</p> <div class="warn"><strong>Heads-up:</strong> Refreshing or closing the page clears all uploaded data and results. Download what you need before you leave.</div> </header> <main role="main"> <nav aria-label="On this page"> <ul> <li><a href="#overview">Overview</a></li> <li><a href="#quickstart">Quick Start</a></li> <li><a href="#controls">Controls</a></li> <li><a href="#per-sample">Per-sample Tuning</a></li> <li><a href="#alignment">Alignment</a></li> <li><a href="#outputs">Outputs</a></li> <li><a href="#recipes">Quick Recipes</a></li> <li><a href="#gpt">GPT Helper</a></li> <li><a href="#lifecycle">Run Lifecycle</a></li> </ul> </nav>
 
     <section id="overview" aria-labelledby="overview-heading">
   <h2 id="overview-heading">What this app does (in one breath)</h2>
@@ -237,6 +237,7 @@
         <th scope="col">Pattern</th>
         <th scope="col">Suggested settings</th>
         <th scope="col">Why</th>
+        <th scope="col">Example</th>
       </tr>
     </thead>
     <tbody>
@@ -244,31 +245,37 @@
         <td>Noisy, jagged histogram (low n)</td>
         <td>Bandwidth: <code>silverman</code> or <code>1.0</code><br>Prominence: <code>0.07–0.12</code><br>Min width: <code>1–2</code><br>Curvature: <code>0.0005</code></td>
         <td>Smooths noise, rejects needle peaks, requires clearer bumps.</td>
+        <td><img src="images/jagged.png" alt="Jagged histogram example"></td>
       </tr>
       <tr>
         <td>Two peaks very close</td>
         <td>Bandwidth: <code>0.5–0.8</code><br>Prominence: <code>0.03–0.06</code><br>Min separation: slightly <em>lower</em> than default<br>Grid: <code>≥ 30,000</code></td>
         <td>Sharper KDE + tighter separation + finer grid resolves the doublet.</td>
+        <td><img src="images/closePeaks.png" alt="Two close peaks example"></td>
       </tr>
       <tr>
         <td>Broad plateau with a shoulder</td>
         <td>Turn on <em>Turning points as peaks</em><br>Curvature: small (<code>0.0001</code>) or <code>0</code><br>Min width: <code>1</code></td>
         <td>Treats the shoulder as a real peak; avoids filtering flat tops.</td>
+        <td><img src="images/shoulderPeak.png" alt="Shoulder peak example"></td>
       </tr>
       <tr>
         <td>Long right tail, single clear peak</td>
         <td>Bandwidth: <code>scott</code> or <code>silverman</code><br>Valley drop: <code>20–30%</code></td>
         <td>Forces a reasonable valley along the tail for downstream gating.</td>
+        <td><img src="images/onePeak.png" alt="Single peak example"></td>
       </tr>
       <tr>
         <td>Over-segmentation (too many peaks)</td>
         <td>Lower <em>Maximum peaks</em> or fix <em># peaks</em><br>Bandwidth: nudge up (e.g., <code>0.8–1.0</code>)<br>Prominence: nudge up (e.g., <code>0.06–0.1</code>)<br>Min separation: nudge up</td>
         <td>Suppresses minor ripples and merges spurious splits.</td>
+        <td><img src="images/manyPeaks.png" alt="Many peaks example"></td>
       </tr>
       <tr>
         <td>Under-segmentation (merging distinct peaks)</td>
         <td>Bandwidth: nudge down (e.g., <code>0.5–0.7</code>)<br>Prominence: nudge down (<code>0.03–0.05</code>)<br>Min separation: nudge down<br>Grid: increase</td>
         <td>Restores resolution and allows closer peaks to appear.</td>
+        <td><img src="images/lessPeaks.png" alt="Few peaks example"></td>
       </tr>
     </tbody>
   </table>

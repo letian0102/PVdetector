@@ -260,7 +260,12 @@ def kde_peaks_valleys(
     grid_dx  = xs[1] - xs[0]
     distance = None                       # (NEW)  hard x-spacing
     if min_x_sep is not None:
-        distance = int(min_x_sep / grid_dx)
+        # ``scipy.signal.find_peaks`` requires ``distance`` >= 1.  For very
+        # small ``min_x_sep`` relative to the grid spacing the integer
+        # division above could yield ``0`` which would raise a ``ValueError``.
+        # Clamp the value so that ``find_peaks`` always receives a valid
+        # minimum distance.
+        distance = max(1, int(min_x_sep / grid_dx))
     kw = {"prominence": prominence}
     if min_width:
         kw["width"] = min_width

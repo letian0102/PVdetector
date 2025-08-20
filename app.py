@@ -3,6 +3,7 @@
 from __future__ import annotations
 import io, zipfile, re
 from pathlib import Path
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
@@ -441,6 +442,10 @@ def render_results(container):
 
 # ─────────────────────────────── SIDEBAR ─────────────────────────────────────
 with st.sidebar:
+    manual_path = Path(__file__).with_name("Magic Book.html")
+    manual_href = quote(manual_path.name)
+    st.link_button("📖 User Manual", manual_href, use_container_width=True)
+
     mode = st.radio(
         "Choose mode", ["Counts CSV files", "Whole dataset"],
         help="Work with individual counts files or an entire dataset."

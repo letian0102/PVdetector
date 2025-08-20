@@ -451,15 +451,6 @@ def render_results(container):
 
 # ─────────────────────────────── SIDEBAR ─────────────────────────────────────
 with st.sidebar:
-    st.markdown(
-        (
-            "<a href='Magic%20Book.html' target='_blank'>"
-            "<button style='width:100%; background-color:#ff4b4b; color:white; padding:0.5em; font-size:16px; margin-bottom:10px;'>"
-            "📖 User Manual"
-            "</button></a>"
-        ),
-        unsafe_allow_html=True,
-    )
     mode = st.radio(
         "Choose mode", ["Counts CSV files", "Whole dataset"],
         help="Work with individual counts files or an entire dataset."

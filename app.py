@@ -1,7 +1,7 @@
 # app.py  – GPT-assisted bandwidth detector with
 #           live incremental results + per-sample overrides
 from __future__ import annotations
-import io, zipfile, re, base64
+import io, zipfile, re
 from pathlib import Path
 
 import numpy as np
@@ -451,11 +451,6 @@ def render_results(container):
 
 # ─────────────────────────────── SIDEBAR ─────────────────────────────────────
 with st.sidebar:
-    manual_path = Path(__file__).with_name('Magic Book.html')
-    manual_b64 = base64.b64encode(manual_path.read_bytes()).decode()
-    manual_url = f'data:text/html;base64,{manual_b64}'
-    st.link_button('📖 User Manual', manual_url, use_container_width=True)
-
     mode = st.radio(
         "Choose mode", ["Counts CSV files", "Whole dataset"],
         help="Work with individual counts files or an entire dataset."

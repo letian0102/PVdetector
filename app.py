@@ -29,16 +29,6 @@ st.warning(
     "**Heads-up:** if you refresh or close this page, all of your uploaded data and results will be lost."
 )
 
-st.markdown(
-    (
-        "<a href='Magic%20Book.html' target='_blank'>"
-        "<button style='position: fixed; top: 10px; right: 10px; z-index: 1000;'>"
-        "User Manual"
-        "</button></a>"
-    ),
-    unsafe_allow_html=True,
-)
-
 st.session_state.setdefault("active_sample", None)
 st.session_state.setdefault("active_subtab", {})   # stem → "plot" / "params" / "manual"
 

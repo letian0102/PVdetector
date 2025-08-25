@@ -237,48 +237,57 @@
         <th scope="col">Pattern</th>
         <th scope="col">Suggested settings</th>
         <th scope="col">Why</th>
-        <th scope="col">Example</th>
+        <th scope="col">Before</th>
+        <th scope="col">After</th>
       </tr>
     </thead>
     <tbody>
       <tr>
         <td>Noisy, jagged histogram (low n)</td>
-        <td>Bandwidth: <code>silverman</code> or <code>1.0</code><br>Prominence: <code>0.07–0.12</code><br>Min width: <code>1–2</code><br>Curvature: <code>0.0005</code></td>
+        <td>Bandwidth: <code>silverman</code> or widen it<br>Prominence: increase<br>Min width: increase<br>Curvature: increase slightly</td>
         <td>Smooths noise, rejects needle peaks, requires clearer bumps.</td>
         <td><img src="images/jagged.png" alt="Jagged histogram example"></td>
+        <td><img src="images/jagged_after.png" alt="Jagged histogram example after adjustments"></td>
       </tr>
       <tr>
         <td>Two peaks very close</td>
-        <td>Bandwidth: <code>0.5–0.8</code><br>Prominence: <code>0.03–0.06</code><br>Min separation: slightly <em>lower</em> than default<br>Grid: <code>≥ 30,000</code></td>
+        <td>Bandwidth: narrow it<br>Prominence: decrease<br>Min separation: slightly <em>lower</em> than default<br>Grid: increase</td>
         <td>Sharper KDE + tighter separation + finer grid resolves the doublet.</td>
         <td><img src="images/closePeaks.png" alt="Two close peaks example"></td>
+        <td><img src="images/closePeaks_after.png" alt="Two close peaks example after adjustments"></td>
       </tr>
       <tr>
         <td>Broad plateau with a shoulder</td>
-        <td>Turn on <em>Turning points as peaks</em><br>Curvature: small (<code>0.0001</code>) or <code>0</code><br>Min width: <code>1</code></td>
+        <td>Turn on <em>Turning points as peaks</em><br>Curvature: minimize or turn off<br>Min width: increase slightly</td>
         <td>Treats the shoulder as a real peak; avoids filtering flat tops.</td>
         <td><img src="images/shoulderPeak.png" alt="Shoulder peak example"></td>
+        <td><img src="images/shoulderPeak_after.png" alt="Shoulder peak example after adjustments"></td>
       </tr>
       <tr>
         <td>Long right tail, single clear peak</td>
-        <td>Bandwidth: <code>scott</code> or <code>silverman</code><br>Valley drop: <code>20–30%</code></td>
+        <td>Bandwidth: <code>scott</code> or <code>silverman</code><br>Valley drop: decrease</td>
         <td>Forces a reasonable valley along the tail for downstream gating.</td>
         <td><img src="images/onePeak.png" alt="Single peak example"></td>
+        <td><img src="images/onePeak_after.png" alt="Single peak example after adjustments"></td>
       </tr>
       <tr>
         <td>Over-segmentation (too many peaks)</td>
-        <td>Lower <em>Maximum peaks</em> or fix <em># peaks</em><br>Bandwidth: nudge up (e.g., <code>0.8–1.0</code>)<br>Prominence: nudge up (e.g., <code>0.06–0.1</code>)<br>Min separation: nudge up</td>
+        <td>Lower <em>Maximum peaks</em> or fix <em># peaks</em><br>Bandwidth: increase<br>Prominence: increase<br>Min separation: increase</td>
         <td>Suppresses minor ripples and merges spurious splits.</td>
         <td><img src="images/manyPeaks.png" alt="Many peaks example"></td>
+        <td><img src="images/manyPeaks_after.png" alt="Many peaks example after adjustments"></td>
       </tr>
       <tr>
         <td>Under-segmentation (merging distinct peaks)</td>
-        <td>Bandwidth: nudge down (e.g., <code>0.5–0.7</code>)<br>Prominence: nudge down (<code>0.03–0.05</code>)<br>Min separation: nudge down<br>Grid: increase</td>
+        <td>Bandwidth: decrease<br>Prominence: decrease<br>Min separation: decrease<br>Grid: increase</td>
         <td>Restores resolution and allows closer peaks to appear.</td>
         <td><img src="images/lessPeaks.png" alt="Few peaks example"></td>
+        <td><img src="images/lessPeaks_after.png" alt="Few peaks example after adjustments"></td>
       </tr>
     </tbody>
   </table>
+
+  <div class="warn">Depends on different samples, each should be tuned individually; varying values mean adjustments can differ, so use with caution.</div>
 
   <div class="hr" aria-hidden="true"></div>
 </section>

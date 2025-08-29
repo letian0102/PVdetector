@@ -662,6 +662,7 @@ with st.sidebar:
     )
     curv = st.slider(
         "Curvature thresh (0 = off)", 0.0000, 0.005, 0.0001, 0.0001,
+        format="%.4f",
         help="Filter out peaks with curvature below this value; 0 disables."
     )
     tp   = st.checkbox(
@@ -774,6 +775,8 @@ if clear_col.button("Clear results"):
     for key in ("aligned_counts", "aligned_landmarks",
                 "aligned_ridge_png"):
         st.session_state[key] = None
+
+    st.session_state.generated_csvs.clear()
 
     st.session_state.pending.clear()
     st.session_state.total_todo = 0

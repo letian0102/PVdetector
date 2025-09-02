@@ -1189,11 +1189,25 @@ if st.session_state.results:
                         np.nan                                 # missing pos-peak
                     ])
 
-            # —— 3. Compute finite x‐range, pad, and grid *before* any fallback to [0,1]
-            all_xmin = float(np.nanmin([np.nanmin(w) for w in warped]))
-            all_xmax = float(np.nanmax([np.nanmax(w) for w in warped]))
+            # build aligned curves directly from the already-computed KDEs
+            # to avoid bandwidth discrepancies between raw and aligned views
+            xs_map: dict[str, np.ndarray] = {}
+            ys_map: dict[str, np.ndarray] = {}
+            all_xmin = np.inf
+            all_xmax = -np.inf
+            all_ymax = 0.0
+            for stem, f in zip(st.session_state.results, warp_funs):
+                xs_raw = np.asarray(st.session_state.results[stem].get("xs", []), float)
+                ys_raw = np.asarray(st.session_state.results[stem].get("ys", []), float)
+                xs_al  = f(xs_raw)
+                xs_map[stem] = xs_al
+                ys_map[stem] = ys_raw
+                if xs_al.size:
+                    all_xmin = min(all_xmin, float(xs_al.min()))
+                    all_xmax = max(all_xmax, float(xs_al.max()))
+                if ys_raw.size:
+                    all_ymax = max(all_ymax, float(ys_raw.max()))
 
-            # if non‐finite or degenerate, give a tiny wiggle instead of full [0,1]
             if not np.isfinite(all_xmin) or not np.isfinite(all_xmax):
                 all_xmin, all_xmax = 0.0, 1.0
             elif all_xmax == all_xmin:
@@ -1201,11 +1215,10 @@ if st.session_state.results:
                 all_xmin -= 0.05 * d
                 all_xmax += 0.05 * d
 
-            # build the grid *after* fixing finite span
             span = all_xmax - all_xmin
             pad  = 0.05 * span
-            x_grid = np.linspace(all_xmin - pad, all_xmax + pad, 4000)
-            std_fallback = 0.05 * (span or 1.0)
+            if not np.isfinite(all_ymax):
+                all_ymax = 1.0
 
             st.session_state.aligned_counts     = dict(zip(st.session_state.results,
                                                         warped))
@@ -1214,56 +1227,30 @@ if st.session_state.results:
             st.session_state.aligned_fig_pngs   = {}
             st.session_state.aligned_ridge_png  = None
 
-            # —— 2. build KDE / fallback curve for *every* sample -----------------
-            kdes = {}
-            from scipy.stats import gaussian_kde
-            for idx, stem in enumerate(st.session_state.results):
-                wc   = warped[idx]
-                good = wc[~np.isnan(wc)]
-                bw   = st.session_state.params.get(stem, {}).get("bw", "scott")
-                try:
-                    bw_val = float(bw)
-                except Exception:
-                    bw_val = bw
-
-                if np.unique(good).size >= 2:
-                    try:
-                        kdes[stem] = gaussian_kde(good, bw_method=bw_val)(x_grid)
-                    except Exception:  # numerical failure
-                        kdes[stem] = np.exp(-(x_grid - good.mean())**2 / (2*std_fallback**2))
-                else:                  # single value or empty
-                    center = good[0] if good.size else 0.5*(all_xmin + all_xmax)
-                    kdes[stem] = np.exp(-(x_grid - center)**2 / (2*std_fallback**2))
-
-            all_ymax = max(ys.max() for ys in kdes.values())
-            if not np.isfinite(all_ymax):
-                # choose a sensible default—e.g. 1.0 or the next-largest finite value
-                all_ymax = 1.0
-
-            # —— 3. per-sample PNGs & metadata ------------------------------------
-            for idx, stem in enumerate(st.session_state.results):
-                f        = warp_funs[idx]
-                ys       = kdes[stem]
+            # —— 2. per-sample PNGs & metadata ------------------------------------
+            for stem, f in zip(st.session_state.results, warp_funs):
+                xs      = xs_map[stem]
+                ys      = ys_map[stem]
                 pk_align = f(np.asarray(st.session_state.results[stem]["peaks"]))
                 vl_align = f(np.asarray(st.session_state.results[stem]["valleys"]))
 
                 png = _plot_png_fixed(
-                    f"{stem} (aligned)", x_grid, ys,
+                    f"{stem} (aligned)", xs, ys,
                     pk_align[~np.isnan(pk_align)],
                     vl_align[~np.isnan(vl_align)],
                     (all_xmin - pad, all_xmax + pad),
-                    all_ymax      # now guaranteed finite
+                    all_ymax
                 )
 
                 st.session_state.aligned_fig_pngs[f"{stem}_aligned.png"] = png
                 st.session_state.aligned_results[stem] = {
                     "peaks":   pk_align.round(4).tolist(),
                     "valleys": vl_align.round(4).tolist(),
-                    "xs": x_grid.tolist(),
+                    "xs": xs.tolist(),
                     "ys": ys.tolist(),
                 }
 
-            # --- 4. stacked ridge-plot (plain) -----------------------------------
+            # --- 3. stacked ridge-plot (plain) -----------------------------------
             gap = 1.2 * all_ymax
             fig, ax = plt.subplots(
                 figsize=(6, 0.8 * len(st.session_state.results)),
@@ -1272,12 +1259,12 @@ if st.session_state.results:
             )
 
             for i, stem in enumerate(st.session_state.results):
-                ys      = kdes[stem]
-                offset  = i * gap
+                xs     = xs_map[stem]
+                ys     = ys_map[stem]
+                offset = i * gap
 
-                # KDE curve + fill
-                ax.plot(x_grid, ys + offset, color="black", lw=1)
-                ax.fill_between(x_grid, offset, ys + offset,
+                ax.plot(xs, ys + offset, color="black", lw=1)
+                ax.fill_between(xs, offset, ys + offset,
                                 color="#FFA50088", lw=0)
 
                 info = st.session_state.aligned_results[stem]
@@ -1285,7 +1272,7 @@ if st.session_state.results:
                     ax.vlines(p, offset, offset + ys.max(), color="black", lw=0.8)
                 for v in info["valleys"]:
                     ax.vlines(v, offset, offset + ys.max(), color="grey",
-                            lw=0.8, linestyles=":")
+                              lw=0.8, linestyles=":")
 
                 ax.text(all_xmin, offset + 0.5 * all_ymax, stem,
                         ha="right", va="center", fontsize=7)

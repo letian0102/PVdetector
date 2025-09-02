@@ -92,6 +92,11 @@ def _first_valley_slope(xs: np.ndarray,
                         p_right: int | None = None) -> float | None:
     """Pick first valley via maximum increase in slope.
 
+    The valley is constrained to lie at or before the local minimum
+    between the first peak and the next peak (if given).  If the point of
+    maximum slope change occurs after the local minimum, the minimum is
+    chosen instead.
+
     Parameters
     ----------
     xs, ys : np.ndarray
@@ -112,17 +117,25 @@ def _first_valley_slope(xs: np.ndarray,
     if p_right is None:
         seg = d2y[p_left:]
         base = p_left
+        y_seg = ys[p_left + 1:]
     else:
         if p_right - p_left <= 2:
             return None
-        seg = d2y[p_left : p_right - 1]
+        seg = d2y[p_left:p_right - 1]
         base = p_left
+        y_seg = ys[p_left + 1:p_right]
     if seg.size == 0:
         return None
     rel = np.argmax(seg)
     if seg[rel] <= 0:
         return None
     idx = base + 1 + rel
+
+    # do not go past the local minimum between the peaks
+    min_idx = p_left + 1 + int(np.argmin(y_seg))
+    if idx > min_idx:
+        idx = min_idx
+
     return float(xs[idx])
 
 

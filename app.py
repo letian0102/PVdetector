@@ -76,39 +76,30 @@ def _refresh_raw_ridge() -> None:
         st.session_state.raw_ridge_png = None
         return
 
-    from scipy.stats import gaussian_kde
-    counts_all = list(st.session_state.results_raw.values())
+    infos  = list(st.session_state.results.values())
+    xs_all = [np.asarray(info.get("xs", []), float) for info in infos if info.get("xs")]
 
-    x_min = float(min(np.nanmin(c) for c in counts_all))
-    x_max = float(max(np.nanmax(c) for c in counts_all))
+    x_min = float(min(x.min() for x in xs_all))
+    x_max = float(max(x.max() for x in xs_all))
     pad   = 0.05 * (x_max - x_min)
-    x_grid = np.linspace(x_min - pad, x_max + pad, 4000)
 
-    # densities for every sample
-    kdes = {}
-    for stem, arr in st.session_state.results_raw.items():
-        good = arr[~np.isnan(arr)]
-        if np.unique(good).size >= 2:
-            kdes[stem] = gaussian_kde(good, bw_method="scott")(x_grid)
-        else:                               # fallback single value / empty
-            μ = good.mean() if good.size else 0.5 * (x_min + x_max)
-            σ = 0.05 * (x_max - x_min or 1.0)
-            kdes[stem] = np.exp(-(x_grid - μ) ** 2 / (2 * σ ** 2))
-
-    y_max = max(ys.max() for ys in kdes.values())
+    y_max = max(
+        (np.asarray(info.get("ys", []), float).max() if info.get("ys") else 0.0)
+        for info in infos
+    )
     gap   = 1.2 * y_max
 
-    fig, ax = plt.subplots(figsize=(6, 0.8 * len(kdes)), dpi=150, sharex=True)
+    fig, ax = plt.subplots(figsize=(6, 0.8 * len(xs_all)), dpi=150, sharex=True)
 
     for i, stem in enumerate(st.session_state.results):
-        ys     = kdes[stem]
+        info   = st.session_state.results[stem]
+        xs     = np.asarray(info.get("xs", []), float)
+        ys     = np.asarray(info.get("ys", []), float)
         offset = i * gap
 
-        ax.plot(x_grid, ys + offset, color="black", lw=1)
-        ax.fill_between(x_grid, offset, ys + offset, color="#FFA50088", lw=0)
+        ax.plot(xs, ys + offset, color="black", lw=1)
+        ax.fill_between(xs, offset, ys + offset, color="#FFA50088", lw=0)
 
-        # current PEAK & VALLEY markers
-        info = st.session_state.results[stem]
         for p in info["peaks"]:
             ax.vlines(p, offset, offset + ys.max(), color="black", lw=0.8)
         for v in info["valleys"]:
@@ -1237,7 +1228,7 @@ if st.session_state.results:
 
                 if np.unique(good).size >= 2:
                     try:
-                        kdes[stem] = gaussian_kde(good, bw_method="scott")(x_grid)
+                        kdes[stem] = gaussian_kde(good, bw_method=bw_val)(x_grid)
                     except Exception:  # numerical failure
                         kdes[stem] = np.exp(-(x_grid - good.mean())**2 / (2*std_fallback**2))
                 else:                  # single value or empty

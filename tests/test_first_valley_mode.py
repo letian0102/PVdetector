@@ -1,6 +1,6 @@
 import numpy as np
 
-from peak_valley.kde_detector import kde_peaks_valleys
+from peak_valley.kde_detector import kde_peaks_valleys, _first_valley_slope
 
 
 def test_first_valley_slope_mode():
@@ -25,3 +25,10 @@ def test_first_valley_drop_mode_single_peak():
     assert len(peaks) == 1
     assert len(valleys) == 1
     assert valleys[0] > peaks[0]
+
+
+def test_slope_valley_not_past_minimum():
+    xs = np.arange(7, dtype=float)
+    ys = np.array([5, 4, 3, 0, 0.1, 4, 5], dtype=float)
+    valley = _first_valley_slope(xs, ys, 0, 6)
+    assert valley == xs[3]

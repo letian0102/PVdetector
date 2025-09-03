@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
-from openai import OpenAI
+from openai import OpenAI, AuthenticationError
 
 from peak_valley.quality import stain_quality
 
@@ -43,6 +43,7 @@ st.session_state.setdefault("active_sample", None)
 st.session_state.setdefault("active_subtab", {})   # stem → "plot" / "params" / "manual"
 
 st.session_state.setdefault("paused", False)
+st.session_state.setdefault("invalid_api_key", False)
 
 for key, default in {
     "results":     {},         # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
@@ -850,6 +851,8 @@ if st.session_state.run_active and st.session_state.pending:
     k_over  = over.get("n_peaks", None)
     if k_over in ("", None): k_over = None
 
+    client = OpenAI(api_key=api_key) if api_key else None
+
     # bandwidth
     if bw_over is not None:
         bw_use = bw_over
@@ -858,10 +861,18 @@ if st.session_state.run_active and st.session_state.pending:
     else:
         expected = (k_over if k_over is not None else
                     n_fixed if n_fixed is not None else max_peaks)
-        bw_use = ask_gpt_bandwidth(
-            OpenAI(api_key=api_key) if api_key else None,
-            gpt_model, cnts, peak_amount=expected, default='scott'
-        )
+        if client is None:
+            bw_use = 'scott'
+        else:
+            try:
+                bw_use = ask_gpt_bandwidth(
+                    client, gpt_model, cnts, peak_amount=expected, default='scott'
+                )
+            except AuthenticationError:
+                if not st.session_state.invalid_api_key:
+                    st.warning("Invalid OpenAI API key; please update it to enable GPT features.")
+                    st.session_state.invalid_api_key = True
+                st.stop()
 
     # prominence
     if pr_over is not None:
@@ -869,10 +880,18 @@ if st.session_state.run_active and st.session_state.pending:
     elif prom_val is not None:
         prom_use = prom_val
     else:
-        prom_use = ask_gpt_prominence(
-            OpenAI(api_key=api_key) if api_key else None,
-            gpt_model, cnts, default=0.05
-        )
+        if client is None:
+            prom_use = 0.05
+        else:
+            try:
+                prom_use = ask_gpt_prominence(
+                    client, gpt_model, cnts, default=0.05
+                )
+            except AuthenticationError:
+                if not st.session_state.invalid_api_key:
+                    st.warning("Invalid OpenAI API key; please update it to enable GPT features.")
+                    st.session_state.invalid_api_key = True
+                st.stop()
 
     # peak count
     if k_over is not None:                  # manual override from per-file form
@@ -880,11 +899,19 @@ if st.session_state.run_active and st.session_state.pending:
     elif n_fixed is not None:               # fixed via sidebar selector
         n_use = n_fixed
     else:                                   # GPT automatic
-        n_use = ask_gpt_peak_count(
-            OpenAI(api_key=api_key) if api_key else None,
-            gpt_model, max_peaks, counts_full=cnts,
-            marker_name=marker
-        )
+        if client is None:
+            n_use = None
+        else:
+            try:
+                n_use = ask_gpt_peak_count(
+                    client, gpt_model, max_peaks, counts_full=cnts,
+                    marker_name=marker
+                )
+            except AuthenticationError:
+                if not st.session_state.invalid_api_key:
+                    st.warning("Invalid OpenAI API key; please update it to enable GPT features.")
+                    st.session_state.invalid_api_key = True
+                st.stop()
         if n_use is None:                   # fallback to heuristic
             n_est, confident = quick_peak_estimate(
                 cnts, prom_use, bw_use, min_w or None, grid_sz

@@ -1,6 +1,6 @@
 from __future__ import annotations
 import re, textwrap
-from openai import OpenAI, OpenAIError
+from openai import OpenAI, OpenAIError, AuthenticationError
 import numpy as np
 from .signature import shape_signature
 from .kde_detector import quick_peak_estimate
@@ -74,6 +74,8 @@ def ask_gpt_bandwidth(
         )
         val = float(re.findall(r"\d*\.?\d+", rsp.choices[0].message.content)[0])
         val = float(np.clip(val, 0.10, 0.50))
+    except AuthenticationError:
+        raise
     except Exception:
         val = default
 
@@ -91,9 +93,12 @@ def ask_gpt_prominence(
     Result is memo-cached by the distribution *shape signature* so we
     never query GPT twice for the same-looking histogram.
     """
+    if client is None:
+        return default
+
     sig = shape_signature(counts_full)
     key = ("prom", sig)
-    if key in _cache:                       # ← cached 
+    if key in _cache:                       # ← cached
         return _cache[key]
 
     # small numeric summary = prompt token-friendly
@@ -112,6 +117,8 @@ def ask_gpt_prominence(
         )
         val = float(re.findall(r"\d*\.?\d+", rsp.choices[0].message.content)[0])
         val = float(np.clip(val, 0.01, 0.30))       # clamp to safe range
+    except AuthenticationError:
+        raise
     except Exception:
         val = default                                # fallback
 
@@ -127,7 +134,9 @@ def ask_gpt_peak_count(
 ) -> int | None:
     """Query GPT for the number of visible density peaks."""
 
-    # ---------- GPT call (unchanged) ----------
+    if client is None:
+        return max_peaks
+
     marker_txt = f"for the protein marker **{marker_name}** " if marker_name else ""
     prompt = (
         f"How many density peaks (modes) should be visible in the following raw protein-count list? Remember this is  {marker_txt} (Give a integer ≤ {max_peaks}.)\n\n"
@@ -141,6 +150,8 @@ def ask_gpt_peak_count(
         )
         n = int(re.findall(r"\d+", rsp.choices[0].message.content)[0])
         return min(max_peaks, n) if n > 0 else None
+    except AuthenticationError:
+        raise
     except (OpenAIError, ValueError, IndexError):
         print("GPT peak count query failed")
         return max_peaks

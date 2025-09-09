@@ -387,7 +387,6 @@ def kde_peaks_valleys(
 
     # --- enforce valley/peak relationship ----------------------------------
     valleys_x = _enforce_valley_rule(peaks_x, valleys_x)
-
     return np.round(peaks_x, 10).tolist(), valleys_x, xs, ys
 
 # ----------------------------------------------------------------------

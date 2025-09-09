@@ -384,6 +384,18 @@ def kde_peaks_valleys(
         if val is not None:
             valleys_x.append(val)
 
+    # --- enforce valley/peak relationship ----------------------------------
+    if len(peaks_x) <= 1:
+        valleys_x = [v for v in valleys_x if (not peaks_x) or v > peaks_x[0]]
+    else:
+        # Keep at most one valley between successive peaks and drop any
+        # valley beyond the last peak
+        expected = []
+        for left, right, val in zip(peaks_x[:-1], peaks_x[1:], valleys_x):
+            if left < val < right:
+                expected.append(val)
+        valleys_x = expected
+
     return np.round(peaks_x, 10).tolist(), valleys_x, xs, ys
 
 # ----------------------------------------------------------------------

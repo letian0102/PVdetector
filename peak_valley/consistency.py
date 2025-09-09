@@ -5,6 +5,20 @@ from typing import Dict, Sequence
 __all__ = ["enforce_marker_consistency"]
 
 
+def _enforce_valley_rule(peaks: Sequence[float],
+                         valleys: Sequence[float]) -> list[float]:
+    """Keep only valleys that lie between successive peaks."""
+    peaks = list(peaks)
+    valleys = list(valleys)
+    if len(peaks) <= 1:
+        return [v for v in valleys if (not peaks) or v > peaks[0]]
+    kept: list[float] = []
+    for left, right, val in zip(peaks[:-1], peaks[1:], valleys):
+        if left < val < right:
+            kept.append(val)
+    return kept
+
+
 def _local_extreme(xs: np.ndarray, ys: np.ndarray, center: float,
                    window: float, find_max: bool) -> float:
     """Return local maximum or minimum near *center* within *window*.
@@ -58,10 +72,15 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
         if len(group) < 2:
             return
 
-        pk_lists = [info["peaks"] for info in group.values()
-                    if info.get("peaks") is not None]
-        vl_lists = [info["valleys"] for info in group.values()
-                    if info.get("valleys") is not None]
+        pk_lists = []
+        vl_lists = []
+        for info in group.values():
+            pk = list(info.get("peaks", []))
+            vl = _enforce_valley_rule(pk, info.get("valleys", []))
+            info["peaks"], info["valleys"] = pk, vl
+            pk_lists.append(pk)
+            vl_lists.append(vl)
+
         if not pk_lists:
             return
 
@@ -119,6 +138,7 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
             if vl and vl_cons0 is not None and abs(vl[0] - vl_cons0) > tol:
                 vl[0] = _local_extreme(xs, ys, vl_cons0, win, False)
 
+            vl = _enforce_valley_rule(pk, vl)
             info["peaks"], info["valleys"] = pk, vl
 
     if len(results) < 2:

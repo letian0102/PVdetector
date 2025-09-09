@@ -31,3 +31,26 @@ def test_enforce_marker_consistency_handles_multiple_landmarks():
     assert len(results["s3"]["peaks"]) == 2
     assert abs(results["s3"]["peaks"][1] - 3.0) < 0.1
     assert results["s3"]["valleys"] == []
+
+
+def test_enforce_marker_consistency_valley_rules():
+    xs = np.linspace(0.0, 4.0, 401)
+    ys = np.exp(-(xs - 1) ** 2) + np.exp(-(xs - 3) ** 2)
+
+    results = {
+        "bad": {"xs": xs.tolist(), "ys": ys.tolist(),
+                 "peaks": [1.0, 3.0], "valleys": [3.5]},
+        "bad2": {"xs": xs.tolist(), "ys": ys.tolist(),
+                  "peaks": [1.0, 3.0], "valleys": [2.0, 3.5]},
+        "good": {"xs": xs.tolist(), "ys": ys.tolist(),
+                  "peaks": [1.0, 3.0], "valleys": [2.0]},
+    }
+
+    enforce_marker_consistency(results, tol=0.3, window=1.0)
+
+    for info in results.values():
+        peaks = info["peaks"]
+        valleys = info["valleys"]
+        assert len(valleys) <= max(0, len(peaks) - 1)
+        for val, left, right in zip(valleys, peaks[:-1], peaks[1:]):
+            assert left < val < right

@@ -2,6 +2,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.stats  import gaussian_kde
 from scipy.signal import find_peaks
+from .consistency import _enforce_valley_rule
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
 
@@ -383,6 +384,9 @@ def kde_peaks_valleys(
             val = _first_valley_slope(xs, ys, p0)
         if val is not None:
             valleys_x.append(val)
+
+    # --- enforce valley/peak relationship ----------------------------------
+    valleys_x = _enforce_valley_rule(peaks_x, valleys_x)
 
     return np.round(peaks_x, 10).tolist(), valleys_x, xs, ys
 

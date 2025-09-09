@@ -2,6 +2,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.stats  import gaussian_kde
 from scipy.signal import find_peaks
+from .consistency import _enforce_valley_rule
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
 
@@ -385,17 +386,7 @@ def kde_peaks_valleys(
             valleys_x.append(val)
 
     # --- enforce valley/peak relationship ----------------------------------
-    if len(peaks_x) <= 1:
-        valleys_x = [v for v in valleys_x if (not peaks_x) or v > peaks_x[0]]
-    else:
-        # Keep at most one valley between successive peaks and drop any
-        # valley beyond the last peak
-        expected = []
-        for left, right, val in zip(peaks_x[:-1], peaks_x[1:], valleys_x):
-            if left < val < right:
-                expected.append(val)
-        valleys_x = expected
-
+    valleys_x = _enforce_valley_rule(peaks_x, valleys_x)
     return np.round(peaks_x, 10).tolist(), valleys_x, xs, ys
 
 # ----------------------------------------------------------------------

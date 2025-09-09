@@ -7,15 +7,26 @@ __all__ = ["enforce_marker_consistency"]
 
 def _enforce_valley_rule(peaks: Sequence[float],
                          valleys: Sequence[float]) -> list[float]:
-    """Keep only valleys that lie between successive peaks."""
-    peaks = list(peaks)
-    valleys = list(valleys)
-    if len(peaks) <= 1:
-        return [v for v in valleys if (not peaks) or v > peaks[0]]
+    """Keep at most one valley after the first peak and one between each pair."""
+
+    peaks = sorted(peaks)
+    valleys = sorted(valleys)
+    if not peaks:
+        return []
+    if len(peaks) == 1:
+        for v in valleys:
+            if v > peaks[0]:
+                return [v]
+        return []
+
     kept: list[float] = []
-    for left, right, val in zip(peaks[:-1], peaks[1:], valleys):
-        if left < val < right:
-            kept.append(val)
+    j = 0
+    for left, right in zip(peaks[:-1], peaks[1:]):
+        while j < len(valleys) and valleys[j] <= left:
+            j += 1
+        if j < len(valleys) and left < valleys[j] < right:
+            kept.append(valleys[j])
+            j += 1
     return kept
 
 

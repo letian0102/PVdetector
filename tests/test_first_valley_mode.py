@@ -32,3 +32,10 @@ def test_slope_valley_not_past_minimum():
     ys = np.array([5, 4, 3, 0, 0.1, 4, 5], dtype=float)
     valley = _first_valley_slope(xs, ys, 0, 6)
     assert valley == xs[3]
+
+
+def test_slope_valley_before_deeper_minimum():
+    xs = np.arange(10, dtype=float)
+    ys = np.array([5, 4, 3, 2, 2.2, 5, 0, 5, 6, 7], dtype=float)
+    valley = _first_valley_slope(xs, ys, 0)
+    assert valley == xs[3]

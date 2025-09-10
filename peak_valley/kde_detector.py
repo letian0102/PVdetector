@@ -116,26 +116,27 @@ def _first_valley_slope(xs: np.ndarray,
     """
     d2y = np.diff(ys, n=2)
     if p_right is None:
-        seg = d2y[p_left:]
-        base = p_left
-        y_seg = ys[p_left + 1:]
+        right = len(xs) - 1
     else:
         if p_right - p_left <= 2:
             return None
-        seg = d2y[p_left:p_right - 1]
-        base = p_left
-        y_seg = ys[p_left + 1:p_right]
+        right = p_right
+
+    seg = d2y[p_left:right - 1]
     if seg.size == 0:
         return None
     rel = np.argmax(seg)
     if seg[rel] <= 0:
         return None
-    idx = base + 1 + rel
+    idx = p_left + 1 + rel
 
-    # do not go past the local minimum between the peaks
-    min_idx = p_left + 1 + int(np.argmin(y_seg))
-    if idx > min_idx:
-        idx = min_idx
+    # do not go past the first local minimum between the peaks
+    dy = np.diff(ys[p_left + 1:right + 1])
+    turn = np.where((dy[:-1] < 0) & (dy[1:] >= 0))[0]
+    if turn.size:
+        min_idx = p_left + 2 + turn[0]
+        if idx > min_idx:
+            idx = min_idx
 
     return float(xs[idx])
 

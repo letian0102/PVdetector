@@ -256,6 +256,7 @@ def kde_peaks_valleys(
     first_valley   : str = "slope",
 ):
     x = np.asarray(data, float)
+    x = x[np.isfinite(x)]
     if x.size == 0:
         return [], [], np.array([]), np.array([])
 

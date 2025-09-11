@@ -4,6 +4,7 @@ PVdetector is a Streamlit application for detecting density peaks and valleys in
 
 ## Features
 - Upload raw counts or full datasets (expression matrix + metadata).
+- Optional arcsinh transformation with adjustable parameters \(a, b, c\).
 - Automatic or manual control over KDE bandwidth, peak count, and prominence. GPT-based suggestions (bandwidth scans multiple candidates for optimal peak separation) are available when an OpenAI API key is provided.
 - Interactive per-sample visualization with manual editing of peaks and valleys.
 - Optional enforcement of marker consistency across samples.
@@ -36,10 +37,12 @@ PVdetector is a Streamlit application for detecting density peaks and valleys in
 ### A. Upload counts CSV files
 - Upload one or more `*_raw_counts.csv` files, each containing a single column of numeric counts.
 - The files are cached and selectable for processing.
+- Use the **Preprocessing** section to apply or skip an arcsinh transform and tweak parameters.
 
 ### B. Upload whole dataset
 - Upload `expression_matrix_combined.csv` and `cell_metadata_combined.csv`.
 - Choose markers, samples, and optional batches; the app generates per-sample counts files for analysis.
+- The **Preprocessing** section controls whether these counts are arcsinh-transformed and allows customization of \(a, b, c\).
 
 ### Detection settings
 - **Number of peaks** – enter a fixed value or select “GPT Automatic” with a user-defined maximum.

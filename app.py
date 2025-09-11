@@ -203,14 +203,24 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         if stem in existing:
             continue
         mask = batch_mask & meta_df["sample"].eq(s)
-        counts = arcsinh_transform(
-            expr_df.loc[mask, m]
-        )
+        vals = expr_df.loc[mask, m]
+        if st.session_state.get("apply_arcsinh", True):
+            counts = arcsinh_transform(
+                vals,
+                a=st.session_state.get("arcsinh_a", 1.0),
+                b=st.session_state.get("arcsinh_b", 1 / 5),
+                c=st.session_state.get("arcsinh_c", 0.0),
+            )
+            arcsinh_applied = True
+        else:
+            counts = vals.astype(float)
+            arcsinh_applied = False
         bio = io.BytesIO()
         counts.to_csv(bio, index=False, header=False)
         bio.seek(0)
         bio.name = f"{stem}.csv"
         setattr(bio, "marker", m)
+        setattr(bio, "arcsinh", arcsinh_applied)
         st.session_state.generated_csvs.append((stem, bio))
 
 
@@ -586,14 +596,24 @@ with st.sidebar:
                                          f"Skip {stem} (exists)")
                             continue
                         mask = batch_mask & meta_df["sample"].eq(s)
-                        counts = arcsinh_transform(
-                            expr_df.loc[mask, m]
-                        )
+                        vals = expr_df.loc[mask, m]
+                        if st.session_state.get("apply_arcsinh", True):
+                            counts = arcsinh_transform(
+                                vals,
+                                a=st.session_state.get("arcsinh_a", 1.0),
+                                b=st.session_state.get("arcsinh_b", 1 / 5),
+                                c=st.session_state.get("arcsinh_c", 0.0),
+                            )
+                            arcsinh_applied = True
+                        else:
+                            counts = vals.astype(float)
+                            arcsinh_applied = False
                         bio = io.BytesIO()
                         counts.to_csv(bio, index=False, header=False)
                         bio.seek(0)
                         bio.name = f"{stem}.csv"
                         setattr(bio, "marker", m)
+                        setattr(bio, "arcsinh", arcsinh_applied)
                         st.session_state.generated_csvs.append((stem, bio))
                         bar.progress(idx / tot,
                                      f"Added {stem} ({idx}/{tot})")
@@ -602,6 +622,22 @@ with st.sidebar:
 
         header_row, skip_rows = -1, 0
         use_uploads, use_generated = [], []
+
+    # ───────────── Preprocessing ──────────────
+    st.markdown("---\n### Preprocessing")
+    apply_arc = st.checkbox(
+        "Apply arcsinh transform",
+        True,
+        key="apply_arcsinh",
+        help=(
+            "Transform counts using (1/b)·arcsinh(a·x + c). "
+            "Uncheck if data is already arcsinh-transformed."
+        ),
+    )
+    if apply_arc:
+        st.number_input("a", value=1.0, key="arcsinh_a")
+        st.number_input("b", value=1 / 5, key="arcsinh_b")
+        st.number_input("c", value=0.0, key="arcsinh_c")
 
     # ───────────── Detection options ──────────────
     st.markdown("---\n### Detection")
@@ -840,6 +876,13 @@ if st.session_state.run_active and st.session_state.pending:
     stem   = Path(f.name).stem
     marker = getattr(f, "marker", None)
     cnts   = read_counts(f, header_row, skip_rows)
+    if st.session_state.get("apply_arcsinh", True) and not getattr(f, "arcsinh", False):
+        cnts = arcsinh_transform(
+            cnts,
+            a=st.session_state.get("arcsinh_a", 1.0),
+            b=st.session_state.get("arcsinh_b", 1 / 5),
+            c=st.session_state.get("arcsinh_c", 0.0),
+        )
     st.session_state.results_raw.setdefault(stem, cnts)
 
     over  = st.session_state.params.get(stem, {}) \

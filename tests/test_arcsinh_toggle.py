@@ -62,3 +62,28 @@ def test_arcsinh_skipped():
     assert np.allclose(arr, np.array([5.0, 15.0]))
     assert not getattr(bio, "arcsinh")
 
+
+def test_batches_produce_unique_stems():
+    """Generating counts for the same sample across batches should keep both."""
+    setup_state()
+    st.session_state.apply_arcsinh = False
+
+    expr_df = pd.DataFrame({"CD3": [1.0, 2.0, 3.0, 4.0]})
+    meta_df = pd.DataFrame({
+        "sample": ["s1", "s1", "s1", "s1"],
+        "batch": ["b1", "b1", "b2", "b2"],
+    })
+
+    _sync_generated_counts(["CD3"], ["s1"], expr_df, meta_df, ["b1", "b2"])
+    assert len(st.session_state.generated_csvs) == 2
+    stems = {stem for stem, _ in st.session_state.generated_csvs}
+    assert any("b1" in s for s in stems)
+    assert any("b2" in s for s in stems)
+    # verify each batch's data
+    for stem, bio in st.session_state.generated_csvs:
+        arr = read_bio(bio)
+        if "b1" in stem:
+            assert np.allclose(arr, np.array([1.0, 2.0]))
+        else:
+            assert np.allclose(arr, np.array([3.0, 4.0]))
+

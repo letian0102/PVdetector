@@ -166,10 +166,24 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
                            sel_b: list[str] | None = None) -> None:
     """Refresh cached CSVs to match the current marker/sample selection.
 
-    If ``sel_b`` is provided, only cells belonging to those batches will
-    contribute to the generated counts.
+    The ``stem`` for each generated CSV uniquely identifies the batch, sample,
+    and marker combination (``<sample>_<batch>_<marker>_raw_counts``).  When no
+    batch column is present the stem falls back to ``<sample>_<marker>``.
     """
-    desired = {f"{s}_{m}_raw_counts": (s, m) for m in sel_m for s in sel_s}
+    use_batches = "batch" in meta_df.columns
+
+    desired: dict[str, tuple[str, str, str | None]] = {}
+    for s in sel_s:
+        batches = [None]
+        if use_batches:
+            batches = meta_df.loc[meta_df["sample"].eq(s), "batch"].unique()
+            if sel_b:
+                batches = [b for b in batches if b in sel_b]
+        for b in batches:
+            for m in sel_m:
+                stem = f"{s}_{b}_{m}_raw_counts" if b is not None else \
+                       f"{s}_{m}_raw_counts"
+                desired[stem] = (s, m, b)
 
     # remove stale combinations
     st.session_state.generated_csvs = [
@@ -197,12 +211,12 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
     st.session_state.aligned_ridge_png = None
 
     existing = {stem for stem, _ in st.session_state.generated_csvs}
-    batch_mask = (meta_df["batch"].isin(sel_b)
-                  if sel_b else pd.Series(True, index=meta_df.index))
-    for stem, (s, m) in desired.items():
+    for stem, (s, m, b) in desired.items():
         if stem in existing:
             continue
-        mask = batch_mask & meta_df["sample"].eq(s)
+        mask = meta_df["sample"].eq(s)
+        if use_batches and b is not None:
+            mask &= meta_df["batch"].eq(b)
         vals = expr_df.loc[mask, m]
         if st.session_state.get("apply_arcsinh", True):
             counts = arcsinh_transform(
@@ -221,6 +235,8 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         bio.name = f"{stem}.csv"
         setattr(bio, "marker", m)
         setattr(bio, "arcsinh", arcsinh_applied)
+        if b is not None:
+            setattr(bio, "batch", b)
         st.session_state.generated_csvs.append((stem, bio))
 
 
@@ -581,42 +597,56 @@ with st.sidebar:
             st.session_state.sel_samples = sel_s
 
             if sel_m and sel_s and st.button("Generate counts CSVs"):
-                tot = len(sel_m) * len(sel_s)
+                use_batches = "batch" in meta_df.columns
+                batches_for_sample: dict[str, list[str | None]] = {}
+                for s in sel_s:
+                    batches = [None]
+                    if use_batches:
+                        batches = meta_df.loc[meta_df["sample"].eq(s), "batch"].unique().tolist()
+                        sel_b = st.session_state.get("sel_batches", [])
+                        if sel_b:
+                            batches = [b for b in batches if b in sel_b]
+                    batches_for_sample[s] = batches
+
+                tot = len(sel_m) * sum(len(batches_for_sample[s]) for s in sel_s)
                 bar = st.progress(0.0, "Generating …")
                 exist = {s for s, _ in st.session_state.generated_csvs}
-                sel_b = st.session_state.get("sel_batches", [])
-                batch_mask = (meta_df["batch"].isin(sel_b)
-                              if sel_b else pd.Series(True, index=meta_df.index))
-                for i, m in enumerate(sel_m, 1):
-                    for j, s in enumerate(sel_s, 1):
-                        idx  = (i - 1) * len(sel_s) + j
-                        stem = f"{s}_{m}_raw_counts"
-                        if stem in exist:
+                idx = 0
+                for m in sel_m:
+                    for s in sel_s:
+                        for b in batches_for_sample[s]:
+                            idx += 1
+                            stem = f"{s}_{b}_{m}_raw_counts" if b is not None else f"{s}_{m}_raw_counts"
+                            if stem in exist:
+                                bar.progress(idx / tot,
+                                             f"Skip {stem} (exists)")
+                                continue
+                            mask = meta_df["sample"].eq(s)
+                            if use_batches and b is not None:
+                                mask &= meta_df["batch"].eq(b)
+                            vals = expr_df.loc[mask, m]
+                            if st.session_state.get("apply_arcsinh", True):
+                                counts = arcsinh_transform(
+                                    vals,
+                                    a=st.session_state.get("arcsinh_a", 1.0),
+                                    b=st.session_state.get("arcsinh_b", 1 / 5),
+                                    c=st.session_state.get("arcsinh_c", 0.0),
+                                )
+                                arcsinh_applied = True
+                            else:
+                                counts = vals.astype(float)
+                                arcsinh_applied = False
+                            bio = io.BytesIO()
+                            counts.to_csv(bio, index=False, header=False)
+                            bio.seek(0)
+                            bio.name = f"{stem}.csv"
+                            setattr(bio, "marker", m)
+                            setattr(bio, "arcsinh", arcsinh_applied)
+                            if b is not None:
+                                setattr(bio, "batch", b)
+                            st.session_state.generated_csvs.append((stem, bio))
                             bar.progress(idx / tot,
-                                         f"Skip {stem} (exists)")
-                            continue
-                        mask = batch_mask & meta_df["sample"].eq(s)
-                        vals = expr_df.loc[mask, m]
-                        if st.session_state.get("apply_arcsinh", True):
-                            counts = arcsinh_transform(
-                                vals,
-                                a=st.session_state.get("arcsinh_a", 1.0),
-                                b=st.session_state.get("arcsinh_b", 1 / 5),
-                                c=st.session_state.get("arcsinh_c", 0.0),
-                            )
-                            arcsinh_applied = True
-                        else:
-                            counts = vals.astype(float)
-                            arcsinh_applied = False
-                        bio = io.BytesIO()
-                        counts.to_csv(bio, index=False, header=False)
-                        bio.seek(0)
-                        bio.name = f"{stem}.csv"
-                        setattr(bio, "marker", m)
-                        setattr(bio, "arcsinh", arcsinh_applied)
-                        st.session_state.generated_csvs.append((stem, bio))
-                        bar.progress(idx / tot,
-                                     f"Added {stem} ({idx}/{tot})")
+                                         f"Added {stem} ({idx}/{tot})")
                 bar.empty()
                 st.success("CSVs cached – switch to **Counts CSV files**")
 

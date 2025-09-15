@@ -1248,7 +1248,7 @@ if st.session_state.run_active and st.session_state.pending:
 
     if n_use is None:
         n_use = max_peaks
-    else:
+    elif k_over is None and n_fixed is None:
         n_use = min(n_use, max_peaks)
 
     peaks, valleys, xs, ys = kde_peaks_valleys(

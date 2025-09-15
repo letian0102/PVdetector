@@ -51,6 +51,7 @@ for key, default in {
     "fig_pngs":    {},         # stem.png → png bytes (latest)
     "params":      {},         # stem → {"bw":…, "prom":…, "n_peaks":…}
     "dirty":       {},         # stem → True if user edited params *or* positions
+    "pre_overrides": {},       # stem → pending overrides before first run
     "cached_uploads": [],
     "generated_csvs": [],
     "sel_markers": [], "sel_samples": [], "sel_batches": [],
@@ -362,6 +363,195 @@ def _manual_editor(stem: str):
         _refresh_raw_ridge()                       # ← REBUILD HERE
         st.rerun()
 
+
+def _render_pre_run_overrides(
+    stems: list[str], *,
+    bw_label: str,
+    prom_mode: str,
+    prom_default: float | None,
+) -> None:
+    """Allow users to configure per-sample overrides before the first run."""
+
+    st.markdown("---\n### Per-sample overrides (before run)")
+
+    if not stems:
+        st.caption(
+            "Select CSV files in the sidebar to configure per-sample overrides."
+        )
+        return
+
+    prom_label = (
+        f"Manual ({prom_default:.2f})"
+        if prom_mode == "Manual" and prom_default is not None
+        else "GPT automatic"
+    )
+
+    st.caption(
+        "Override the peak count, bandwidth, or prominence for specific files "
+        "before running the detector. Leave everything on “Use run setting” to "
+        "apply the global configuration."
+    )
+
+    for stem in stems:
+        overrides_active = bool(st.session_state.pre_overrides.get(stem))
+        label = stem + (" ✳️" if overrides_active else "")
+
+        with st.expander(label, expanded=False):
+            if stem in st.session_state.results:
+                st.info(
+                    "This sample has already been processed. Use the **Parameters** "
+                    "tab below to adjust it and re-run."
+                )
+                continue
+
+            prev = {
+                k: v
+                for k, v in st.session_state.pre_overrides.get(stem, {}).items()
+                if v is not None
+            }
+
+            col_peak, col_bw, col_prom = st.columns(3)
+
+            peak_options = [None, 1, 2, 3, 4, 5, 6]
+            peak_default = prev.get("n_peaks")
+            peak_index = (
+                peak_options.index(peak_default)
+                if peak_default in peak_options
+                else 0
+            )
+            n_choice = col_peak.selectbox(
+                "Peaks",
+                options=peak_options,
+                index=peak_index,
+                format_func=lambda v: "Use run setting" if v is None else f"{v}",
+                key=f"{stem}_pre_peak",
+                help="Choose a fixed number of peaks for this file.",
+            )
+
+            bw_options: list[float | str | None] = [
+                None,
+                "scott",
+                "silverman",
+                0.5,
+                0.8,
+                1.0,
+                "custom",
+            ]
+
+            bw_prev = prev.get("bw")
+            bw_custom_default = 1.0
+            if isinstance(bw_prev, (int, float)):
+                if bw_prev in (0.5, 0.8, 1.0):
+                    bw_index = bw_options.index(float(bw_prev))
+                else:
+                    bw_index = bw_options.index("custom")
+                bw_custom_default = float(bw_prev)
+            elif isinstance(bw_prev, str):
+                if bw_prev in ("scott", "silverman"):
+                    bw_index = bw_options.index(bw_prev)
+                else:
+                    try:
+                        bw_custom_default = float(bw_prev)
+                        bw_index = bw_options.index("custom")
+                    except ValueError:
+                        bw_index = 0
+            else:
+                bw_index = 0
+
+            def _fmt_bw(opt):
+                if opt is None:
+                    return f"Use run setting ({bw_label})"
+                if opt == "custom":
+                    return "Custom numeric"
+                if isinstance(opt, str):
+                    return opt.title()
+                return f"{opt:.2f}"
+
+            bw_choice = col_bw.selectbox(
+                "Bandwidth",
+                options=bw_options,
+                index=bw_index,
+                format_func=_fmt_bw,
+                key=f"{stem}_pre_bw_choice",
+                help="Pick a bandwidth rule or numeric value for this file.",
+            )
+
+            if bw_choice == "custom":
+                bw_value = col_bw.slider(
+                    "Custom bandwidth",
+                    min_value=0.01,
+                    max_value=5.0,
+                    value=float(bw_custom_default),
+                    step=0.01,
+                    key=f"{stem}_pre_bw_val",
+                    help="Manual KDE bandwidth just for this file.",
+                )
+                bw_override: float | str | None = float(bw_value)
+            elif bw_choice is None:
+                bw_override = None
+            else:
+                bw_override = bw_choice
+
+            prom_prev = prev.get("prom")
+            prom_toggle = col_prom.checkbox(
+                "Custom prominence",
+                value=(prom_prev is not None),
+                key=f"{stem}_pre_prom_toggle",
+                help="Enable to override the prominence threshold for this file.",
+            )
+            if prom_toggle:
+                prom_start = (
+                    float(prom_prev)
+                    if prom_prev is not None
+                    else float(prom_default if prom_default is not None else 0.05)
+                )
+                prom_override = col_prom.slider(
+                    "Prominence",
+                    min_value=0.00,
+                    max_value=0.30,
+                    value=prom_start,
+                    step=0.01,
+                    key=f"{stem}_pre_prom_val",
+                    help="Set the minimum drop from peak to valley for this file.",
+                )
+            else:
+                prom_override = None
+
+            overrides = {}
+            if n_choice is not None:
+                overrides["n_peaks"] = int(n_choice)
+            if bw_override is not None:
+                overrides["bw"] = bw_override
+            if prom_override is not None:
+                overrides["prom"] = float(prom_override)
+
+            if overrides:
+                if overrides != prev:
+                    st.session_state.pre_overrides[stem] = overrides
+            elif prev:
+                st.session_state.pre_overrides.pop(stem, None)
+
+            if overrides:
+                summary = []
+                if "n_peaks" in overrides:
+                    summary.append(f"{overrides['n_peaks']} peaks")
+                if "bw" in overrides:
+                    bw_val = overrides["bw"]
+                    bw_txt = (
+                        f"{bw_val:.2f}"
+                        if isinstance(bw_val, (int, float))
+                        else str(bw_val)
+                    )
+                    summary.append(f"bandwidth {bw_txt}")
+                if "prom" in overrides:
+                    summary.append(f"prominence {overrides['prom']:.2f}")
+                st.caption("Overrides: " + ", ".join(summary))
+            else:
+                st.caption(
+                    f"Using run setting for peaks, bandwidth ({bw_label}), and "
+                    f"prominence ({prom_label})."
+                )
+
 # ───────────────── helper: master results accordion ------------------------
 
 def _cols_for_align_mode(mode: str) -> list[str]:
@@ -461,6 +651,7 @@ def render_results(container):
         if rowR.button("❌", key=f"del_{stem}", help="Delete sample"):
             for bucket in ("results", "fig_pngs", "params", "dirty"):
                 st.session_state[bucket].pop(stem, None)
+            st.session_state.pre_overrides.pop(stem, None)
             for k in (f"{stem}__pk_list", f"{stem}__vl_list"):
                 st.session_state.pop(k, None)
             _refresh_raw_ridge()                   # ← keep ridge in sync
@@ -689,6 +880,7 @@ with st.sidebar:
         "Bandwidth mode", ["Manual", "GPT automatic"],
         help="Choose manual bandwidth or let GPT estimate it."
     )
+    bw_opt = None
     if bw_mode == "Manual":
         bw_opt = st.selectbox(
             "Rule / scale",
@@ -750,6 +942,38 @@ with st.sidebar:
         key="apply_consistency",
         help="Use the same marker selection for all samples."
     )
+
+    if mode == "Counts CSV files":
+        selected_files = use_uploads + use_generated
+        seen: set[str] = set()
+        stems_for_override: list[str] = []
+        for f in selected_files:
+            stem = Path(f.name).stem
+            if stem not in seen:
+                stems_for_override.append(stem)
+                seen.add(stem)
+
+        for stem in list(st.session_state.pre_overrides):
+            if stem not in seen and stem not in st.session_state.results:
+                st.session_state.pre_overrides.pop(stem, None)
+
+        if stems_for_override:
+            if bw_mode == "Manual":
+                if isinstance(bw_val, (int, float)):
+                    bw_label = f"Manual ({bw_val:.2f})"
+                else:
+                    bw_label = f"Manual ({bw_opt})"
+            else:
+                bw_label = "GPT automatic"
+
+            _render_pre_run_overrides(
+                stems_for_override,
+                bw_label=bw_label,
+                prom_mode=prom_mode,
+                prom_default=prom_val,
+            )
+        else:
+            st.session_state.pre_overrides.clear()
 
     # ───────────── Alignment options ──────────────
     st.markdown("---\n### Alignment")
@@ -915,20 +1139,51 @@ if st.session_state.run_active and st.session_state.pending:
         )
     st.session_state.results_raw.setdefault(stem, cnts)
 
-    over  = st.session_state.params.get(stem, {}) \
-            if st.session_state.dirty.get(stem, False) else {}
-    try:    bw_over = float(over.get("bw", "")) or None
-    except Exception: bw_over = None
-    try:    pr_over = float(over.get("prom", "")) or None
-    except Exception: pr_over = None
-    k_over  = over.get("n_peaks", None)
-    if k_over in ("", None): k_over = None
+    if st.session_state.dirty.get(stem, False):
+        over = st.session_state.params.get(stem, {})
+    elif stem in st.session_state.results:
+        over = {}
+    else:
+        over = st.session_state.pre_overrides.get(stem, {})
+
+    bw_raw = over.get("bw")
+    bw_over: float | None
+    bw_rule: str | None
+    if isinstance(bw_raw, (int, float)) and not np.isnan(bw_raw):
+        bw_over = float(bw_raw)
+        bw_rule = None
+    elif isinstance(bw_raw, str) and bw_raw:
+        try:
+            bw_over = float(bw_raw)
+            bw_rule = None
+        except ValueError:
+            bw_over = None
+            bw_rule = bw_raw
+    else:
+        bw_over = None
+        bw_rule = None
+
+    prom_raw = over.get("prom", "")
+    try:
+        pr_over = float(prom_raw) if prom_raw not in ("", None) else None
+    except Exception:
+        pr_over = None
+
+    k_over = over.get("n_peaks")
+    if k_over in ("", None):
+        k_over = None
+    elif isinstance(k_over, str):
+        k_over = int(k_over) if k_over.isdigit() else None
+    elif isinstance(k_over, (int, float)):
+        k_over = int(k_over)
 
     client = OpenAI(api_key=api_key) if api_key else None
 
     # bandwidth
     if bw_over is not None:
         bw_use = bw_over
+    elif bw_rule is not None:
+        bw_use = bw_rule
     elif bw_val is not None:
         bw_use = bw_val
     else:
@@ -993,7 +1248,7 @@ if st.session_state.run_active and st.session_state.pending:
 
     if n_use is None:
         n_use = max_peaks
-    else:
+    elif k_over is None and n_fixed is None:
         n_use = min(n_use, max_peaks)
 
     peaks, valleys, xs, ys = kde_peaks_valleys(
@@ -1044,6 +1299,7 @@ if st.session_state.run_active and st.session_state.pending:
         "prom": prom_use,
         "n_peaks": n_use,
     }
+    st.session_state.pre_overrides.pop(stem, None)
     st.session_state.dirty[stem] = False
 
     # progress update

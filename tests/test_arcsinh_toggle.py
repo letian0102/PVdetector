@@ -14,6 +14,7 @@ from app import _sync_generated_counts
 def setup_state():
     st.session_state.clear()
     st.session_state.generated_csvs = []
+    st.session_state.generated_meta = {}
     st.session_state.results = {}
     st.session_state.results_raw = {}
     st.session_state.params = {}

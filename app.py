@@ -54,6 +54,7 @@ for key, default in {
     "pre_overrides": {},       # stem → pending overrides before first run
     "cached_uploads": [],
     "generated_csvs": [],
+    "generated_meta": {},
     "sel_markers": [], "sel_samples": [], "sel_batches": [],
     "expr_df": None, "meta_df": None,
     "expr_name": None, "meta_name": None,
@@ -172,18 +173,30 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
     batch column is present the stem falls back to ``<sample>_<marker>``.
     """
     use_batches = "batch" in meta_df.columns
+    sel_batch_clean = [None if pd.isna(b) else b for b in (sel_b or [])]
+    sel_batch_set = set(sel_batch_clean)
 
     desired: dict[str, tuple[str, str, str | None]] = {}
     for s in sel_s:
         batches = [None]
         if use_batches:
-            batches = meta_df.loc[meta_df["sample"].eq(s), "batch"].unique()
-            if sel_b:
-                batches = [b for b in batches if b in sel_b]
+            raw_batches = meta_df.loc[meta_df["sample"].eq(s), "batch"].unique()
+            cleaned: list[str | None] = []
+            for raw in raw_batches:
+                clean = None if pd.isna(raw) else raw
+                if sel_batch_set and clean not in sel_batch_set:
+                    continue
+                cleaned.append(clean)
+            if not cleaned:
+                continue
+            batches = cleaned
         for b in batches:
             for m in sel_m:
-                stem = f"{s}_{b}_{m}_raw_counts" if b is not None else \
-                       f"{s}_{m}_raw_counts"
+                stem = (
+                    f"{s}_{m}_raw_counts"
+                    if b is None
+                    else f"{s}_{b}_{m}_raw_counts"
+                )
                 desired[stem] = (s, m, b)
 
     # remove stale combinations
@@ -191,6 +204,15 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         (stem, bio) for stem, bio in st.session_state.generated_csvs
         if stem in desired
     ]
+    st.session_state.generated_meta = {
+        stem: {
+            "sample": s,
+            "marker": m,
+            "batch": b,
+            "batch_label": _format_batch_label(b),
+        }
+        for stem, (s, m, b) in desired.items()
+    }
 
     # drop outdated results
     keep = set(desired)
@@ -236,9 +258,15 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         bio.name = f"{stem}.csv"
         setattr(bio, "marker", m)
         setattr(bio, "arcsinh", arcsinh_applied)
-        if b is not None:
-            setattr(bio, "batch", b)
+        setattr(bio, "sample", s)
+        setattr(bio, "batch", b)
         st.session_state.generated_csvs.append((stem, bio))
+        st.session_state.generated_meta[stem] = {
+            "sample": s,
+            "marker": m,
+            "batch": b,
+            "batch_label": _format_batch_label(b),
+        }
 
 
 # ───────────────────────── helper: (re)plot a dataset ───────────────────────
@@ -552,6 +580,272 @@ def _render_pre_run_overrides(
                     f"prominence ({prom_label})."
                 )
 
+
+def _format_batch_label(batch_val) -> str:
+    """Return a human-friendly label for batch values, handling NaNs."""
+    if pd.isna(batch_val):
+        return "—"
+    return str(batch_val)
+
+
+def _enumerate_dataset_entries(
+    sel_markers: list[str],
+    sel_samples: list[str],
+    meta_df: pd.DataFrame,
+    sel_batches: list[str | None] | None = None,
+) -> list[dict[str, object]]:
+    """List dataset stems + metadata for the current marker/sample selection."""
+
+    if not sel_markers or not sel_samples or meta_df is None:
+        return []
+
+    use_batches = "batch" in meta_df.columns
+    sel_batch_set = set(sel_batches or [])
+    combos: list[dict[str, object]] = []
+
+    for sample in sel_samples:
+        mask = meta_df["sample"].eq(sample)
+        if not mask.any():
+            continue
+
+        batch_values: list[object]
+        if use_batches:
+            batches = meta_df.loc[mask, "batch"].unique().tolist()
+            normed: list[object] = []
+            for raw in batches:
+                clean = None if pd.isna(raw) else raw
+                if sel_batch_set and clean not in sel_batch_set:
+                    continue
+                normed.append(clean)
+            if not normed:
+                continue
+            batch_values = normed
+        else:
+            batch_values = [None]
+
+        for batch in batch_values:
+            for marker in sel_markers:
+                if batch is None:
+                    stem = f"{sample}_{marker}_raw_counts"
+                else:
+                    stem = f"{sample}_{batch}_{marker}_raw_counts"
+                combos.append(
+                    {
+                        "stem": stem,
+                        "sample": sample,
+                        "marker": marker,
+                        "batch": batch,
+                        "batch_label": _format_batch_label(batch),
+                    }
+                )
+
+    return combos
+
+
+def _render_dataset_overrides(
+    combos: list[dict[str, object]], *,
+    bw_label: str,
+    prom_mode: str,
+    prom_default: float | None,
+) -> None:
+    """UI for configuring overrides when working with full datasets."""
+
+    st.markdown("---\n### Per-sample overrides (dataset)")
+
+    if not combos:
+        st.caption(
+            "Select at least one sample and marker to configure per-sample overrides."
+        )
+        return
+
+    prom_label = (
+        f"Manual ({prom_default:.2f})"
+        if prom_mode == "Manual" and prom_default is not None
+        else "GPT automatic"
+    )
+
+    st.caption(
+        "Use the table below to override the peak count, bandwidth, or prominence "
+        "for specific sample/marker combinations. Leave a cell blank to inherit "
+        "the run-wide setting."
+    )
+
+    all_samples = sorted({entry["sample"] for entry in combos})
+    search_term = st.text_input(
+        "Filter samples", key="dataset_override_search", placeholder="Type to filter sample names"
+    )
+    if search_term:
+        lowered = search_term.strip().lower()
+        all_samples = [s for s in all_samples if lowered in s.lower()]
+
+    if not all_samples:
+        st.info("No samples match this filter.")
+        return
+
+    selected_sample = st.selectbox(
+        "Sample to edit",
+        all_samples,
+        key="dataset_override_selected_sample",
+        help="Choose which sample's combinations to edit.",
+    )
+
+    sample_combos = [c for c in combos if c["sample"] == selected_sample]
+    if not sample_combos:
+        st.info("No dataset entries for this sample.")
+        return
+
+    marker_options = sorted({c["marker"] for c in sample_combos})
+    marker_key = f"dataset_override_markers__{selected_sample}"
+    default_markers = st.session_state.get(marker_key)
+    if default_markers:
+        default_markers = [m for m in default_markers if m in marker_options]
+    else:
+        default_markers = marker_options
+    marker_selection = st.multiselect(
+        "Markers",
+        marker_options,
+        default=default_markers,
+        key=marker_key,
+        help="Limit the table to specific markers (leave empty to show all).",
+    )
+    if not marker_selection:
+        marker_selection = marker_options
+
+    has_batches = any(c["batch"] is not None for c in sample_combos)
+    allowed_batches: set[object]
+    if has_batches:
+        batch_label_map: dict[str, set[object]] = {}
+        for c in sample_combos:
+            label = c["batch_label"]
+            batch_label_map.setdefault(label, set()).add(c["batch"])
+        batch_options = list(batch_label_map.keys())
+        batch_key = f"dataset_override_batches__{selected_sample}"
+        default_batches = st.session_state.get(batch_key)
+        if default_batches:
+            default_batches = [b for b in default_batches if b in batch_options]
+        else:
+            default_batches = batch_options
+        batch_selection = st.multiselect(
+            "Batches",
+            batch_options,
+            default=default_batches,
+            key=batch_key,
+            help="Filter dataset entries by batch (leave empty to include all).",
+        )
+        if not batch_selection:
+            batch_selection = batch_options
+        allowed_batches = set()
+        for label in batch_selection:
+            allowed_batches.update(batch_label_map.get(label, set()))
+    else:
+        allowed_batches = {None}
+
+    show_overrides_only = st.checkbox(
+        "Show only combinations with overrides",
+        value=False,
+        key=f"dataset_override_only__{selected_sample}",
+    )
+
+    filtered = [
+        c
+        for c in sample_combos
+        if c["marker"] in marker_selection
+        and (not has_batches or c["batch"] in allowed_batches)
+        and (not show_overrides_only or c["stem"] in st.session_state.pre_overrides)
+    ]
+
+    if not filtered:
+        st.info("No dataset entries match the current filters.")
+        return
+
+    rows = []
+    for entry in filtered:
+        overrides = st.session_state.pre_overrides.get(entry["stem"], {})
+        bw_val = overrides.get("bw", "")
+        if isinstance(bw_val, (int, float)) and not np.isnan(bw_val):
+            bw_txt = f"{bw_val}"
+        elif bw_val:
+            bw_txt = str(bw_val)
+        else:
+            bw_txt = ""
+        rows.append(
+            {
+                "stem": entry["stem"],
+                "Marker": entry["marker"],
+                "Batch": entry["batch_label"],
+                "Peaks": overrides.get("n_peaks"),
+                "Bandwidth": bw_txt,
+                "Prominence": overrides.get("prom"),
+            }
+        )
+
+    df_table = pd.DataFrame(rows).set_index("stem")
+
+    edited = st.data_editor(
+        df_table,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        column_config={
+            "Marker": st.column_config.TextColumn("Marker", disabled=True),
+            "Batch": st.column_config.TextColumn("Batch", disabled=True),
+            "Peaks": st.column_config.NumberColumn(
+                "Peaks", min_value=1, max_value=6, step=1,
+                help="Override the expected peak count (leave blank for run setting).",
+            ),
+            "Bandwidth": st.column_config.TextColumn(
+                "Bandwidth",
+                help="Enter a preset (scott, silverman, 0.5, …) or numeric bandwidth.",
+            ),
+            "Prominence": st.column_config.NumberColumn(
+                "Prominence",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.01,
+                format="%.2f",
+                help="Minimum relative drop from peak to valley.",
+            ),
+        },
+        key=f"dataset_override_editor__{selected_sample}",
+    )
+
+    for stem, row in edited.iterrows():
+        overrides: dict[str, object] = {}
+
+        peaks_val = row.get("Peaks")
+        if peaks_val not in (None, "") and not pd.isna(peaks_val):
+            overrides["n_peaks"] = int(peaks_val)
+
+        bw_raw = row.get("Bandwidth", "")
+        if isinstance(bw_raw, str):
+            bw_clean = bw_raw.strip()
+            if bw_clean:
+                try:
+                    overrides["bw"] = float(bw_clean)
+                except ValueError:
+                    overrides["bw"] = bw_clean
+        elif bw_raw not in (None, "") and not pd.isna(bw_raw):
+            overrides["bw"] = float(bw_raw)
+
+        prom_val = row.get("Prominence")
+        if prom_val not in (None, "") and not pd.isna(prom_val):
+            overrides["prom"] = float(prom_val)
+
+        if overrides:
+            st.session_state.pre_overrides[stem] = overrides
+        else:
+            st.session_state.pre_overrides.pop(stem, None)
+
+    total_for_sample = sum(1 for c in sample_combos if c["stem"] in st.session_state.pre_overrides)
+    if total_for_sample:
+        st.caption(
+            f"{total_for_sample} combination(s) for **{selected_sample}** currently have overrides."
+        )
+    else:
+        st.caption(
+            f"Using run setting for peaks, bandwidth ({bw_label}), and prominence ({prom_label})."
+        )
+
 # ───────────────── helper: master results accordion ------------------------
 
 def _cols_for_align_mode(mode: str) -> list[str]:
@@ -729,6 +1023,12 @@ with st.sidebar:
 
         if st.session_state.expr_df is not None:
             if st.button("Clear loaded dataset"):
+                prev_dataset = set(st.session_state.generated_meta)
+                for stem in list(st.session_state.pre_overrides):
+                    if stem in prev_dataset and stem not in st.session_state.results:
+                        st.session_state.pre_overrides.pop(stem, None)
+                st.session_state.generated_csvs.clear()
+                st.session_state.generated_meta = {}
                 for k in ("expr_df", "meta_df", "expr_name", "meta_name"):
                     st.session_state[k] = None
                 st.rerun()
@@ -756,13 +1056,17 @@ with st.sidebar:
                     "All batches", True, key="chk_b",
                     help="Use every batch in the dataset."
                 )
-                sel_b = batches if all_b else st.multiselect(
+                sel_b_raw = batches if all_b else st.multiselect(
                     "Batch(es)", batches,
                     help="Select which batches to include."
                 )
-                st.session_state.sel_batches = sel_b
-                meta_use = (meta_df if (all_b or not sel_b)
-                            else meta_df[meta_df["batch"].isin(sel_b)])
+                sel_b_clean = [None if pd.isna(b) else b for b in sel_b_raw]
+                st.session_state.sel_batches = sel_b_clean
+                if all_b or not sel_b_clean:
+                    meta_use = meta_df
+                else:
+                    batch_series = meta_df["batch"].where(~meta_df["batch"].isna(), None)
+                    meta_use = meta_df[batch_series.isin(sel_b_clean)]
             else:
                 st.session_state.sel_batches = []
                 meta_use = meta_df
@@ -943,6 +1247,14 @@ with st.sidebar:
         help="Use the same marker selection for all samples."
     )
 
+    if bw_mode == "Manual":
+        if isinstance(bw_val, (int, float)):
+            bw_label = f"Manual ({bw_val:.2f})"
+        else:
+            bw_label = f"Manual ({bw_opt})"
+    else:
+        bw_label = "GPT automatic"
+
     if mode == "Counts CSV files":
         selected_files = use_uploads + use_generated
         seen: set[str] = set()
@@ -958,14 +1270,6 @@ with st.sidebar:
                 st.session_state.pre_overrides.pop(stem, None)
 
         if stems_for_override:
-            if bw_mode == "Manual":
-                if isinstance(bw_val, (int, float)):
-                    bw_label = f"Manual ({bw_val:.2f})"
-                else:
-                    bw_label = f"Manual ({bw_opt})"
-            else:
-                bw_label = "GPT automatic"
-
             _render_pre_run_overrides(
                 stems_for_override,
                 bw_label=bw_label,
@@ -974,6 +1278,58 @@ with st.sidebar:
             )
         else:
             st.session_state.pre_overrides.clear()
+
+    elif mode == "Whole dataset":
+        meta_df = st.session_state.meta_df
+        sel_m = st.session_state.get("sel_markers", [])
+        sel_s = st.session_state.get("sel_samples", [])
+        sel_b = st.session_state.get("sel_batches", [])
+
+        combos = (
+            _enumerate_dataset_entries(sel_m, sel_s, meta_df, sel_b)
+            if meta_df is not None
+            else []
+        )
+
+        previous_dataset_stems = set(st.session_state.generated_meta)
+        st.session_state.generated_meta = {
+            combo["stem"]: {
+                "sample": combo["sample"],
+                "marker": combo["marker"],
+                "batch": combo["batch"],
+                "batch_label": combo["batch_label"],
+            }
+            for combo in combos
+        }
+        keep_stems = set(st.session_state.generated_meta)
+        if keep_stems:
+            st.session_state.generated_csvs = [
+                (stem, bio)
+                for stem, bio in st.session_state.generated_csvs
+                if stem in keep_stems
+            ]
+        else:
+            st.session_state.generated_csvs = []
+        current_dataset_stems = set(st.session_state.generated_meta)
+        for stem in list(st.session_state.pre_overrides):
+            if (
+                stem in previous_dataset_stems
+                and stem not in current_dataset_stems
+                and stem not in st.session_state.results
+            ):
+                st.session_state.pre_overrides.pop(stem, None)
+
+        if combos:
+            _render_dataset_overrides(
+                combos,
+                bw_label=bw_label,
+                prom_mode=prom_mode,
+                prom_default=prom_val,
+            )
+        elif sel_m and sel_s:
+            st.caption(
+                "No dataset entries match the current selection. Adjust the filters above to configure overrides."
+            )
 
     # ───────────── Alignment options ──────────────
     st.markdown("---\n### Alignment")
@@ -1059,6 +1415,7 @@ if clear_col.button("Clear results"):
         st.session_state[key] = None
 
     st.session_state.generated_csvs.clear()
+    st.session_state.generated_meta = {}
 
     st.session_state.pending.clear()
     st.session_state.total_todo = 0

@@ -1700,39 +1700,90 @@ with st.sidebar:
 
             group_names = sorted(st.session_state.group_overrides)
 
-            assign_rows = []
+            valid_groups = set(group_names)
+            current_assignments: dict[str, str] = {}
             for stem in stems_for_override:
                 group = st.session_state.group_assignments.get(stem, "Default")
-                if group not in group_names:
+                if group not in valid_groups:
                     group = "Default"
-                assign_rows.append({"Sample": stem, "Group": group})
+                current_assignments[stem] = group
 
-            assign_df = pd.DataFrame(assign_rows)
-            assign_edit = st.data_editor(
-                assign_df,
-                use_container_width=True,
-                num_rows="fixed",
-                column_config={
-                    "Sample": st.column_config.TextColumn("Sample", disabled=True),
-                    "Group": st.column_config.SelectboxColumn(
-                        "Group",
-                        options=group_names,
-                        help="Assign samples to groups to reuse tuned settings.",
-                    ),
-                },
-                key="group_assignment_editor",
-            )
+            if len(group_names) > 1:
+                st.caption(
+                    "Select the samples that belong to each group. Samples left unselected stay in the Default group."
+                )
 
-            new_assignments: dict[str, str] = {}
-            for _, row in assign_edit.iterrows():
-                sample = str(row.get("Sample", "")).strip()
-                if not sample:
+            group_selections: dict[str, list[str]] = {}
+            for group_name in group_names:
+                if group_name == "Default":
                     continue
-                choice = row.get("Group") or "Default"
-                if choice not in group_names:
-                    choice = "Default"
-                new_assignments[sample] = choice
+
+                selection_key = f"group_samples__{_keyify(group_name)}"
+
+                default_selection = [
+                    stem
+                    for stem in stems_for_override
+                    if current_assignments.get(stem, "Default") == group_name
+                ]
+
+                existing_selection = st.session_state.get(selection_key)
+                if isinstance(existing_selection, list):
+                    sanitized_existing = [
+                        stem for stem in existing_selection if stem in stems_for_override
+                    ]
+                    if sanitized_existing != existing_selection:
+                        st.session_state[selection_key] = sanitized_existing
+                    default_values = sanitized_existing
+                else:
+                    default_values = default_selection
+
+                selection = st.multiselect(
+                    f"Samples in {group_name}",
+                    options=stems_for_override,
+                    default=default_values,
+                    key=selection_key,
+                    help="Choose the samples that should inherit this group's overrides.",
+                )
+                group_selections[group_name] = selection
+
+            new_assignments: dict[str, str] = {
+                stem: "Default" for stem in stems_for_override
+            }
+            duplicate_samples: dict[str, list[str]] = {}
+
+            for group_name in group_names:
+                if group_name == "Default":
+                    continue
+                for stem in group_selections.get(group_name, []):
+                    if stem not in stems_for_override:
+                        continue
+                    previous_group = new_assignments.get(stem, "Default")
+                    if previous_group != "Default" and previous_group != group_name:
+                        duplicate_samples.setdefault(stem, [previous_group]).append(group_name)
+                    new_assignments[stem] = group_name
+
             st.session_state.group_assignments = new_assignments
+
+            if duplicate_samples:
+                dup_messages = [
+                    f"{sample}: {', '.join(groups)}" for sample, groups in duplicate_samples.items()
+                ]
+                st.warning(
+                    "Some samples were assigned to multiple groups. The last group in the list above will be used for each sample: "
+                    + "; ".join(dup_messages)
+                )
+
+            default_samples = [
+                stem for stem, group in new_assignments.items() if group == "Default"
+            ]
+            if default_samples and len(group_names) > 1:
+                st.caption(
+                    "Samples currently using the Default group: " + ", ".join(default_samples)
+                )
+            elif len(group_names) == 1:
+                st.caption(
+                    "All samples currently use the Default group. Create a group above to assign samples."
+                )
 
             if any(g != "Default" for g in group_names):
                 st.caption(
@@ -1749,6 +1800,9 @@ with st.sidebar:
                         for stem, grp in list(st.session_state.group_assignments.items()):
                             if grp == group_name:
                                 st.session_state.group_assignments[stem] = "Default"
+                        group_selection_key = f"group_samples__{_keyify(group_name)}"
+                        if group_selection_key in st.session_state:
+                            st.session_state.pop(group_selection_key)
                         st.rerun()
 
                     prev_group = st.session_state.group_overrides.get(group_name, {})

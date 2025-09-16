@@ -417,42 +417,128 @@ def _refresh_raw_ridge() -> None:
         st.session_state.raw_ridge_png = None
         return
 
-    infos  = list(st.session_state.results.values())
-    xs_all = [np.asarray(info.get("xs", []), float) for info in infos if info.get("xs")]
-
-    x_min = float(min(x.min() for x in xs_all))
-    x_max = float(max(x.max() for x in xs_all))
-    pad   = 0.05 * (x_max - x_min)
-
-    y_max = max(
-        (np.asarray(info.get("ys", []), float).max() if info.get("ys") else 0.0)
-        for info in infos
+    stems = list(st.session_state.results)
+    st.session_state.raw_ridge_png = _ridge_plot_for_stems(
+        stems, st.session_state.results
     )
-    gap   = 1.2 * y_max
 
-    fig, ax = plt.subplots(figsize=(6, 0.8 * len(xs_all)), dpi=150, sharex=True)
 
-    for i, stem in enumerate(st.session_state.results):
-        info   = st.session_state.results[stem]
-        xs     = np.asarray(info.get("xs", []), float)
-        ys     = np.asarray(info.get("ys", []), float)
-        offset = i * gap
+def _ridge_plot_for_stems(
+    stems: list[str],
+    results_map: dict[str, dict[str, object]],
+) -> bytes | None:
+    """Return a stacked ridge plot PNG for the provided stems."""
 
+    valid_stems: list[str] = []
+    xs_all: list[np.ndarray] = []
+    ys_all: list[np.ndarray] = []
+
+    for stem in stems:
+        info = results_map.get(stem)
+        if not info:
+            continue
+
+        xs = np.asarray(info.get("xs", []), float)
+        ys = np.asarray(info.get("ys", []), float)
+        if xs.size == 0 or ys.size == 0:
+            continue
+
+        valid_stems.append(stem)
+        xs_all.append(xs)
+        ys_all.append(ys)
+
+    if not valid_stems:
+        return None
+
+    x_min = min(float(xs.min()) for xs in xs_all)
+    x_max = max(float(xs.max()) for xs in xs_all)
+    if not np.isfinite(x_min) or not np.isfinite(x_max):
+        return None
+
+    if x_max == x_min:
+        span = abs(x_min) if x_min != 0 else 1.0
+        pad = 0.05 * span
+    else:
+        pad = 0.05 * (x_max - x_min)
+
+    y_max = max(float(ys.max()) for ys in ys_all)
+    if not np.isfinite(y_max) or y_max <= 0:
+        y_max = 1.0
+    gap = 1.2 * y_max
+
+    fig, ax = plt.subplots(
+        figsize=(6, 0.8 * max(len(valid_stems), 1)),
+        dpi=150,
+        sharex=True,
+    )
+
+    for idx, stem in enumerate(valid_stems):
+        info = results_map.get(stem, {})
+        xs = np.asarray(info.get("xs", []), float)
+        ys = np.asarray(info.get("ys", []), float)
+        if xs.size == 0 or ys.size == 0:
+            continue
+
+        offset = idx * gap
         ax.plot(xs, ys + offset, color="black", lw=1)
         ax.fill_between(xs, offset, ys + offset, color="#FFA50088", lw=0)
 
-        for p in info["peaks"]:
-            ax.vlines(p, offset, offset + ys.max(), color="black", lw=0.8)
-        for v in info["valleys"]:
-            ax.vlines(v, offset, offset + ys.max(), color="grey",
-                      lw=0.8, linestyles=":")
+        ymax = max(float(ys.max()), 1e-6)
 
-        ax.text(x_min, offset + 0.5 * y_max, stem,
-                ha="right", va="center", fontsize=7)
+        for p in info.get("peaks", []):
+            try:
+                peak_val = float(p)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(peak_val):
+                ax.vlines(peak_val, offset, offset + ymax, color="black", lw=0.8)
 
-    ax.set_yticks([]); ax.set_xlim(x_min - pad, x_max + pad); fig.tight_layout()
-    st.session_state.raw_ridge_png = fig_to_png(fig)
+        for v in info.get("valleys", []):
+            try:
+                valley_val = float(v)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(valley_val):
+                ax.vlines(
+                    valley_val,
+                    offset,
+                    offset + ymax,
+                    color="grey",
+                    lw=0.8,
+                    linestyles=":",
+                )
+
+        ax.text(
+            x_min,
+            offset + 0.5 * y_max,
+            stem,
+            ha="right",
+            va="center",
+            fontsize=7,
+        )
+
+    ax.set_yticks([])
+    ax.set_xlim(x_min - pad, x_max + pad)
+    fig.tight_layout()
+
+    png = fig_to_png(fig)
     plt.close(fig)
+    return png
+
+
+def _group_stems_with_results() -> dict[str, list[str]]:
+    """Return a mapping of group → stems for processed results."""
+
+    assignments = st.session_state.get("group_assignments", {})
+    groups: dict[str, list[str]] = {}
+
+    for stem in st.session_state.results:
+        group = assignments.get(stem, "Default")
+        if not isinstance(group, str) or not group:
+            group = "Default"
+        groups.setdefault(group, []).append(stem)
+
+    return groups
 
 def _make_aligned_zip() -> bytes:
     """Build a ZIP with *everything* related to the aligned data."""
@@ -2401,6 +2487,65 @@ with tab_cmp:
         col2.image(st.session_state.aligned_ridge_png,
                    use_container_width=True,
                    caption="Aligned")
+
+    if st.session_state.results:
+        group_map = _group_stems_with_results()
+        groups_with_data = {k: v for k, v in group_map.items() if v}
+        has_extra_groups = any(name != "Default" for name in groups_with_data)
+
+        if has_extra_groups:
+            st.markdown("---")
+            st.markdown("#### Group comparison")
+            st.caption(
+                "Review the stacked densities for each sample group before "
+                "and after alignment."
+            )
+
+            align_available = bool(st.session_state.aligned_results)
+
+            def _group_sort(item: tuple[str, list[str]]) -> tuple[int, str]:
+                name, _ = item
+                return (0, "") if name == "Default" else (1, name.lower())
+
+            for group_name, stems in sorted(groups_with_data.items(), key=_group_sort):
+                sample_count = len(stems)
+                display_name = (
+                    "Default (unassigned)" if group_name == "Default" else group_name
+                )
+                label = (
+                    f"{display_name} ({sample_count} sample"
+                    f"{'s' if sample_count != 1 else ''})"
+                )
+                grp_col_raw, grp_col_aligned = st.columns(2, gap="small")
+
+                raw_png = _ridge_plot_for_stems(stems, st.session_state.results)
+                if raw_png:
+                    grp_col_raw.image(
+                        raw_png,
+                        use_container_width=True,
+                        caption=f"Raw – {label}",
+                    )
+                else:
+                    grp_col_raw.info("No processed counts available for this group yet.")
+
+                if align_available:
+                    aligned_png = _ridge_plot_for_stems(
+                        stems, st.session_state.aligned_results
+                    )
+                    if aligned_png:
+                        grp_col_aligned.image(
+                            aligned_png,
+                            use_container_width=True,
+                            caption=f"Aligned – {label}",
+                        )
+                    else:
+                        grp_col_aligned.info(
+                            "No aligned curves are available for this group yet."
+                        )
+                else:
+                    grp_col_aligned.info(
+                        "Align landmarks to compare the normalized curves for this group."
+                    )
 
 if st.session_state.results:
 

@@ -466,7 +466,6 @@ def ask_gpt_peak_count(
     try:
         rsp = client.chat.completions.create(
             model=model_name,
-            temperature=0,
             seed=2025,
             timeout=45,
             messages=[

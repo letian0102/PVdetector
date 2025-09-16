@@ -52,6 +52,10 @@ for key, default in {
     "params":      {},         # stem → {"bw":…, "prom":…, "n_peaks":…}
     "dirty":       {},         # stem → True if user edited params *or* positions
     "pre_overrides": {},       # stem → pending overrides before first run
+    "group_assignments": {},   # stem → group name
+    "group_overrides": {"Default": {}},
+    "group_new_name": "",
+    "group_new_name_reset": False,
     "cached_uploads": [],
     "generated_csvs": [],
     "generated_meta": {},
@@ -71,6 +75,340 @@ for key, default in {
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+
+def _keyify(label: str) -> str:
+    """Sanitize labels so they are safe to use in Streamlit widget keys."""
+    return re.sub(r"[^0-9A-Za-z_]+", "_", label)
+
+
+def _summarize_overrides(overrides: dict[str, object]) -> list[str]:
+    """Return a list of human-readable summaries for override values."""
+    summary: list[str] = []
+
+    if "n_peaks" in overrides:
+        summary.append(f"{int(overrides['n_peaks'])} peaks")
+    if "max_peaks" in overrides:
+        summary.append(f"max peaks {int(overrides['max_peaks'])}")
+    if "bw" in overrides:
+        bw_val = overrides["bw"]
+        if isinstance(bw_val, (int, float)):
+            summary.append(f"bandwidth {float(bw_val):.2f}")
+        else:
+            summary.append(f"bandwidth {bw_val}")
+    if "prom" in overrides:
+        summary.append(f"prominence {float(overrides['prom']):.2f}")
+    if "min_width" in overrides:
+        summary.append(f"min width {int(overrides['min_width'])}")
+    if "curvature" in overrides:
+        summary.append(f"curvature ≥ {float(overrides['curvature']):.4f}")
+    if "turning_points" in overrides:
+        summary.append(
+            "turning pts→peaks" if overrides["turning_points"] else "turning pts off"
+        )
+    if "min_separation" in overrides:
+        summary.append(f"min sep {float(overrides['min_separation']):.1f}")
+    if "max_grid" in overrides:
+        summary.append(f"grid {int(overrides['max_grid'])}")
+    if "valley_drop" in overrides:
+        summary.append(f"valley drop {float(overrides['valley_drop']):.0f}%")
+    if "first_valley" in overrides:
+        val = str(overrides["first_valley"]).lower()
+        summary.append(f"first valley: {val}")
+
+    return summary
+
+
+def _render_override_controls(
+    base_key: str,
+    *,
+    prev: dict[str, object],
+    bw_label: str,
+    prom_mode: str,
+    prom_default: float | None,
+    run_defaults: dict[str, object],
+) -> dict[str, object]:
+    """Render override widgets and return the resulting override dict."""
+
+    key_prefix = _keyify(base_key)
+    overrides: dict[str, object] = {}
+    _ = prom_mode  # reserved for future behavior differences
+
+    # ── Peaks / bandwidth / prominence ──────────────────────────────────
+    col_peak, col_bw, col_prom = st.columns(3)
+
+    peak_options = [None, 1, 2, 3, 4, 5, 6]
+    peak_prev = _coerce_int(prev.get("n_peaks"))
+    peak_index = peak_options.index(peak_prev) if peak_prev in peak_options else 0
+    n_choice = col_peak.selectbox(
+        "Peaks",
+        options=peak_options,
+        index=peak_index,
+        format_func=lambda v: "Use run setting" if v is None else f"{int(v)}",
+        key=f"{key_prefix}_pre_peak",
+        help="Choose a fixed number of peaks for this item.",
+    )
+    if n_choice is not None:
+        overrides["n_peaks"] = int(n_choice)
+
+    bw_options: list[float | str | None] = [
+        None,
+        "scott",
+        "silverman",
+        0.5,
+        0.8,
+        1.0,
+        "custom",
+    ]
+
+    bw_prev = prev.get("bw")
+    bw_custom_default = 1.0
+    if isinstance(bw_prev, (int, float)):
+        if bw_prev in (0.5, 0.8, 1.0):
+            bw_index = bw_options.index(float(bw_prev))
+        else:
+            bw_index = bw_options.index("custom")
+        bw_custom_default = float(bw_prev)
+    elif isinstance(bw_prev, str):
+        if bw_prev in ("scott", "silverman"):
+            bw_index = bw_options.index(bw_prev)
+        else:
+            try:
+                bw_custom_default = float(bw_prev)
+                bw_index = bw_options.index("custom")
+            except ValueError:
+                bw_index = 0
+    else:
+        bw_index = 0
+
+    def _fmt_bw(opt):
+        if opt is None:
+            return f"Use run setting ({bw_label})"
+        if opt == "custom":
+            return "Custom numeric"
+        if isinstance(opt, str):
+            return opt.title()
+        return f"{opt:.2f}"
+
+    bw_choice = col_bw.selectbox(
+        "Bandwidth",
+        options=bw_options,
+        index=bw_index,
+        format_func=_fmt_bw,
+        key=f"{key_prefix}_pre_bw_choice",
+        help="Pick a bandwidth rule or numeric value for this item.",
+    )
+
+    if bw_choice == "custom":
+        bw_value = col_bw.slider(
+            "Custom bandwidth",
+            min_value=0.01,
+            max_value=5.0,
+            value=float(bw_custom_default),
+            step=0.01,
+            key=f"{key_prefix}_pre_bw_val",
+            help="Manual KDE bandwidth just for this item.",
+        )
+        overrides["bw"] = float(bw_value)
+    elif bw_choice is not None:
+        overrides["bw"] = bw_choice
+
+    prom_prev = _coerce_float(prev.get("prom"))
+    prom_toggle = col_prom.checkbox(
+        "Custom prominence",
+        value=(prom_prev is not None),
+        key=f"{key_prefix}_pre_prom_toggle",
+        help="Enable to override the prominence threshold.",
+    )
+    if prom_toggle:
+        if prom_prev is not None:
+            prom_start = float(prom_prev)
+        elif prom_default is not None:
+            prom_start = float(prom_default)
+        else:
+            prom_start = 0.05
+        prom_override = col_prom.slider(
+            "Prominence",
+            min_value=0.00,
+            max_value=0.30,
+            value=float(prom_start),
+            step=0.01,
+            key=f"{key_prefix}_pre_prom_val",
+            help="Set the minimum drop from peak to valley.",
+        )
+        overrides["prom"] = float(prom_override)
+
+    # ── Advanced parameters ──────────────────────────────────────────────
+    col_cap, col_width, col_curv = st.columns(3)
+
+    max_prev = _coerce_int(prev.get("max_peaks"))
+    max_options = [None, 1, 2, 3, 4, 5, 6]
+    max_index = max_options.index(max_prev) if max_prev in max_options else 0
+    max_choice = col_cap.selectbox(
+        "Max peaks (auto cap)",
+        options=max_options,
+        index=max_index,
+        format_func=lambda v: "Use run setting" if v is None else f"{int(v)}",
+        key=f"{key_prefix}_max_peaks",
+        help="Upper limit when GPT estimates the peak count.",
+    )
+    if max_choice is not None:
+        overrides["max_peaks"] = int(max_choice)
+
+    width_prev = _coerce_int(prev.get("min_width"))
+    width_options = [None, 0, 1, 2, 3, 4, 5, 6]
+    width_index = width_options.index(width_prev) if width_prev in width_options else 0
+    width_choice = col_width.selectbox(
+        "Min peak width",
+        options=width_options,
+        index=width_index,
+        format_func=lambda v: "Use run setting" if v is None else f"{int(v)}",
+        key=f"{key_prefix}_min_width",
+        help="Smallest allowable width for detected peaks.",
+    )
+    if width_choice is not None:
+        overrides["min_width"] = int(width_choice)
+
+    curv_prev = _coerce_float(prev.get("curvature"))
+    curv_toggle = col_curv.checkbox(
+        "Custom curvature",
+        value=(curv_prev is not None),
+        key=f"{key_prefix}_curv_toggle",
+        help="Override the curvature threshold for peaks.",
+    )
+    if curv_toggle:
+        default_curv = (
+            curv_prev
+            if curv_prev is not None
+            else float(run_defaults.get("curvature", 0.0001))
+        )
+        curv_val = col_curv.slider(
+            "Curvature threshold",
+            min_value=0.0000,
+            max_value=0.0050,
+            value=float(default_curv),
+            step=0.0001,
+            format="%.4f",
+            key=f"{key_prefix}_curv_val",
+            help="Filter out peaks with curvature below this value; 0 disables.",
+        )
+        overrides["curvature"] = float(curv_val)
+
+    col_turn, col_sep, col_grid = st.columns(3)
+
+    turn_prev_raw = prev.get("turning_points")
+    if isinstance(turn_prev_raw, str):
+        turn_prev = True if turn_prev_raw.lower().startswith("y") else False if turn_prev_raw.lower().startswith("n") else None
+    elif isinstance(turn_prev_raw, bool):
+        turn_prev = turn_prev_raw
+    else:
+        turn_prev = None
+    turn_options = [None, True, False]
+    def _fmt_turn(opt):
+        if opt is None:
+            return "Use run setting"
+        return "Yes" if opt else "No"
+
+    turn_choice = col_turn.selectbox(
+        "Treat turning points as peaks",
+        options=turn_options,
+        index=turn_options.index(turn_prev) if turn_prev in turn_options else 0,
+        format_func=_fmt_turn,
+        key=f"{key_prefix}_turning",
+        help="Count concave-down turning points as peaks (Yes) or ignore them (No).",
+    )
+    if turn_choice is not None:
+        overrides["turning_points"] = bool(turn_choice)
+
+    sep_prev = _coerce_float(prev.get("min_separation"))
+    sep_toggle = col_sep.checkbox(
+        "Custom min separation",
+        value=(sep_prev is not None),
+        key=f"{key_prefix}_sep_toggle",
+        help="Override the minimum distance between peaks.",
+    )
+    if sep_toggle:
+        default_sep = (
+            sep_prev
+            if sep_prev is not None
+            else float(run_defaults.get("min_separation", 0.7))
+        )
+        sep_val = col_sep.slider(
+            "Min peak separation",
+            min_value=0.0,
+            max_value=10.0,
+            value=float(default_sep),
+            step=0.1,
+            key=f"{key_prefix}_sep_val",
+            help="Minimum distance required between peaks.",
+        )
+        overrides["min_separation"] = float(sep_val)
+
+    grid_prev = _coerce_int(prev.get("max_grid"))
+    grid_toggle = col_grid.checkbox(
+        "Custom max grid",
+        value=(grid_prev is not None),
+        key=f"{key_prefix}_grid_toggle",
+        help="Override the maximum number of KDE grid points.",
+    )
+    if grid_toggle:
+        default_grid = (
+            grid_prev
+            if grid_prev is not None
+            else int(run_defaults.get("max_grid", 20000))
+        )
+        grid_val = col_grid.slider(
+            "Max KDE grid",
+            min_value=4_000,
+            max_value=40_000,
+            value=int(default_grid),
+            step=1_000,
+            key=f"{key_prefix}_grid_val",
+            help="Number of grid points for KDE; higher is slower but finer.",
+        )
+        overrides["max_grid"] = int(grid_val)
+
+    col_drop, col_first, _ = st.columns(3)
+
+    drop_prev = _coerce_float(prev.get("valley_drop"))
+    drop_toggle = col_drop.checkbox(
+        "Custom valley drop",
+        value=(drop_prev is not None),
+        key=f"{key_prefix}_drop_toggle",
+        help="Override the drop required to mark a valley.",
+    )
+    if drop_toggle:
+        default_drop = (
+            drop_prev
+            if drop_prev is not None
+            else float(run_defaults.get("valley_drop", 10))
+        )
+        drop_val = col_drop.slider(
+            "Valley drop (% of peak)",
+            min_value=1,
+            max_value=50,
+            value=int(default_drop),
+            step=1,
+            key=f"{key_prefix}_drop_val",
+            help="Required drop from peak height to qualify as a valley.",
+        )
+        overrides["valley_drop"] = float(drop_val)
+
+    first_prev = prev.get("first_valley")
+    if isinstance(first_prev, str) and first_prev not in ("Slope change", "Valley drop"):
+        first_prev = None
+    first_options = [None, "Slope change", "Valley drop"]
+    first_choice = col_first.selectbox(
+        "First valley method",
+        options=first_options,
+        index=first_options.index(first_prev) if first_prev in first_options else 0,
+        key=f"{key_prefix}_first_valley",
+        help="Choose how to determine the first valley after a peak.",
+    )
+    if first_choice is not None:
+        overrides["first_valley"] = first_choice
+
+    return overrides
 
 # ── helper #1 : aligned ZIP  (plots + aligned counts) ───────────────
 def _refresh_raw_ridge() -> None:
@@ -397,6 +735,7 @@ def _render_pre_run_overrides(
     bw_label: str,
     prom_mode: str,
     prom_default: float | None,
+    run_defaults: dict[str, object],
 ) -> None:
     """Allow users to configure per-sample overrides before the first run."""
 
@@ -415,9 +754,9 @@ def _render_pre_run_overrides(
     )
 
     st.caption(
-        "Override the peak count, bandwidth, or prominence for specific files "
-        "before running the detector. Leave everything on “Use run setting” to "
-        "apply the global configuration."
+        "Override the peak count, bandwidth, prominence, or advanced options for "
+        "specific files before running the detector. Leave everything on “Use run "
+        "setting” to inherit the global configuration or group defaults."
     )
 
     for stem in stems:
@@ -438,120 +777,25 @@ def _render_pre_run_overrides(
                 if v is not None
             }
 
-            col_peak, col_bw, col_prom = st.columns(3)
-
-            peak_options = [None, 1, 2, 3, 4, 5, 6]
-            peak_default = prev.get("n_peaks")
-            peak_index = (
-                peak_options.index(peak_default)
-                if peak_default in peak_options
-                else 0
-            )
-            n_choice = col_peak.selectbox(
-                "Peaks",
-                options=peak_options,
-                index=peak_index,
-                format_func=lambda v: "Use run setting" if v is None else f"{v}",
-                key=f"{stem}_pre_peak",
-                help="Choose a fixed number of peaks for this file.",
-            )
-
-            bw_options: list[float | str | None] = [
-                None,
-                "scott",
-                "silverman",
-                0.5,
-                0.8,
-                1.0,
-                "custom",
-            ]
-
-            bw_prev = prev.get("bw")
-            bw_custom_default = 1.0
-            if isinstance(bw_prev, (int, float)):
-                if bw_prev in (0.5, 0.8, 1.0):
-                    bw_index = bw_options.index(float(bw_prev))
+            group_name = st.session_state.group_assignments.get(stem, "Default")
+            group_overrides = st.session_state.group_overrides.get(group_name, {})
+            if group_name != "Default" or group_overrides:
+                group_summary = _summarize_overrides(group_overrides)
+                if group_summary:
+                    st.caption(
+                        f"Group **{group_name}** overrides: " + ", ".join(group_summary)
+                    )
                 else:
-                    bw_index = bw_options.index("custom")
-                bw_custom_default = float(bw_prev)
-            elif isinstance(bw_prev, str):
-                if bw_prev in ("scott", "silverman"):
-                    bw_index = bw_options.index(bw_prev)
-                else:
-                    try:
-                        bw_custom_default = float(bw_prev)
-                        bw_index = bw_options.index("custom")
-                    except ValueError:
-                        bw_index = 0
-            else:
-                bw_index = 0
+                    st.caption(f"Group **{group_name}** uses run settings.")
 
-            def _fmt_bw(opt):
-                if opt is None:
-                    return f"Use run setting ({bw_label})"
-                if opt == "custom":
-                    return "Custom numeric"
-                if isinstance(opt, str):
-                    return opt.title()
-                return f"{opt:.2f}"
-
-            bw_choice = col_bw.selectbox(
-                "Bandwidth",
-                options=bw_options,
-                index=bw_index,
-                format_func=_fmt_bw,
-                key=f"{stem}_pre_bw_choice",
-                help="Pick a bandwidth rule or numeric value for this file.",
+            overrides = _render_override_controls(
+                stem,
+                prev=prev,
+                bw_label=bw_label,
+                prom_mode=prom_mode,
+                prom_default=prom_default,
+                run_defaults=run_defaults,
             )
-
-            if bw_choice == "custom":
-                bw_value = col_bw.slider(
-                    "Custom bandwidth",
-                    min_value=0.01,
-                    max_value=5.0,
-                    value=float(bw_custom_default),
-                    step=0.01,
-                    key=f"{stem}_pre_bw_val",
-                    help="Manual KDE bandwidth just for this file.",
-                )
-                bw_override: float | str | None = float(bw_value)
-            elif bw_choice is None:
-                bw_override = None
-            else:
-                bw_override = bw_choice
-
-            prom_prev = prev.get("prom")
-            prom_toggle = col_prom.checkbox(
-                "Custom prominence",
-                value=(prom_prev is not None),
-                key=f"{stem}_pre_prom_toggle",
-                help="Enable to override the prominence threshold for this file.",
-            )
-            if prom_toggle:
-                prom_start = (
-                    float(prom_prev)
-                    if prom_prev is not None
-                    else float(prom_default if prom_default is not None else 0.05)
-                )
-                prom_override = col_prom.slider(
-                    "Prominence",
-                    min_value=0.00,
-                    max_value=0.30,
-                    value=prom_start,
-                    step=0.01,
-                    key=f"{stem}_pre_prom_val",
-                    help="Set the minimum drop from peak to valley for this file.",
-                )
-            else:
-                prom_override = None
-
-            overrides = {}
-            if n_choice is not None:
-                overrides["n_peaks"] = int(n_choice)
-            if bw_override is not None:
-                overrides["bw"] = bw_override
-            if prom_override is not None:
-                overrides["prom"] = float(prom_override)
 
             if overrides:
                 if overrides != prev:
@@ -559,26 +803,66 @@ def _render_pre_run_overrides(
             elif prev:
                 st.session_state.pre_overrides.pop(stem, None)
 
-            if overrides:
-                summary = []
-                if "n_peaks" in overrides:
-                    summary.append(f"{overrides['n_peaks']} peaks")
-                if "bw" in overrides:
-                    bw_val = overrides["bw"]
-                    bw_txt = (
-                        f"{bw_val:.2f}"
-                        if isinstance(bw_val, (int, float))
-                        else str(bw_val)
-                    )
-                    summary.append(f"bandwidth {bw_txt}")
-                if "prom" in overrides:
-                    summary.append(f"prominence {overrides['prom']:.2f}")
+            summary = _summarize_overrides(overrides)
+            if summary:
                 st.caption("Overrides: " + ", ".join(summary))
             else:
                 st.caption(
-                    f"Using run setting for peaks, bandwidth ({bw_label}), and "
-                    f"prominence ({prom_label})."
+                    "Using run setting for peaks, bandwidth "
+                    f"({bw_label}), prominence ({prom_label}), and advanced options."
                 )
+
+
+def _combined_overrides(stem: str, base: dict[str, object] | None = None) -> dict[str, object]:
+    """Merge group-level overrides with per-sample overrides for a stem."""
+
+    combined: dict[str, object] = {}
+    group = st.session_state.group_assignments.get(stem)
+    if group:
+        for key, value in st.session_state.group_overrides.get(group, {}).items():
+            if value is not None:
+                combined[key] = value
+
+    if base:
+        for key, value in base.items():
+            if value is not None:
+                combined[key] = value
+
+    return combined
+
+
+def _coerce_int(value) -> int | None:
+    """Best-effort conversion of a value to ``int`` (None if not possible)."""
+
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, float) and not pd.isna(value):
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(float(stripped))
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_float(value) -> float | None:
+    """Best-effort conversion of a value to ``float`` (None if not possible)."""
+
+    if isinstance(value, (int, float, np.floating)):
+        return float(value) if not pd.isna(value) else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    return None
 
 
 def _format_batch_label(batch_val) -> str:
@@ -665,9 +949,9 @@ def _render_dataset_overrides(
     )
 
     st.caption(
-        "Use the table below to override the peak count, bandwidth, or prominence "
-        "for specific sample/marker combinations. Leave a cell blank to inherit "
-        "the run-wide setting."
+        "Use the table below to override the peak count, bandwidth, prominence, "
+        "or advanced detection options for specific sample/marker combinations. "
+        "Leave a cell blank to inherit the run-wide setting."
     )
 
     all_samples = sorted({entry["sample"] for entry in combos})
@@ -768,14 +1052,29 @@ def _render_dataset_overrides(
             bw_txt = str(bw_val)
         else:
             bw_txt = ""
+        turning_val = overrides.get("turning_points")
+        if turning_val is True:
+            turn_txt = "Yes"
+        elif turning_val is False:
+            turn_txt = "No"
+        else:
+            turn_txt = ""
         rows.append(
             {
                 "stem": entry["stem"],
                 "Marker": entry["marker"],
                 "Batch": entry["batch_label"],
                 "Peaks": overrides.get("n_peaks"),
+                "Max peaks": overrides.get("max_peaks"),
                 "Bandwidth": bw_txt,
                 "Prominence": overrides.get("prom"),
+                "Min width": overrides.get("min_width"),
+                "Curvature": overrides.get("curvature"),
+                "Turning points": turn_txt,
+                "Min separation": overrides.get("min_separation"),
+                "Max grid": overrides.get("max_grid"),
+                "Valley drop": overrides.get("valley_drop"),
+                "First valley": overrides.get("first_valley"),
             }
         )
 
@@ -793,6 +1092,10 @@ def _render_dataset_overrides(
                 "Peaks", min_value=1, max_value=6, step=1,
                 help="Override the expected peak count (leave blank for run setting).",
             ),
+            "Max peaks": st.column_config.NumberColumn(
+                "Max peaks", min_value=1, max_value=6, step=1,
+                help="Override the GPT automatic peak cap (leave blank for run setting).",
+            ),
             "Bandwidth": st.column_config.TextColumn(
                 "Bandwidth",
                 help="Enter a preset (scott, silverman, 0.5, …) or numeric bandwidth.",
@@ -804,6 +1107,50 @@ def _render_dataset_overrides(
                 step=0.01,
                 format="%.2f",
                 help="Minimum relative drop from peak to valley.",
+            ),
+            "Min width": st.column_config.NumberColumn(
+                "Min peak width", min_value=0, max_value=6, step=1,
+                help="Override the minimum width for detected peaks.",
+            ),
+            "Curvature": st.column_config.NumberColumn(
+                "Curvature threshold",
+                min_value=0.0,
+                max_value=0.005,
+                step=0.0001,
+                format="%.4f",
+                help="Override the curvature requirement for peaks (0 disables).",
+            ),
+            "Turning points": st.column_config.SelectboxColumn(
+                "Treat turning points",
+                options=["", "Yes", "No"],
+                help="Treat concave-down turning points as peaks (Yes/No).",
+            ),
+            "Min separation": st.column_config.NumberColumn(
+                "Min peak separation",
+                min_value=0.0,
+                max_value=10.0,
+                step=0.1,
+                format="%.1f",
+                help="Override the minimum distance between peaks.",
+            ),
+            "Max grid": st.column_config.NumberColumn(
+                "Max KDE grid",
+                min_value=4_000,
+                max_value=40_000,
+                step=1_000,
+                help="Override the KDE grid resolution (higher is finer but slower).",
+            ),
+            "Valley drop": st.column_config.NumberColumn(
+                "Valley drop (%)",
+                min_value=1,
+                max_value=50,
+                step=1,
+                help="Override the required drop from peak to valley in percent.",
+            ),
+            "First valley": st.column_config.SelectboxColumn(
+                "First valley method",
+                options=["", "Slope change", "Valley drop"],
+                help="Override how to identify the first valley after a peak.",
             ),
         },
         key=f"dataset_override_editor__{selected_sample}",
@@ -831,6 +1178,46 @@ def _render_dataset_overrides(
         if prom_val not in (None, "") and not pd.isna(prom_val):
             overrides["prom"] = float(prom_val)
 
+        max_peaks_val = row.get("Max peaks")
+        if max_peaks_val not in (None, "") and not pd.isna(max_peaks_val):
+            overrides["max_peaks"] = int(max_peaks_val)
+
+        min_width_val = row.get("Min width")
+        if min_width_val not in (None, "") and not pd.isna(min_width_val):
+            overrides["min_width"] = int(min_width_val)
+
+        curv_val = row.get("Curvature")
+        if curv_val not in (None, "") and not pd.isna(curv_val):
+            overrides["curvature"] = float(curv_val)
+
+        turn_val = row.get("Turning points")
+        if isinstance(turn_val, str):
+            clean = turn_val.strip().lower()
+            if clean == "yes":
+                overrides["turning_points"] = True
+            elif clean == "no":
+                overrides["turning_points"] = False
+        elif isinstance(turn_val, bool):
+            overrides["turning_points"] = turn_val
+
+        sep_val = row.get("Min separation")
+        if sep_val not in (None, "") and not pd.isna(sep_val):
+            overrides["min_separation"] = float(sep_val)
+
+        grid_val = row.get("Max grid")
+        if grid_val not in (None, "") and not pd.isna(grid_val):
+            overrides["max_grid"] = int(grid_val)
+
+        drop_val = row.get("Valley drop")
+        if drop_val not in (None, "") and not pd.isna(drop_val):
+            overrides["valley_drop"] = float(drop_val)
+
+        first_val = row.get("First valley")
+        if isinstance(first_val, str):
+            clean = first_val.strip()
+            if clean in ("Slope change", "Valley drop"):
+                overrides["first_valley"] = clean
+
         if overrides:
             st.session_state.pre_overrides[stem] = overrides
         else:
@@ -843,7 +1230,8 @@ def _render_dataset_overrides(
         )
     else:
         st.caption(
-            f"Using run setting for peaks, bandwidth ({bw_label}), and prominence ({prom_label})."
+            "Using run setting for peaks, bandwidth "
+            f"({bw_label}), prominence ({prom_label}), and advanced options."
         )
 
 # ───────────────── helper: master results accordion ------------------------
@@ -946,6 +1334,7 @@ def render_results(container):
             for bucket in ("results", "fig_pngs", "params", "dirty"):
                 st.session_state[bucket].pop(stem, None)
             st.session_state.pre_overrides.pop(stem, None)
+            st.session_state.group_assignments.pop(stem, None)
             for k in (f"{stem}__pk_list", f"{stem}__vl_list"):
                 st.session_state.pop(k, None)
             _refresh_raw_ridge()                   # ← keep ridge in sync
@@ -1241,6 +1630,17 @@ with st.sidebar:
         help="How to determine the first valley after a peak."
     )
 
+    run_defaults = {
+        "max_peaks": max_peaks,
+        "min_width": min_w,
+        "curvature": curv,
+        "turning_points": tp,
+        "min_separation": min_sep,
+        "max_grid": grid_sz,
+        "valley_drop": val_drop,
+        "first_valley": val_mode,
+    }
+
     st.checkbox(
         "Enforce marker consistency across samples",
         key="apply_consistency",
@@ -1269,12 +1669,111 @@ with st.sidebar:
             if stem not in seen and stem not in st.session_state.results:
                 st.session_state.pre_overrides.pop(stem, None)
 
+        for stem in list(st.session_state.group_assignments):
+            if stem not in seen:
+                st.session_state.group_assignments.pop(stem, None)
+
+        st.session_state.group_overrides.setdefault("Default", {})
+
         if stems_for_override:
+            st.markdown("---\n### Sample groups (optional)")
+
+            col_name, col_add = st.columns([3, 1])
+
+            if st.session_state.get("group_new_name_reset", False):
+                st.session_state.group_new_name = ""
+                st.session_state.group_new_name_reset = False
+
+            new_group_name = col_name.text_input(
+                "Create new group",
+                key="group_new_name",
+                placeholder="e.g. Treatment A",
+                help="Groups let you tune detector settings once and apply them to multiple samples.",
+            )
+            if col_add.button("Add group", key="group_add_btn"):
+                clean = new_group_name.strip()
+                if clean:
+                    if clean not in st.session_state.group_overrides:
+                        st.session_state.group_overrides[clean] = {}
+                    st.session_state.group_new_name_reset = True
+                st.rerun()
+
+            group_names = sorted(st.session_state.group_overrides)
+
+            assign_rows = []
+            for stem in stems_for_override:
+                group = st.session_state.group_assignments.get(stem, "Default")
+                if group not in group_names:
+                    group = "Default"
+                assign_rows.append({"Sample": stem, "Group": group})
+
+            assign_df = pd.DataFrame(assign_rows)
+            assign_edit = st.data_editor(
+                assign_df,
+                use_container_width=True,
+                num_rows="fixed",
+                column_config={
+                    "Sample": st.column_config.TextColumn("Sample", disabled=True),
+                    "Group": st.column_config.SelectboxColumn(
+                        "Group",
+                        options=group_names,
+                        help="Assign samples to groups to reuse tuned settings.",
+                    ),
+                },
+                key="group_assignment_editor",
+            )
+
+            new_assignments: dict[str, str] = {}
+            for _, row in assign_edit.iterrows():
+                sample = str(row.get("Sample", "")).strip()
+                if not sample:
+                    continue
+                choice = row.get("Group") or "Default"
+                if choice not in group_names:
+                    choice = "Default"
+                new_assignments[sample] = choice
+            st.session_state.group_assignments = new_assignments
+
+            if any(g != "Default" for g in group_names):
+                st.caption(
+                    "Group-level overrides apply before per-sample overrides."
+                )
+
+            for group_name in group_names:
+                if group_name == "Default":
+                    continue
+
+                with st.expander(f"Group: {group_name}", expanded=False):
+                    if st.button("Remove group", key=f"group_remove__{group_name}"):
+                        st.session_state.group_overrides.pop(group_name, None)
+                        for stem, grp in list(st.session_state.group_assignments.items()):
+                            if grp == group_name:
+                                st.session_state.group_assignments[stem] = "Default"
+                        st.rerun()
+
+                    prev_group = st.session_state.group_overrides.get(group_name, {})
+                    group_overrides = _render_override_controls(
+                        f"group_{group_name}",
+                        prev=prev_group,
+                        bw_label=bw_label,
+                        prom_mode=prom_mode,
+                        prom_default=prom_val,
+                        run_defaults=run_defaults,
+                    )
+                    st.session_state.group_overrides[group_name] = group_overrides
+
+                    summary = _summarize_overrides(group_overrides)
+                    if summary:
+                        st.caption("Overrides: " + ", ".join(summary))
+                    else:
+                        st.caption("Using run setting for this group.")
+
             _render_pre_run_overrides(
                 stems_for_override,
                 bw_label=bw_label,
                 prom_mode=prom_mode,
                 prom_default=prom_val,
+                run_defaults=run_defaults,
             )
         else:
             st.session_state.pre_overrides.clear()
@@ -1497,11 +1996,12 @@ if st.session_state.run_active and st.session_state.pending:
     st.session_state.results_raw.setdefault(stem, cnts)
 
     if st.session_state.dirty.get(stem, False):
-        over = st.session_state.params.get(stem, {})
+        over = st.session_state.params.get(stem, {}).copy()
     elif stem in st.session_state.results:
         over = {}
     else:
-        over = st.session_state.pre_overrides.get(stem, {})
+        per_sample = st.session_state.pre_overrides.get(stem, {})
+        over = _combined_overrides(stem, per_sample)
 
     bw_raw = over.get("bw")
     bw_over: float | None
@@ -1534,6 +2034,39 @@ if st.session_state.run_active and st.session_state.pending:
     elif isinstance(k_over, (int, float)):
         k_over = int(k_over)
 
+    max_override = _coerce_int(over.get("max_peaks"))
+    max_peaks_use = max_override if max_override is not None else max_peaks
+    max_peaks_use = max(1, int(max_peaks_use))
+
+    min_width_override = _coerce_int(over.get("min_width"))
+    min_w_use = min_width_override if min_width_override is not None else min_w
+
+    curv_override = _coerce_float(over.get("curvature"))
+    curv_use = curv_override if curv_override is not None else curv
+
+    turning_override = over.get("turning_points")
+    if isinstance(turning_override, str):
+        turning_use = turning_override.lower().startswith("y")
+    elif isinstance(turning_override, bool):
+        turning_use = turning_override
+    else:
+        turning_use = tp
+
+    min_sep_override = _coerce_float(over.get("min_separation"))
+    min_sep_use = min_sep_override if min_sep_override is not None else min_sep
+
+    grid_override = _coerce_int(over.get("max_grid"))
+    grid_use = grid_override if grid_override is not None else grid_sz
+
+    drop_override = _coerce_float(over.get("valley_drop"))
+    drop_use = drop_override if drop_override is not None else float(val_drop)
+
+    first_override = over.get("first_valley")
+    if isinstance(first_override, str) and first_override in ("Slope change", "Valley drop"):
+        val_mode_use = first_override
+    else:
+        val_mode_use = val_mode
+
     client = OpenAI(api_key=api_key) if api_key else None
 
     # bandwidth
@@ -1545,7 +2078,7 @@ if st.session_state.run_active and st.session_state.pending:
         bw_use = bw_val
     else:
         expected = (k_over if k_over is not None else
-                    n_fixed if n_fixed is not None else max_peaks)
+                    n_fixed if n_fixed is not None else max_peaks_use)
         if client is None:
             bw_use = 'scott'
         else:
@@ -1589,7 +2122,7 @@ if st.session_state.run_active and st.session_state.pending:
         else:
             try:
                 n_use = ask_gpt_peak_count(
-                    client, gpt_model, max_peaks, counts_full=cnts,
+                    client, gpt_model, max_peaks_use, counts_full=cnts,
                     marker_name=marker
                 )
             except AuthenticationError:
@@ -1599,28 +2132,28 @@ if st.session_state.run_active and st.session_state.pending:
                 st.stop()
         if n_use is None:                   # fallback to heuristic
             n_est, confident = quick_peak_estimate(
-                cnts, prom_use, bw_use, min_w or None, grid_sz
+                cnts, prom_use, bw_use, min_w_use or None, grid_use
             )
             n_use = n_est if confident else None
 
     if n_use is None:
-        n_use = max_peaks
+        n_use = max_peaks_use
     elif k_over is None and n_fixed is None:
-        n_use = min(n_use, max_peaks)
+        n_use = min(n_use, max_peaks_use)
 
     peaks, valleys, xs, ys = kde_peaks_valleys(
-        cnts, n_use, prom_use, bw_use, min_w or None, grid_sz,
-        drop_frac=val_drop / 100.0,
-        min_x_sep=min_sep,
-        curvature_thresh = curv if curv > 0 else None,
-        turning_peak     = tp,
-        first_valley     = "drop" if val_mode == "Valley drop" else "slope",
+        cnts, n_use, prom_use, bw_use, min_w_use or None, grid_use,
+        drop_frac=drop_use / 100.0,
+        min_x_sep=min_sep_use,
+        curvature_thresh = curv_use if (curv_use and curv_use > 0) else None,
+        turning_peak     = turning_use,
+        first_valley     = "drop" if val_mode_use == "Valley drop" else "slope",
     )
 
     if len(peaks) == 1 and not valleys:
         p_idx = np.searchsorted(xs, peaks[0])
         y_pk  = ys[p_idx]
-        drop  = np.where(ys[p_idx:] < (val_drop / 100) * y_pk)[0]
+        drop  = np.where(ys[p_idx:] < (drop_use / 100) * y_pk)[0]
         if drop.size:
             valleys = [float(xs[p_idx + drop[0]])]
 

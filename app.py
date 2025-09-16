@@ -2189,11 +2189,17 @@ if st.session_state.run_active and st.session_state.pending:
     per_sample_over = dict(st.session_state.pre_overrides.get(stem, {}))
     reason_raw = st.session_state.dirty_reason.get(stem)
     reasons = set(reason_raw) if reason_raw else set()
+    prev_params = st.session_state.params.get(stem, {})
 
-    if st.session_state.dirty.get(stem, False) and (not reasons or "manual" in reasons):
-        for key, value in st.session_state.params.get(stem, {}).items():
-            if value is not None:
-                per_sample_over[key] = value
+    if st.session_state.dirty.get(stem, False):
+        if not reasons or "manual" in reasons:
+            for key, value in prev_params.items():
+                if value is not None:
+                    per_sample_over[key] = value
+        elif "override" in reasons:
+            for key, value in prev_params.items():
+                if key not in per_sample_over and value is not None:
+                    per_sample_over[key] = value
 
     over = _combined_overrides(stem, per_sample_over)
 

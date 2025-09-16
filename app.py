@@ -51,7 +51,8 @@ for key, default in {
     "fig_pngs":    {},         # stem.png → png bytes (latest)
     "params":      {},         # stem → {"bw":…, "prom":…, "n_peaks":…}
     "dirty":       {},         # stem → True if user edited params *or* positions
-    "pre_overrides": {},       # stem → pending overrides before first run
+    "dirty_reason": {},        # stem → set[str] recording why a sample is dirty
+    "pre_overrides": {},       # stem → per-sample overrides (persistent)
     "group_assignments": {},   # stem → group name
     "group_overrides": {"Default": {}},
     "group_new_name": "",
@@ -117,6 +118,39 @@ def _summarize_overrides(overrides: dict[str, object]) -> list[str]:
         summary.append(f"first valley: {val}")
 
     return summary
+
+
+def _mark_sample_dirty(stem: str, reason: str) -> None:
+    """Mark ``stem`` as needing a rerun and record the triggering reason."""
+
+    if stem not in st.session_state.results:
+        return
+
+    st.session_state.dirty[stem] = True
+    current = set(st.session_state.dirty_reason.get(stem, set()))
+    current.add(reason)
+    st.session_state.dirty_reason[stem] = current
+
+
+def _update_pre_override(stem: str, overrides: dict[str, object]) -> None:
+    """Update per-sample overrides and mark samples dirty when they change."""
+
+    prev = dict(st.session_state.pre_overrides.get(stem, {}))
+    prev_clean = {k: v for k, v in prev.items() if v is not None}
+    new_clean = {k: v for k, v in overrides.items() if v is not None}
+
+    changed: bool
+    if new_clean:
+        changed = prev_clean != new_clean
+        if changed or stem not in st.session_state.pre_overrides:
+            st.session_state.pre_overrides[stem] = new_clean
+    else:
+        changed = bool(prev_clean)
+        if stem in st.session_state.pre_overrides:
+            st.session_state.pre_overrides.pop(stem, None)
+
+    if changed:
+        _mark_sample_dirty(stem, "override")
 
 
 def _render_override_controls(
@@ -884,10 +918,9 @@ def _render_pre_run_overrides(
             )
 
             if overrides:
-                if overrides != prev:
-                    st.session_state.pre_overrides[stem] = overrides
+                _update_pre_override(stem, overrides)
             elif prev:
-                st.session_state.pre_overrides.pop(stem, None)
+                _update_pre_override(stem, {})
 
             summary = _summarize_overrides(overrides)
             if summary:
@@ -1304,10 +1337,7 @@ def _render_dataset_overrides(
             if clean in ("Slope change", "Valley drop"):
                 overrides["first_valley"] = clean
 
-        if overrides:
-            st.session_state.pre_overrides[stem] = overrides
-        else:
-            st.session_state.pre_overrides.pop(stem, None)
+        _update_pre_override(stem, overrides)
 
     total_for_sample = sum(1 for c in sample_combos if c["stem"] in st.session_state.pre_overrides)
     if total_for_sample:
@@ -1409,7 +1439,7 @@ def render_results(container):
                 )
                 if (bw_new != bw0) or (pr_new != pr0) or (k_new != k0):
                     st.session_state.params[stem] = {"bw": bw_new, "prom": pr_new, "n_peaks": k_new}
-                    st.session_state.dirty[stem] = True
+                    _mark_sample_dirty(stem, "manual")
             with tab_manual:
                 if not info.get("xs"):
                     st.info("Run detector first to enable manual editing.")
@@ -1421,6 +1451,7 @@ def render_results(container):
                 st.session_state[bucket].pop(stem, None)
             st.session_state.pre_overrides.pop(stem, None)
             st.session_state.group_assignments.pop(stem, None)
+            st.session_state.dirty_reason.pop(stem, None)
             for k in (f"{stem}__pk_list", f"{stem}__vl_list"):
                 st.session_state.pop(k, None)
             _refresh_raw_ridge()                   # ← keep ridge in sync
@@ -1759,6 +1790,7 @@ with st.sidebar:
             if stem not in seen:
                 st.session_state.group_assignments.pop(stem, None)
 
+        previous_assignments = dict(st.session_state.group_assignments)
         st.session_state.group_overrides.setdefault("Default", {})
 
         if stems_for_override:
@@ -1848,7 +1880,14 @@ with st.sidebar:
                         duplicate_samples.setdefault(stem, [previous_group]).append(group_name)
                     new_assignments[stem] = group_name
 
+            changed_assignments = [
+                stem
+                for stem, group in new_assignments.items()
+                if previous_assignments.get(stem, "Default") != group
+            ]
             st.session_state.group_assignments = new_assignments
+            for stem in changed_assignments:
+                _mark_sample_dirty(stem, "group")
 
             if duplicate_samples:
                 dup_messages = [
@@ -1882,16 +1921,21 @@ with st.sidebar:
 
                 with st.expander(f"Group: {group_name}", expanded=False):
                     if st.button("Remove group", key=f"group_remove__{group_name}"):
+                        affected = [
+                            stem
+                            for stem, grp in st.session_state.group_assignments.items()
+                            if grp == group_name
+                        ]
                         st.session_state.group_overrides.pop(group_name, None)
-                        for stem, grp in list(st.session_state.group_assignments.items()):
-                            if grp == group_name:
-                                st.session_state.group_assignments[stem] = "Default"
+                        for stem in affected:
+                            st.session_state.group_assignments[stem] = "Default"
+                            _mark_sample_dirty(stem, "group")
                         group_selection_key = f"group_samples__{_keyify(group_name)}"
                         if group_selection_key in st.session_state:
                             st.session_state.pop(group_selection_key)
                         st.rerun()
 
-                    prev_group = st.session_state.group_overrides.get(group_name, {})
+                    prev_group = dict(st.session_state.group_overrides.get(group_name, {}))
                     group_overrides = _render_override_controls(
                         f"group_{group_name}",
                         prev=prev_group,
@@ -1901,6 +1945,11 @@ with st.sidebar:
                         run_defaults=run_defaults,
                     )
                     st.session_state.group_overrides[group_name] = group_overrides
+
+                    if group_overrides != prev_group:
+                        for stem, grp in st.session_state.group_assignments.items():
+                            if grp == group_name:
+                                _mark_sample_dirty(stem, "group")
 
                     summary = _summarize_overrides(group_overrides)
                     if summary:
@@ -1916,7 +1965,9 @@ with st.sidebar:
                 run_defaults=run_defaults,
             )
         else:
-            st.session_state.pre_overrides.clear()
+            for stem in list(st.session_state.pre_overrides):
+                if stem not in st.session_state.results:
+                    st.session_state.pre_overrides.pop(stem, None)
 
     elif mode == "Whole dataset":
         meta_df = st.session_state.meta_df
@@ -2042,7 +2093,7 @@ with st.sidebar:
 run_col, clear_col, pause_col = st.columns(3)
 if clear_col.button("Clear results"):
     # buckets that are always dict-like
-    for bucket in ("results", "fig_pngs", "params", "dirty",
+    for bucket in ("results", "fig_pngs", "params", "dirty", "dirty_reason",
                    "aligned_results", "aligned_fig_pngs",
                    "results_raw",          # ← keep as dict, not None
                    ):
@@ -2135,13 +2186,16 @@ if st.session_state.run_active and st.session_state.pending:
         )
     st.session_state.results_raw.setdefault(stem, cnts)
 
-    if st.session_state.dirty.get(stem, False):
-        over = st.session_state.params.get(stem, {}).copy()
-    elif stem in st.session_state.results:
-        over = {}
-    else:
-        per_sample = st.session_state.pre_overrides.get(stem, {})
-        over = _combined_overrides(stem, per_sample)
+    per_sample_over = dict(st.session_state.pre_overrides.get(stem, {}))
+    reason_raw = st.session_state.dirty_reason.get(stem)
+    reasons = set(reason_raw) if reason_raw else set()
+
+    if st.session_state.dirty.get(stem, False) and (not reasons or "manual" in reasons):
+        for key, value in st.session_state.params.get(stem, {}).items():
+            if value is not None:
+                per_sample_over[key] = value
+
+    over = _combined_overrides(stem, per_sample_over)
 
     bw_raw = over.get("bw")
     bw_over: float | None
@@ -2329,8 +2383,8 @@ if st.session_state.run_active and st.session_state.pending:
         "prom": prom_use,
         "n_peaks": n_use,
     }
-    st.session_state.pre_overrides.pop(stem, None)
     st.session_state.dirty[stem] = False
+    st.session_state.dirty_reason.pop(stem, None)
 
     # progress update
     done = st.session_state.total_todo - len(st.session_state.pending)

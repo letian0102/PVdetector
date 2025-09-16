@@ -54,6 +54,8 @@ for key, default in {
     "pre_overrides": {},       # stem → pending overrides before first run
     "group_assignments": {},   # stem → group name
     "group_overrides": {"Default": {}},
+    "group_new_name": "",
+    "group_new_name_reset": False,
     "cached_uploads": [],
     "generated_csvs": [],
     "generated_meta": {},
@@ -1677,6 +1679,11 @@ with st.sidebar:
             st.markdown("---\n### Sample groups (optional)")
 
             col_name, col_add = st.columns([3, 1])
+
+            if st.session_state.get("group_new_name_reset", False):
+                st.session_state.group_new_name = ""
+                st.session_state.group_new_name_reset = False
+
             new_group_name = col_name.text_input(
                 "Create new group",
                 key="group_new_name",
@@ -1688,7 +1695,7 @@ with st.sidebar:
                 if clean:
                     if clean not in st.session_state.group_overrides:
                         st.session_state.group_overrides[clean] = {}
-                    st.session_state.group_new_name = ""
+                    st.session_state.group_new_name_reset = True
                 st.rerun()
 
             group_names = sorted(st.session_state.group_overrides)

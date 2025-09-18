@@ -72,7 +72,7 @@ for key, default in {
     "aligned_results": {},   # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
     "aligned_fig_pngs": {},  # stem_aligned.png → bytes
     "aligned_ridge_png":    None,
-    "apply_consistency": True,  # enforce marker consistency across samples
+    "apply_consistency": False,  # enforce marker consistency across samples
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default

@@ -234,13 +234,13 @@ def _strong_two_peak_signal(
     delta_bic = gmm.get("delta_bic_21")
     ashman = gmm.get("ashmans_d_k2")
 
-    WEIGHT_THRESHOLD = 0.15
-    DELTA_BIC_THRESHOLD = -20.0
-    ASHMAN_THRESHOLD = 2.4
-    VALLEY_RATIO_THRESHOLD = 0.65
-    RIGHT_TAIL_THRESHOLD = 0.18
-    PROMINENCE_RATIO_THRESHOLD = 0.35
-    SEPARATION_RATIO_THRESHOLD = 1.5
+    WEIGHT_THRESHOLD = 0.18
+    DELTA_BIC_THRESHOLD = -30.0
+    ASHMAN_THRESHOLD = 2.6
+    VALLEY_RATIO_THRESHOLD = 0.60
+    RIGHT_TAIL_THRESHOLD = 0.22
+    PROMINENCE_RATIO_THRESHOLD = 0.40
+    SEPARATION_RATIO_THRESHOLD = 2.0
 
     hits: list[str] = []
     has_weight_support = min_weight is not None and min_weight >= WEIGHT_THRESHOLD
@@ -273,15 +273,18 @@ def _strong_two_peak_signal(
     else:
         separation_ok = None
 
+    stat_hits: set[str] = set()
     if (
         delta_bic is not None
         and delta_bic <= DELTA_BIC_THRESHOLD
         and has_weight_support
     ):
         hits.append("delta_bic")
+        stat_hits.add("delta_bic")
 
     if ashman is not None and ashman >= ASHMAN_THRESHOLD and has_weight_support:
         hits.append("ashman_d")
+        stat_hits.add("ashman_d")
 
     geom_hits = 0
     if len(peaks) >= 2 and valley_ratio is not None and valley_ratio <= VALLEY_RATIO_THRESHOLD:
@@ -297,11 +300,18 @@ def _strong_two_peak_signal(
             hits.remove("right_tail")
         if "prominence_ratio" in hits:
             hits.remove("prominence_ratio")
+        geom_support = False
+    else:
+        geom_support = True
 
     if separation_ok is False:
         hits = ["insufficient_separation"]
+        return False, hits, min_weight, separation_info
 
-    has_signal = bool(hits) and "insufficient_separation" not in hits
+    has_signal = ("delta_bic" in stat_hits and "ashman_d" in stat_hits and geom_support)
+    if not has_signal:
+        hits = []
+
     return has_signal, hits, min_weight, separation_info
 
 
@@ -636,7 +646,7 @@ def ask_gpt_peak_count(
     try:
         rsp = client.chat.completions.create(
             model=model_name,
-            temperature=0,
+            temperature=1,
             seed=2025,
             timeout=45,
             messages=[

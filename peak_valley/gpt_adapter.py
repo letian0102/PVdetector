@@ -615,7 +615,7 @@ def ask_gpt_peak_count(
                     "reason": {"type": "string", "maxLength": 240},
                     "peak_indices": {"type": "array", "items": {"type": "integer"}},
                 },
-                "required": ["peak_count", "confidence", "reason"],
+                "required": ["peak_count", "confidence", "reason", "peak_indices"],
                 "additionalProperties": False,
             },
         },

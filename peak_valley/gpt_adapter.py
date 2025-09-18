@@ -234,13 +234,13 @@ def _strong_two_peak_signal(
     delta_bic = gmm.get("delta_bic_21")
     ashman = gmm.get("ashmans_d_k2")
 
-    WEIGHT_THRESHOLD = 0.18
-    DELTA_BIC_THRESHOLD = -30.0
-    ASHMAN_THRESHOLD = 2.6
-    VALLEY_RATIO_THRESHOLD = 0.60
-    RIGHT_TAIL_THRESHOLD = 0.22
-    PROMINENCE_RATIO_THRESHOLD = 0.40
-    SEPARATION_RATIO_THRESHOLD = 2.0
+    WEIGHT_THRESHOLD = 0.14
+    DELTA_BIC_THRESHOLD = -12.0
+    ASHMAN_THRESHOLD = 2.1
+    VALLEY_RATIO_THRESHOLD = 0.75
+    RIGHT_TAIL_THRESHOLD = 0.15
+    PROMINENCE_RATIO_THRESHOLD = 0.30
+    SEPARATION_RATIO_THRESHOLD = 1.4
 
     hits: list[str] = []
     has_weight_support = min_weight is not None and min_weight >= WEIGHT_THRESHOLD
@@ -273,6 +273,7 @@ def _strong_two_peak_signal(
     else:
         separation_ok = None
 
+    votes: list[str] = []
     stat_hits: set[str] = set()
     if (
         delta_bic is not None
@@ -281,34 +282,44 @@ def _strong_two_peak_signal(
     ):
         hits.append("delta_bic")
         stat_hits.add("delta_bic")
+        votes.append("delta_bic")
 
     if ashman is not None and ashman >= ASHMAN_THRESHOLD and has_weight_support:
         hits.append("ashman_d")
         stat_hits.add("ashman_d")
+        votes.append("ashman_d")
 
-    geom_hits = 0
-    if len(peaks) >= 2 and valley_ratio is not None and valley_ratio <= VALLEY_RATIO_THRESHOLD:
-        if right_tail is not None and right_tail >= RIGHT_TAIL_THRESHOLD:
-            geom_hits += 1
+    if len(peaks) >= 2 and valley_ratio is not None:
+        if valley_ratio <= VALLEY_RATIO_THRESHOLD:
+            hits.append("valley_depth")
+            votes.append("valley_depth")
+        if (
+            right_tail is not None
+            and right_tail >= RIGHT_TAIL_THRESHOLD
+        ):
             hits.append("right_tail")
-        if prominence_ratio is not None and prominence_ratio >= PROMINENCE_RATIO_THRESHOLD:
-            geom_hits += 1
+            votes.append("right_tail")
+        if (
+            prominence_ratio is not None
+            and prominence_ratio >= PROMINENCE_RATIO_THRESHOLD
+        ):
             hits.append("prominence_ratio")
-
-    if geom_hits < 2:
-        if "right_tail" in hits:
-            hits.remove("right_tail")
-        if "prominence_ratio" in hits:
-            hits.remove("prominence_ratio")
-        geom_support = False
-    else:
-        geom_support = True
+            votes.append("prominence_ratio")
 
     if separation_ok is False:
         hits = ["insufficient_separation"]
         return False, hits, min_weight, separation_info
 
-    has_signal = ("delta_bic" in stat_hits and "ashman_d" in stat_hits and geom_support)
+    if not has_weight_support:
+        return False, [], min_weight, separation_info
+
+    if separation_ok is True:
+        hits.append("separation")
+        votes.append("separation")
+
+    # Require at least two supporting signals with at least one statistical
+    stat_vote = any(v in {"delta_bic", "ashman_d"} for v in votes)
+    has_signal = stat_vote and len(votes) >= 2
     if not has_signal:
         hits = []
 
@@ -323,8 +334,8 @@ def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]
 
     hits: list[str] = []
 
-    if delta_bic is not None and delta_bic <= -10.0:
-        if weights_k3 and min(weights_k3) >= 0.07:
+    if delta_bic is not None and delta_bic <= -8.0:
+        if weights_k3 and min(weights_k3) >= 0.08:
             hits.append("delta_bic")
 
     return bool(hits), hits

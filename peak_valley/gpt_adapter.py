@@ -216,7 +216,9 @@ def _right_tail_mass(x: np.ndarray, cutoff: Optional[float]) -> Optional[float]:
     return float(np.sum(x > cutoff) / denom)
 
 
-def _strong_two_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str], Optional[float]]:
+def _strong_two_peak_signal(
+    features: dict[str, Any]
+) -> tuple[bool, list[str], Optional[float], dict[str, Any]]:
     """Return whether evidence supports a second peak and explain why."""
 
     candidates = features.get("candidates") or {}
@@ -233,20 +235,48 @@ def _strong_two_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str], 
     ashman = gmm.get("ashmans_d_k2")
 
     hits: list[str] = []
-    has_weight_support = min_weight is not None and min_weight >= 0.1
+    has_weight_support = min_weight is not None and min_weight >= 0.12
 
-    if delta_bic is not None and delta_bic <= -10.0 and has_weight_support:
+    separation_info: dict[str, Any] = {
+        "separation": None,
+        "separation_ratio": None,
+        "separation_ok": None,
+    }
+
+    if len(peaks) >= 2:
+        x0 = float(peaks[0].get("x", 0.0))
+        x1 = float(peaks[1].get("x", 0.0))
+        separation = abs(x1 - x0)
+        w0 = float(peaks[0].get("width") or 0.0)
+        w1 = float(peaks[1].get("width") or 0.0)
+        width_scale = max(w0, w1, 1e-9)
+        separation_ratio = separation / width_scale if width_scale > 0 else None
+        if separation_ratio is None:
+            separation_ok = None
+        else:
+            separation_ok = bool(separation_ratio >= 1.3)
+        separation_info.update(
+            {
+                "separation": separation,
+                "separation_ratio": separation_ratio,
+                "separation_ok": separation_ok,
+            }
+        )
+    else:
+        separation_ok = None
+
+    if delta_bic is not None and delta_bic <= -15.0 and has_weight_support:
         hits.append("delta_bic")
 
-    if ashman is not None and ashman >= 2.0 and has_weight_support:
+    if ashman is not None and ashman >= 2.2 and has_weight_support:
         hits.append("ashman_d")
 
     geom_hits = 0
-    if len(peaks) >= 2 and valley_ratio is not None and valley_ratio <= 0.75:
-        if right_tail is not None and right_tail >= 0.12:
+    if len(peaks) >= 2 and valley_ratio is not None and valley_ratio <= 0.70:
+        if right_tail is not None and right_tail >= 0.15:
             geom_hits += 1
             hits.append("right_tail")
-        if prominence_ratio is not None and prominence_ratio >= 0.25:
+        if prominence_ratio is not None and prominence_ratio >= 0.30:
             geom_hits += 1
             hits.append("prominence_ratio")
 
@@ -256,8 +286,11 @@ def _strong_two_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str], 
         if "prominence_ratio" in hits:
             hits.remove("prominence_ratio")
 
-    has_signal = bool(hits)
-    return has_signal, hits, min_weight
+    if separation_ok is False:
+        hits = ["insufficient_separation"]
+
+    has_signal = bool(hits) and "insufficient_separation" not in hits
+    return has_signal, hits, min_weight, separation_info
 
 
 def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -289,10 +322,11 @@ def _apply_peak_caps(
     tri_modal = bool(marker_name and marker_name.upper() in tri_modal_markers)
     heuristics["tri_modal_marker"] = tri_modal
 
-    has_two, two_hits, min_weight = _strong_two_peak_signal(feature_payload)
+    has_two, two_hits, min_weight, separation_info = _strong_two_peak_signal(feature_payload)
     heuristics["evidence_for_two"] = has_two
     heuristics["support_two_signals"] = two_hits
     heuristics["min_component_weight_k2"] = min_weight
+    heuristics["peak_separation"] = separation_info
 
     if safe_max >= 3 and not tri_modal:
         safe_max = 2

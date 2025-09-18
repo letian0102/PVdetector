@@ -65,7 +65,13 @@ def _smooth_histogram(counts: np.ndarray) -> np.ndarray:
 def _extract_peak_candidates(
     centers: np.ndarray,
     smoothed: np.ndarray,
-) -> tuple[list[dict[str, Any]], Optional[float], Optional[float], Optional[float], Optional[float]]:
+) -> tuple[
+    list[dict[str, Any]],
+    Optional[float],
+    Optional[float],
+    Optional[float],
+    Optional[float],
+]:
     """Return candidate peak descriptors and valley heuristics."""
 
     if smoothed.size == 0:
@@ -137,6 +143,9 @@ def _gmm_statistics(x: np.ndarray, max_components: int = 3) -> dict[str, Any]:
         "means_k2": None,
         "stds_k2": None,
         "ashmans_d_k2": None,
+        "weights_k3": None,
+        "means_k3": None,
+        "stds_k3": None,
     }
 
     if x.size == 0:
@@ -175,6 +184,15 @@ def _gmm_statistics(x: np.ndarray, max_components: int = 3) -> dict[str, Any]:
         if denom > 0:
             stats["ashmans_d_k2"] = float(np.sqrt(2.0) * abs(means[1] - means[0]) / denom)
 
+    if 3 in gmms:
+        gm3 = gmms[3]
+        means = gm3.means_.ravel()
+        stds = np.sqrt(np.clip(gm3.covariances_.reshape(-1), a_min=0.0, a_max=None))
+        order = np.argsort(means)
+        stats["means_k3"] = [float(m) for m in means[order]]
+        stats["stds_k3"] = [float(s) for s in stds[order]]
+        stats["weights_k3"] = [float(w) for w in gm3.weights_[order]]
+
     if 1 in stats["bic"] and 2 in stats["bic"]:
         b1 = stats["bic"].get("k1")
         b2 = stats["bic"].get("k2")
@@ -196,6 +214,107 @@ def _right_tail_mass(x: np.ndarray, cutoff: Optional[float]) -> Optional[float]:
     if denom <= 0:
         return None
     return float(np.sum(x > cutoff) / denom)
+
+
+def _strong_two_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str], Optional[float]]:
+    """Return whether evidence supports a second peak and explain why."""
+
+    candidates = features.get("candidates") or {}
+    peaks = candidates.get("peaks") or []
+    valley_ratio = candidates.get("valley_depth_ratio")
+    prominence_ratio = candidates.get("prominence_ratio")
+    right_tail = candidates.get("right_tail_mass_after_first_valley")
+
+    stats = features.get("statistics") or {}
+    gmm = stats.get("gmm") if isinstance(stats, dict) else {}
+    weights_k2 = gmm.get("weights_k2") if isinstance(gmm, dict) else None
+    min_weight = min(weights_k2) if weights_k2 else None
+    delta_bic = gmm.get("delta_bic_21")
+    ashman = gmm.get("ashmans_d_k2")
+
+    hits: list[str] = []
+    has_weight_support = min_weight is not None and min_weight >= 0.1
+
+    if delta_bic is not None and delta_bic <= -10.0 and has_weight_support:
+        hits.append("delta_bic")
+
+    if ashman is not None and ashman >= 2.0 and has_weight_support:
+        hits.append("ashman_d")
+
+    geom_hits = 0
+    if len(peaks) >= 2 and valley_ratio is not None and valley_ratio <= 0.75:
+        if right_tail is not None and right_tail >= 0.12:
+            geom_hits += 1
+            hits.append("right_tail")
+        if prominence_ratio is not None and prominence_ratio >= 0.25:
+            geom_hits += 1
+            hits.append("prominence_ratio")
+
+    if geom_hits < 2:
+        if "right_tail" in hits:
+            hits.remove("right_tail")
+        if "prominence_ratio" in hits:
+            hits.remove("prominence_ratio")
+
+    has_signal = bool(hits)
+    return has_signal, hits, min_weight
+
+
+def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]]:
+    stats = features.get("statistics") or {}
+    gmm = stats.get("gmm") if isinstance(stats, dict) else {}
+    delta_bic = gmm.get("delta_bic_32")
+    weights_k3 = gmm.get("weights_k3")
+
+    hits: list[str] = []
+
+    if delta_bic is not None and delta_bic <= -10.0:
+        if weights_k3 and min(weights_k3) >= 0.07:
+            hits.append("delta_bic")
+
+    return bool(hits), hits
+
+
+def _apply_peak_caps(
+    feature_payload: dict[str, Any],
+    marker_name: Optional[str],
+    requested_max: int,
+) -> tuple[int, dict[str, Any]]:
+    safe_max = max(1, int(requested_max))
+    heuristics: dict[str, Any] = {}
+
+    heuristics["requested_max"] = safe_max
+
+    tri_modal_markers = {"CD4", "CD45RA", "CD45RO"}
+    tri_modal = bool(marker_name and marker_name.upper() in tri_modal_markers)
+    heuristics["tri_modal_marker"] = tri_modal
+
+    has_two, two_hits, min_weight = _strong_two_peak_signal(feature_payload)
+    heuristics["evidence_for_two"] = has_two
+    heuristics["support_two_signals"] = two_hits
+    heuristics["min_component_weight_k2"] = min_weight
+
+    if safe_max >= 3 and not tri_modal:
+        safe_max = 2
+        heuristics["non_tri_modal_cap"] = 2
+
+    if safe_max >= 2 and not has_two:
+        safe_max = 1
+        heuristics["forced_peak_cap"] = 1
+
+    if safe_max >= 3:
+        has_three, three_hits = _strong_three_peak_signal(feature_payload)
+        heuristics["evidence_for_three"] = has_three
+        heuristics["support_three_signals"] = three_hits
+        if not has_three:
+            safe_max = 2
+            heuristics["forced_peak_cap"] = heuristics.get("forced_peak_cap", 2)
+    else:
+        heuristics["evidence_for_three"] = False
+        heuristics["support_three_signals"] = []
+
+    heuristics["final_allowed_max"] = safe_max
+    return safe_max, heuristics
 
 
 def _default_priors(marker_name: Optional[str]) -> dict[str, Any]:
@@ -402,7 +521,7 @@ def ask_gpt_peak_count(
     if client is None:
         return max_peaks
 
-    safe_max = max(1, int(max_peaks))
+    requested_max = max(1, int(max_peaks))
     values = _prepare_values(counts_full)
 
     payload: dict[str, Any] = {
@@ -410,7 +529,7 @@ def ask_gpt_peak_count(
             "marker": marker_name or "unknown",
             "technology": technology or "unknown",
             "transform": transform or "arcsinh(cofactor=5)",
-            "allowed_peaks_max": safe_max,
+            "allowed_peaks_max": requested_max,
         }
     }
 
@@ -432,9 +551,14 @@ def ask_gpt_peak_count(
         feature_payload = dict(features)
     else:
         feature_payload = _build_feature_payload(counts_full)
+
+    safe_max, heuristic_info = _apply_peak_caps(feature_payload, marker_name, requested_max)
+    payload["meta"]["allowed_peaks_max"] = safe_max
+
     payload.update(feature_payload)
 
     payload["priors"] = (priors.copy() if isinstance(priors, dict) else _default_priors(marker_name))
+    payload["heuristics"] = heuristic_info
 
     system = (
         "You are a cytometry/ADT gating assistant. Infer the number of visible density peaks "

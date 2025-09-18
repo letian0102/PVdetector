@@ -234,8 +234,16 @@ def _strong_two_peak_signal(
     delta_bic = gmm.get("delta_bic_21")
     ashman = gmm.get("ashmans_d_k2")
 
+    WEIGHT_THRESHOLD = 0.15
+    DELTA_BIC_THRESHOLD = -20.0
+    ASHMAN_THRESHOLD = 2.4
+    VALLEY_RATIO_THRESHOLD = 0.65
+    RIGHT_TAIL_THRESHOLD = 0.18
+    PROMINENCE_RATIO_THRESHOLD = 0.35
+    SEPARATION_RATIO_THRESHOLD = 1.5
+
     hits: list[str] = []
-    has_weight_support = min_weight is not None and min_weight >= 0.12
+    has_weight_support = min_weight is not None and min_weight >= WEIGHT_THRESHOLD
 
     separation_info: dict[str, Any] = {
         "separation": None,
@@ -254,7 +262,7 @@ def _strong_two_peak_signal(
         if separation_ratio is None:
             separation_ok = None
         else:
-            separation_ok = bool(separation_ratio >= 1.3)
+            separation_ok = bool(separation_ratio >= SEPARATION_RATIO_THRESHOLD)
         separation_info.update(
             {
                 "separation": separation,
@@ -265,18 +273,22 @@ def _strong_two_peak_signal(
     else:
         separation_ok = None
 
-    if delta_bic is not None and delta_bic <= -15.0 and has_weight_support:
+    if (
+        delta_bic is not None
+        and delta_bic <= DELTA_BIC_THRESHOLD
+        and has_weight_support
+    ):
         hits.append("delta_bic")
 
-    if ashman is not None and ashman >= 2.2 and has_weight_support:
+    if ashman is not None and ashman >= ASHMAN_THRESHOLD and has_weight_support:
         hits.append("ashman_d")
 
     geom_hits = 0
-    if len(peaks) >= 2 and valley_ratio is not None and valley_ratio <= 0.70:
-        if right_tail is not None and right_tail >= 0.15:
+    if len(peaks) >= 2 and valley_ratio is not None and valley_ratio <= VALLEY_RATIO_THRESHOLD:
+        if right_tail is not None and right_tail >= RIGHT_TAIL_THRESHOLD:
             geom_hits += 1
             hits.append("right_tail")
-        if prominence_ratio is not None and prominence_ratio >= 0.30:
+        if prominence_ratio is not None and prominence_ratio >= PROMINENCE_RATIO_THRESHOLD:
             geom_hits += 1
             hits.append("prominence_ratio")
 

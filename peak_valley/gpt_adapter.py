@@ -159,7 +159,12 @@ def _gmm_statistics(x: np.ndarray, max_components: int = 3) -> dict[str, Any]:
                 n_components=k,
                 covariance_type="full",
                 random_state=0,
-                n_init="auto",
+                # ``n_init='auto'`` is only available on recent scikit-learn
+                # releases.  Older versions (such as the one bundled with the
+                # Streamlit app) expect an integer, so fall back to a small
+                # explicit count to preserve compatibility across
+                # environments.
+                n_init=3,
                 reg_covar=1e-6,
             )
             gm.fit(data)

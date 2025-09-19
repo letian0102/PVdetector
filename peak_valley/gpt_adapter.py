@@ -234,13 +234,15 @@ def _strong_two_peak_signal(
     delta_bic = gmm.get("delta_bic_21")
     ashman = gmm.get("ashmans_d_k2")
 
-    WEIGHT_THRESHOLD = 0.14
-    DELTA_BIC_THRESHOLD = -12.0
-    ASHMAN_THRESHOLD = 2.1
-    VALLEY_RATIO_THRESHOLD = 0.75
-    RIGHT_TAIL_THRESHOLD = 0.15
-    PROMINENCE_RATIO_THRESHOLD = 0.30
-    SEPARATION_RATIO_THRESHOLD = 1.4
+    WEIGHT_THRESHOLD = 0.12
+    DELTA_BIC_THRESHOLD = -9.0
+    STRONG_DELTA_BIC_THRESHOLD = -14.0
+    ASHMAN_THRESHOLD = 2.0
+    STRONG_ASHMAN_THRESHOLD = 2.6
+    VALLEY_RATIO_THRESHOLD = 0.82
+    RIGHT_TAIL_THRESHOLD = 0.12
+    PROMINENCE_RATIO_THRESHOLD = 0.26
+    SEPARATION_RATIO_THRESHOLD = 1.45
 
     hits: list[str] = []
     has_weight_support = min_weight is not None and min_weight >= WEIGHT_THRESHOLD
@@ -283,11 +285,17 @@ def _strong_two_peak_signal(
         hits.append("delta_bic")
         stat_hits.add("delta_bic")
         votes.append("delta_bic")
+        if delta_bic <= STRONG_DELTA_BIC_THRESHOLD:
+            hits.append("delta_bic_strong")
+            votes.append("delta_bic_strong")
 
     if ashman is not None and ashman >= ASHMAN_THRESHOLD and has_weight_support:
         hits.append("ashman_d")
         stat_hits.add("ashman_d")
         votes.append("ashman_d")
+        if ashman >= STRONG_ASHMAN_THRESHOLD:
+            hits.append("ashman_d_strong")
+            votes.append("ashman_d_strong")
 
     if len(peaks) >= 2 and valley_ratio is not None:
         if valley_ratio <= VALLEY_RATIO_THRESHOLD:

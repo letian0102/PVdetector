@@ -240,13 +240,13 @@ def _strong_two_peak_signal(
     ashman = gmm.get("ashmans_d_k2")
 
     WEIGHT_THRESHOLD = 0.15
-    DELTA_BIC_THRESHOLD = -11.0
-    STRONG_DELTA_BIC_THRESHOLD = -14.0
-    ASHMAN_THRESHOLD = 2.3
-    STRONG_ASHMAN_THRESHOLD = 2.8
+    DELTA_BIC_THRESHOLD = -9.5
+    STRONG_DELTA_BIC_THRESHOLD = -13.0
+    ASHMAN_THRESHOLD = 2.15
+    STRONG_ASHMAN_THRESHOLD = 2.65
     VALLEY_RATIO_THRESHOLD = 0.75
-    RIGHT_TAIL_THRESHOLD = 0.14
-    PROMINENCE_RATIO_THRESHOLD = 0.3
+    RIGHT_TAIL_THRESHOLD = 0.12
+    PROMINENCE_RATIO_THRESHOLD = 0.26
     SEPARATION_RATIO_THRESHOLD = 1.55
 
     hits: list[str] = []
@@ -328,16 +328,20 @@ def _strong_two_peak_signal(
     geo_vote_count = len(geometry_votes)
 
     primary_geo_votes = int(valley_vote) + int(right_tail_vote)
+    secondary_geo_votes = int(prominence_vote)
+
     geometry_ok = geo_vote_count >= 2 and primary_geo_votes >= 1
+    if not geometry_ok and strong_stat:
+        geometry_ok = geo_vote_count >= 2 and (primary_geo_votes + secondary_geo_votes) >= 2
 
     stat_combo = has_delta and has_ashman
 
     has_signal = False
     if stat_combo and geometry_ok:
         has_signal = True
-    elif stat_combo and strong_stat and geo_vote_count >= 1 and primary_geo_votes >= 1:
+    elif stat_combo and strong_stat and geo_vote_count >= 1 and (primary_geo_votes >= 1 or prominence_vote):
         has_signal = True
-    elif delta_strong and ashman_strong and geo_vote_count >= 1 and primary_geo_votes >= 1:
+    elif delta_strong and ashman_strong and geo_vote_count >= 1 and (primary_geo_votes >= 1 or prominence_vote):
         has_signal = True
 
     if not has_signal:

@@ -239,15 +239,15 @@ def _strong_two_peak_signal(
     delta_bic = gmm.get("delta_bic_21")
     ashman = gmm.get("ashmans_d_k2")
 
-    WEIGHT_THRESHOLD = 0.10
-    DELTA_BIC_THRESHOLD = -8.0
-    STRONG_DELTA_BIC_THRESHOLD = -12.0
-    ASHMAN_THRESHOLD = 1.9
-    STRONG_ASHMAN_THRESHOLD = 2.5
-    VALLEY_RATIO_THRESHOLD = 0.83
-    RIGHT_TAIL_THRESHOLD = 0.11
-    PROMINENCE_RATIO_THRESHOLD = 0.24
-    SEPARATION_RATIO_THRESHOLD = 1.30
+    WEIGHT_THRESHOLD = 0.14
+    DELTA_BIC_THRESHOLD = -10.0
+    STRONG_DELTA_BIC_THRESHOLD = -14.0
+    ASHMAN_THRESHOLD = 2.1
+    STRONG_ASHMAN_THRESHOLD = 2.7
+    VALLEY_RATIO_THRESHOLD = 0.78
+    RIGHT_TAIL_THRESHOLD = 0.14
+    PROMINENCE_RATIO_THRESHOLD = 0.28
+    SEPARATION_RATIO_THRESHOLD = 1.45
 
     hits: list[str] = []
     has_weight_support = min_weight is not None and min_weight >= WEIGHT_THRESHOLD
@@ -331,8 +331,10 @@ def _strong_two_peak_signal(
         votes.append("separation")
 
     # Require at least two supporting signals with at least one statistical
-    stat_vote = any(v in {"delta_bic", "ashman_d"} for v in votes)
-    has_signal = stat_vote and len(votes) >= 2
+    has_delta_bic = any(v in {"delta_bic", "delta_bic_strong"} for v in votes)
+    has_ashman = any(v in {"ashman_d", "ashman_d_strong"} for v in votes)
+    stat_vote = has_delta_bic and has_ashman
+    has_signal = stat_vote and len(votes) >= 3
     if not has_signal:
         hits = []
 

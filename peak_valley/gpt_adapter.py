@@ -239,15 +239,18 @@ def _strong_two_peak_signal(
     delta_bic = gmm.get("delta_bic_21")
     ashman = gmm.get("ashmans_d_k2")
 
-    WEIGHT_THRESHOLD = 0.15
+    WEIGHT_THRESHOLD = 0.14
     DELTA_BIC_THRESHOLD = -9.5
-    STRONG_DELTA_BIC_THRESHOLD = -13.0
-    ASHMAN_THRESHOLD = 2.15
-    STRONG_ASHMAN_THRESHOLD = 2.65
-    VALLEY_RATIO_THRESHOLD = 0.75
-    RIGHT_TAIL_THRESHOLD = 0.12
-    PROMINENCE_RATIO_THRESHOLD = 0.26
-    SEPARATION_RATIO_THRESHOLD = 1.55
+    STRONG_DELTA_BIC_THRESHOLD = -13.5
+    ASHMAN_THRESHOLD = 2.05
+    STRONG_ASHMAN_THRESHOLD = 2.55
+    VALLEY_RATIO_THRESHOLD = 0.78
+    STRONG_VALLEY_RATIO_THRESHOLD = 0.62
+    RIGHT_TAIL_THRESHOLD = 0.11
+    STRONG_RIGHT_TAIL_THRESHOLD = 0.18
+    PROMINENCE_RATIO_THRESHOLD = 0.24
+    STRONG_PROMINENCE_RATIO_THRESHOLD = 0.36
+    SEPARATION_RATIO_THRESHOLD = 1.5
 
     hits: list[str] = []
     has_weight_support = min_weight is not None and min_weight >= WEIGHT_THRESHOLD
@@ -286,7 +289,6 @@ def _strong_two_peak_signal(
         return False, ["insufficient_separation"], min_weight, separation_info
 
     stat_votes: list[str] = []
-    geometry_votes: list[str] = []
     strong_stat_votes: list[str] = []
 
     has_delta = False
@@ -307,44 +309,58 @@ def _strong_two_peak_signal(
             ashman_strong = True
             strong_stat_votes.append("ashman_d")
 
+    stat_count = len(stat_votes)
+    strong_stat = bool(strong_stat_votes)
+
+    if stat_count == 0:
+        return False, ["insufficient_statistical_support"], min_weight, separation_info
+
+    geometry_votes: list[str] = []
+    primary_geo_votes = 0
+    strong_geo_votes = 0
+
     valley_vote = False
     if valley_ratio is not None and valley_ratio <= VALLEY_RATIO_THRESHOLD:
         valley_vote = True
         geometry_votes.append("valley_depth")
+        primary_geo_votes += 1
+        if valley_ratio <= STRONG_VALLEY_RATIO_THRESHOLD:
+            strong_geo_votes += 1
 
     right_tail_vote = False
     if right_tail is not None and right_tail >= RIGHT_TAIL_THRESHOLD:
         right_tail_vote = True
         geometry_votes.append("right_tail")
+        primary_geo_votes += 1
+        if right_tail >= STRONG_RIGHT_TAIL_THRESHOLD:
+            strong_geo_votes += 1
 
     prominence_vote = False
     if prominence_ratio is not None and prominence_ratio >= PROMINENCE_RATIO_THRESHOLD:
         prominence_vote = True
         geometry_votes.append("prominence_ratio")
+        if prominence_ratio >= STRONG_PROMINENCE_RATIO_THRESHOLD:
+            strong_geo_votes += 1
 
-    geometry_votes.append("separation")
+    geometry_vote_count = len(geometry_votes)
 
-    strong_stat = bool(strong_stat_votes)
-    geo_vote_count = len(geometry_votes)
+    # Require at least one geometric indicator beyond separation
+    if geometry_vote_count == 0:
+        return False, ["insufficient_geometric_support"], min_weight, separation_info
 
-    primary_geo_votes = int(valley_vote) + int(right_tail_vote)
-    secondary_geo_votes = int(prominence_vote)
+    allow_two = False
+    if stat_count >= 2:
+        if primary_geo_votes >= 1 or strong_stat or strong_geo_votes >= 1:
+            allow_two = True
+    else:  # exactly one statistical vote
+        if primary_geo_votes >= 1 and geometry_vote_count >= 1:
+            allow_two = True
+        elif strong_stat and geometry_vote_count >= 2:
+            allow_two = True
+        elif strong_geo_votes >= 1 and geometry_vote_count >= 2:
+            allow_two = True
 
-    geometry_ok = geo_vote_count >= 2 and primary_geo_votes >= 1
-    if not geometry_ok and strong_stat:
-        geometry_ok = geo_vote_count >= 2 and (primary_geo_votes + secondary_geo_votes) >= 2
-
-    stat_combo = has_delta and has_ashman
-
-    has_signal = False
-    if stat_combo and geometry_ok:
-        has_signal = True
-    elif stat_combo and strong_stat and geo_vote_count >= 1 and (primary_geo_votes >= 1 or prominence_vote):
-        has_signal = True
-    elif delta_strong and ashman_strong and geo_vote_count >= 1 and (primary_geo_votes >= 1 or prominence_vote):
-        has_signal = True
-
-    if not has_signal:
+    if not allow_two:
         return False, [], min_weight, separation_info
 
     if has_delta:
@@ -357,10 +373,16 @@ def _strong_two_peak_signal(
             hits.append("ashman_d_strong")
     if valley_vote:
         hits.append("valley_depth")
+        if valley_ratio is not None and valley_ratio <= STRONG_VALLEY_RATIO_THRESHOLD:
+            hits.append("valley_depth_strong")
     if right_tail_vote:
         hits.append("right_tail")
+        if right_tail is not None and right_tail >= STRONG_RIGHT_TAIL_THRESHOLD:
+            hits.append("right_tail_strong")
     if prominence_vote:
         hits.append("prominence_ratio")
+        if prominence_ratio is not None and prominence_ratio >= STRONG_PROMINENCE_RATIO_THRESHOLD:
+            hits.append("prominence_ratio_strong")
     hits.append("separation")
 
     return True, hits, min_weight, separation_info

@@ -239,15 +239,15 @@ def _strong_two_peak_signal(
     delta_bic = gmm.get("delta_bic_21")
     ashman = gmm.get("ashmans_d_k2")
 
-    WEIGHT_THRESHOLD = 0.14
-    DELTA_BIC_THRESHOLD = -10.0
-    STRONG_DELTA_BIC_THRESHOLD = -14.0
-    ASHMAN_THRESHOLD = 2.1
-    STRONG_ASHMAN_THRESHOLD = 2.7
-    VALLEY_RATIO_THRESHOLD = 0.78
-    RIGHT_TAIL_THRESHOLD = 0.14
-    PROMINENCE_RATIO_THRESHOLD = 0.28
-    SEPARATION_RATIO_THRESHOLD = 1.45
+    WEIGHT_THRESHOLD = 0.12
+    DELTA_BIC_THRESHOLD = -9.0
+    STRONG_DELTA_BIC_THRESHOLD = -12.5
+    ASHMAN_THRESHOLD = 2.15
+    STRONG_ASHMAN_THRESHOLD = 2.6
+    VALLEY_RATIO_THRESHOLD = 0.8
+    RIGHT_TAIL_THRESHOLD = 0.12
+    PROMINENCE_RATIO_THRESHOLD = 0.25
+    SEPARATION_RATIO_THRESHOLD = 1.35
 
     hits: list[str] = []
     has_weight_support = min_weight is not None and min_weight >= WEIGHT_THRESHOLD
@@ -264,7 +264,7 @@ def _strong_two_peak_signal(
         separation = abs(x1 - x0)
         w0 = float(peaks[0].get("width") or 0.0)
         w1 = float(peaks[1].get("width") or 0.0)
-        width_scale = max(w0, w1, 1e-9)
+        width_scale = max(0.5 * (w0 + w1), 1e-9)
         separation_ratio = separation / width_scale if width_scale > 0 else None
         if separation_ratio is None:
             separation_ok = None
@@ -281,26 +281,29 @@ def _strong_two_peak_signal(
         separation_ok = None
 
     votes: list[str] = []
-    stat_hits: set[str] = set()
+    stat_votes: list[str] = []
+    strong_stat_votes: list[str] = []
     if (
         delta_bic is not None
         and delta_bic <= DELTA_BIC_THRESHOLD
         and has_weight_support
     ):
         hits.append("delta_bic")
-        stat_hits.add("delta_bic")
         votes.append("delta_bic")
+        stat_votes.append("delta_bic")
         if delta_bic <= STRONG_DELTA_BIC_THRESHOLD:
             hits.append("delta_bic_strong")
             votes.append("delta_bic_strong")
+            strong_stat_votes.append("delta_bic")
 
     if ashman is not None and ashman >= ASHMAN_THRESHOLD and has_weight_support:
         hits.append("ashman_d")
-        stat_hits.add("ashman_d")
         votes.append("ashman_d")
+        stat_votes.append("ashman_d")
         if ashman >= STRONG_ASHMAN_THRESHOLD:
             hits.append("ashman_d_strong")
             votes.append("ashman_d_strong")
+            strong_stat_votes.append("ashman_d")
 
     if len(peaks) >= 2:
         if valley_ratio is not None and valley_ratio <= VALLEY_RATIO_THRESHOLD:
@@ -330,11 +333,19 @@ def _strong_two_peak_signal(
         hits.append("separation")
         votes.append("separation")
 
-    # Require at least two supporting signals with at least one statistical
-    has_delta_bic = any(v in {"delta_bic", "delta_bic_strong"} for v in votes)
-    has_ashman = any(v in {"ashman_d", "ashman_d_strong"} for v in votes)
-    stat_vote = has_delta_bic and has_ashman
-    has_signal = stat_vote and len(votes) >= 3
+    total_votes = len(votes)
+    stat_vote_count = len(stat_votes)
+    strong_stat = bool(strong_stat_votes)
+    geo_vote_count = total_votes - stat_vote_count
+
+    has_signal = False
+    if strong_stat and total_votes >= 2:
+        has_signal = True
+    elif stat_vote_count >= 2 and total_votes >= 3:
+        has_signal = True
+    elif stat_vote_count >= 1 and geo_vote_count >= 2 and total_votes >= 3:
+        has_signal = True
+
     if not has_signal:
         hits = []
 

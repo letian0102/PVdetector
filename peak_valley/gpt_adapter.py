@@ -159,7 +159,12 @@ def _gmm_statistics(x: np.ndarray, max_components: int = 3) -> dict[str, Any]:
                 n_components=k,
                 covariance_type="full",
                 random_state=0,
-                n_init="auto",
+                # ``n_init='auto'`` is only available on recent scikit-learn
+                # releases.  Older versions (such as the one bundled with the
+                # Streamlit app) expect an integer, so fall back to a small
+                # explicit count to preserve compatibility across
+                # environments.
+                n_init=3,
                 reg_covar=1e-6,
             )
             gm.fit(data)
@@ -234,8 +239,21 @@ def _strong_two_peak_signal(
     delta_bic = gmm.get("delta_bic_21")
     ashman = gmm.get("ashmans_d_k2")
 
+    WEIGHT_THRESHOLD = 0.14
+    DELTA_BIC_THRESHOLD = -9.5
+    STRONG_DELTA_BIC_THRESHOLD = -13.5
+    ASHMAN_THRESHOLD = 2.05
+    STRONG_ASHMAN_THRESHOLD = 2.55
+    VALLEY_RATIO_THRESHOLD = 0.78
+    STRONG_VALLEY_RATIO_THRESHOLD = 0.62
+    RIGHT_TAIL_THRESHOLD = 0.11
+    STRONG_RIGHT_TAIL_THRESHOLD = 0.18
+    PROMINENCE_RATIO_THRESHOLD = 0.24
+    STRONG_PROMINENCE_RATIO_THRESHOLD = 0.36
+    SEPARATION_RATIO_THRESHOLD = 1.5
+
     hits: list[str] = []
-    has_weight_support = min_weight is not None and min_weight >= 0.12
+    has_weight_support = min_weight is not None and min_weight >= WEIGHT_THRESHOLD
 
     separation_info: dict[str, Any] = {
         "separation": None,
@@ -243,54 +261,131 @@ def _strong_two_peak_signal(
         "separation_ok": None,
     }
 
-    if len(peaks) >= 2:
-        x0 = float(peaks[0].get("x", 0.0))
-        x1 = float(peaks[1].get("x", 0.0))
-        separation = abs(x1 - x0)
-        w0 = float(peaks[0].get("width") or 0.0)
-        w1 = float(peaks[1].get("width") or 0.0)
-        width_scale = max(w0, w1, 1e-9)
-        separation_ratio = separation / width_scale if width_scale > 0 else None
-        if separation_ratio is None:
-            separation_ok = None
-        else:
-            separation_ok = bool(separation_ratio >= 1.3)
-        separation_info.update(
-            {
-                "separation": separation,
-                "separation_ratio": separation_ratio,
-                "separation_ok": separation_ok,
-            }
-        )
-    else:
-        separation_ok = None
+    if not has_weight_support:
+        return False, ["low_component_weight"], min_weight, separation_info
 
-    if delta_bic is not None and delta_bic <= -15.0 and has_weight_support:
+    if len(peaks) < 2:
+        return False, ["insufficient_candidates"], min_weight, separation_info
+
+    x0 = float(peaks[0].get("x", 0.0))
+    x1 = float(peaks[1].get("x", 0.0))
+    separation = abs(x1 - x0)
+    w0 = float(peaks[0].get("width") or 0.0)
+    w1 = float(peaks[1].get("width") or 0.0)
+    width_scale = max(0.5 * (w0 + w1), 1e-9)
+    separation_ratio = separation / width_scale if width_scale > 0 else None
+    separation_ok = (
+        separation_ratio is not None and separation_ratio >= SEPARATION_RATIO_THRESHOLD
+    )
+    separation_info.update(
+        {
+            "separation": separation,
+            "separation_ratio": separation_ratio,
+            "separation_ok": separation_ok,
+        }
+    )
+
+    if not separation_ok:
+        return False, ["insufficient_separation"], min_weight, separation_info
+
+    stat_votes: list[str] = []
+    strong_stat_votes: list[str] = []
+
+    has_delta = False
+    delta_strong = False
+    if delta_bic is not None and delta_bic <= DELTA_BIC_THRESHOLD:
+        has_delta = True
+        stat_votes.append("delta_bic")
+        if delta_bic <= STRONG_DELTA_BIC_THRESHOLD:
+            delta_strong = True
+            strong_stat_votes.append("delta_bic")
+
+    has_ashman = False
+    ashman_strong = False
+    if ashman is not None and ashman >= ASHMAN_THRESHOLD:
+        has_ashman = True
+        stat_votes.append("ashman_d")
+        if ashman >= STRONG_ASHMAN_THRESHOLD:
+            ashman_strong = True
+            strong_stat_votes.append("ashman_d")
+
+    stat_count = len(stat_votes)
+    strong_stat = bool(strong_stat_votes)
+
+    if stat_count == 0:
+        return False, ["insufficient_statistical_support"], min_weight, separation_info
+
+    geometry_votes: list[str] = []
+    primary_geo_votes = 0
+    strong_geo_votes = 0
+
+    valley_vote = False
+    if valley_ratio is not None and valley_ratio <= VALLEY_RATIO_THRESHOLD:
+        valley_vote = True
+        geometry_votes.append("valley_depth")
+        primary_geo_votes += 1
+        if valley_ratio <= STRONG_VALLEY_RATIO_THRESHOLD:
+            strong_geo_votes += 1
+
+    right_tail_vote = False
+    if right_tail is not None and right_tail >= RIGHT_TAIL_THRESHOLD:
+        right_tail_vote = True
+        geometry_votes.append("right_tail")
+        primary_geo_votes += 1
+        if right_tail >= STRONG_RIGHT_TAIL_THRESHOLD:
+            strong_geo_votes += 1
+
+    prominence_vote = False
+    if prominence_ratio is not None and prominence_ratio >= PROMINENCE_RATIO_THRESHOLD:
+        prominence_vote = True
+        geometry_votes.append("prominence_ratio")
+        if prominence_ratio >= STRONG_PROMINENCE_RATIO_THRESHOLD:
+            strong_geo_votes += 1
+
+    geometry_vote_count = len(geometry_votes)
+
+    # Require at least one geometric indicator beyond separation
+    if geometry_vote_count == 0:
+        return False, ["insufficient_geometric_support"], min_weight, separation_info
+
+    allow_two = False
+    if stat_count >= 2:
+        if primary_geo_votes >= 1 or strong_stat or strong_geo_votes >= 1:
+            allow_two = True
+    else:  # exactly one statistical vote
+        if primary_geo_votes >= 1 and geometry_vote_count >= 1:
+            allow_two = True
+        elif strong_stat and geometry_vote_count >= 2:
+            allow_two = True
+        elif strong_geo_votes >= 1 and geometry_vote_count >= 2:
+            allow_two = True
+
+    if not allow_two:
+        return False, [], min_weight, separation_info
+
+    if has_delta:
         hits.append("delta_bic")
-
-    if ashman is not None and ashman >= 2.2 and has_weight_support:
+        if delta_strong:
+            hits.append("delta_bic_strong")
+    if has_ashman:
         hits.append("ashman_d")
+        if ashman_strong:
+            hits.append("ashman_d_strong")
+    if valley_vote:
+        hits.append("valley_depth")
+        if valley_ratio is not None and valley_ratio <= STRONG_VALLEY_RATIO_THRESHOLD:
+            hits.append("valley_depth_strong")
+    if right_tail_vote:
+        hits.append("right_tail")
+        if right_tail is not None and right_tail >= STRONG_RIGHT_TAIL_THRESHOLD:
+            hits.append("right_tail_strong")
+    if prominence_vote:
+        hits.append("prominence_ratio")
+        if prominence_ratio is not None and prominence_ratio >= STRONG_PROMINENCE_RATIO_THRESHOLD:
+            hits.append("prominence_ratio_strong")
+    hits.append("separation")
 
-    geom_hits = 0
-    if len(peaks) >= 2 and valley_ratio is not None and valley_ratio <= 0.70:
-        if right_tail is not None and right_tail >= 0.15:
-            geom_hits += 1
-            hits.append("right_tail")
-        if prominence_ratio is not None and prominence_ratio >= 0.30:
-            geom_hits += 1
-            hits.append("prominence_ratio")
-
-    if geom_hits < 2:
-        if "right_tail" in hits:
-            hits.remove("right_tail")
-        if "prominence_ratio" in hits:
-            hits.remove("prominence_ratio")
-
-    if separation_ok is False:
-        hits = ["insufficient_separation"]
-
-    has_signal = bool(hits) and "insufficient_separation" not in hits
-    return has_signal, hits, min_weight, separation_info
+    return True, hits, min_weight, separation_info
 
 
 def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -301,8 +396,8 @@ def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]
 
     hits: list[str] = []
 
-    if delta_bic is not None and delta_bic <= -10.0:
-        if weights_k3 and min(weights_k3) >= 0.07:
+    if delta_bic is not None and delta_bic <= -8.0:
+        if weights_k3 and min(weights_k3) >= 0.08:
             hits.append("delta_bic")
 
     return bool(hits), hits
@@ -624,7 +719,7 @@ def ask_gpt_peak_count(
     try:
         rsp = client.chat.completions.create(
             model=model_name,
-            temperature=0,
+            temperature=1,
             seed=2025,
             timeout=45,
             messages=[

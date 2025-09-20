@@ -42,26 +42,32 @@ def fill_landmark_matrix(
         raise ValueError(f"Unknown align_type '{align_type}'")
 
     # ----- convert ragged → dense ------------------------------------------------
-    # Every distribution has at most *one* negative peak and valley in our UI
-    pk_mat = np.full((len(peaks), 3), np.nan)
-    vl_mat = np.full((len(valleys), 3), np.nan)
+    n = len(peaks)
+    pk_lengths = [len(pk) for pk in peaks]
+    vl_lengths = [len(vl) for vl in valleys]
+
+    max_pk = max(pk_lengths, default=0)
+    max_vl = max(vl_lengths, default=0)
+
+    pk_mat = np.full((n, max_pk if max_pk > 0 else 1), np.nan)
+    vl_mat = np.full((n, max_vl if max_vl > 0 else 1), np.nan)
 
     for i, pk in enumerate(peaks):
         if pk:
-            pk_mat[i, : len(pk)] = pk[:3]
+            pk_mat[i, : len(pk)] = pk
     for i, vl in enumerate(valleys):
         if vl:
-            vl_mat[i, : len(vl)] = vl[:3]
+            vl_mat[i, : len(vl)] = vl
 
     # Negative‑peak  = first peak in the list
     # Valley         = first valley in the list
     # Positive‑peak  = **last** peak in the list (≠ third column!)
 
-    neg = pk_mat[:, 0]
-    val = vl_mat[:, 0]
+    neg = pk_mat[:, 0] if max_pk > 0 else np.full(n, np.nan)
+    val = vl_mat[:, 0] if max_vl > 0 else np.full(n, np.nan)
 
     # the “last” peak has to be extracted explicitly or it disappears
-    pos = np.full(len(peaks), np.nan)
+    pos = np.full(n, np.nan)
     for i, pk in enumerate(peaks):
         if pk:                           # non‑empty list
             pos[i] = pk[-1]              # last element, no matter how many
@@ -76,17 +82,22 @@ def fill_landmark_matrix(
     # If the caller asked for the 3-landmark mode we still have to deliver
     # three columns, therefore we **impute** the missing positive peak by
     #   pos = valley + median(pos-valley)   (R logic)
-    if pk_mat.shape[1] == 1:
+    if max_pk <= 1:
         out = np.vstack([neg, val]).T          # (N, 2)  so far
 
         # fill NAs (neg & val) exactly as in the R code ------------------
         nan_neg = np.isnan(out[:, 0])
-        out[nan_neg, 0] = np.nanmedian(out[~nan_neg, 0])
+        if np.any(~nan_neg):
+            out[nan_neg, 0] = np.nanmedian(out[~nan_neg, 0])
+
         nan_val = np.isnan(out[:, 1])
-        alt     = np.nanmedian(out[~nan_val, 1])
-        out[nan_val, 1] = np.where(
+        alt = np.nanmedian(out[~nan_val, 1]) if np.any(~nan_val) else np.nan
+        fill_val = np.where(
             neg_thr > out[nan_val, 0], neg_thr, alt
         )
+        if np.isnan(alt):
+            fill_val[:] = neg_thr
+        out[nan_val, 1] = fill_val
 
         # --- return early for 1- or 2-anchor regimes --------------------
         if align_type == "negPeak":
@@ -95,14 +106,20 @@ def fill_landmark_matrix(
             return out
 
         # ---- need a surrogate positive peak ----------------------------
-        diff_med = np.nanmedian(out[:, 1] * 0 + 1)  # avoid NaN when all miss
-        # any real sample with ≥2 peaks will **overwrite** the surrogate
-        pos      = out[:, 1] + diff_med
-        out      = np.column_stack([out, pos])
+        diff_candidates = pos - val
+        valid_diff = ~np.isnan(diff_candidates)
+        if np.any(valid_diff):
+            diff_med = np.nanmedian(diff_candidates[valid_diff])
+        else:
+            diff_med = np.nanmedian(out[:, 1])
+        if np.isnan(diff_med) or diff_med <= 0:
+            diff_med = max(neg_thr, 1.0)
+        pos_fill = out[:, 1] + diff_med
+        out      = np.column_stack([out, pos_fill])
         return out
 
     # ── have ≥2 peaks ──────────────────────────────────────────────────────
-    if midpoint_type == "midpoint" and pk_mat.shape[1] > 2:
+    if midpoint_type == "midpoint" and max_pk > 2 and max_vl > 0:
         use_val = np.nanmean(vl_mat, axis=1)
     else:
         use_val = val
@@ -119,7 +136,12 @@ def fill_landmark_matrix(
 
     # pos-peak NAs
     nan_pos = np.isnan(out[:, 2])
-    diff_med = np.nanmedian(out[~nan_pos, 2] - out[~nan_pos, 1])
+    if np.any(~nan_pos):
+        diff_med = np.nanmedian(out[~nan_pos, 2] - out[~nan_pos, 1])
+    else:
+        diff_med = np.nanmedian(out[:, 1])
+    if np.isnan(diff_med) or diff_med <= 0:
+        diff_med = max(neg_thr, 1.0)
     out[nan_pos, 2] = out[nan_pos, 1] + diff_med
 
     if align_type == "negPeak":
@@ -217,8 +239,12 @@ def align_distributions(
         lm[nan_by_col] = np.take(col_median, np.where(nan_by_col)[1])
 
     # ---------- choose the common target positions -----------------------
-    tgt = (np.mean(lm, axis=0)
+    tgt = (np.nanmean(lm, axis=0)
            if target_landmark is None else np.asarray(target_landmark, float))
+    if tgt.shape[0] != lm.shape[1]:
+        raise ValueError(
+            "target_landmark length does not match landmark columns"
+        )
 
     # ---------- build & apply warps --------------------------------------
     warped_counts   : List[np.ndarray] = []
@@ -229,6 +255,11 @@ def align_distributions(
         if not valid.any():                 # nothing to align…
             warped_counts.append(c.copy())
             warped_landmark[i] = l_src
+
+            def _identity(x):
+                return np.asarray(x, float)
+
+            warp_funs.append(_identity)
             continue
 
         f = build_warp_function(l_src[valid], tgt[valid])

@@ -79,8 +79,8 @@ def fill_landmark_matrix(
     # the “last” peak has to be extracted explicitly or it disappears
     pos = np.full(n, np.nan)
     for i, pk in enumerate(peaks):
-        if pk:                           # non‑empty list
-            pos[i] = pk[-1]              # last element, no matter how many
+        if pk and len(pk) > 1:           # needs a distinct positive peak
+            pos[i] = pk[-1]              # last element, true positive peak
     neg_thr = neg_thr if neg_thr is not None else np.arcsinh(10 / 5 + 1)
 
     if align_type == "valley":
@@ -124,8 +124,13 @@ def fill_landmark_matrix(
             diff_med = np.nanmedian(out[:, 1])
         if np.isnan(diff_med) or diff_med <= 0:
             diff_med = max(neg_thr, 1.0)
-        pos_fill = out[:, 1] + diff_med
-        out      = np.column_stack([out, pos_fill])
+
+        pos_imputed = np.where(
+            np.isnan(pos),
+            out[:, 1] + diff_med,
+            pos,
+        )
+        out = np.column_stack([out, pos_imputed])
         return out
 
     # ── have ≥2 peaks ──────────────────────────────────────────────────────

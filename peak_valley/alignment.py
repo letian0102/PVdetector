@@ -17,7 +17,14 @@ The target landmark set defaults to the **column means** across samples
 """
 from __future__ import annotations
 import numpy as np
-from typing import Sequence, Tuple, List, Optional, Iterable
+from typing import Sequence, Tuple, List, Optional, Union
+
+DensityGrid = Tuple[Sequence[float], Sequence[float]]
+
+
+def _identity_warp(x):
+    """Return a numpy array copy of *x* (used when no warping is needed)."""
+    return np.asarray(x, float)
 
 __all__ = ["fill_landmark_matrix",
            "build_warp_function",
@@ -42,29 +49,38 @@ def fill_landmark_matrix(
         raise ValueError(f"Unknown align_type '{align_type}'")
 
     # ----- convert ragged → dense ------------------------------------------------
-    # Every distribution has at most *one* negative peak and valley in our UI
-    pk_mat = np.full((len(peaks), 3), np.nan)
-    vl_mat = np.full((len(valleys), 3), np.nan)
+    n = len(peaks)
+    pk_lengths = [len(pk) for pk in peaks]
+    vl_lengths = [len(vl) for vl in valleys]
+
+    max_pk = max(pk_lengths, default=0)
+    max_vl = max(vl_lengths, default=0)
+
+    has_val_orig = max_vl > 0
+    has_pos_orig = any(length > 1 for length in pk_lengths)
+
+    pk_mat = np.full((n, max_pk if max_pk > 0 else 1), np.nan)
+    vl_mat = np.full((n, max_vl if max_vl > 0 else 1), np.nan)
 
     for i, pk in enumerate(peaks):
         if pk:
-            pk_mat[i, : len(pk)] = pk[:3]
+            pk_mat[i, : len(pk)] = pk
     for i, vl in enumerate(valleys):
         if vl:
-            vl_mat[i, : len(vl)] = vl[:3]
+            vl_mat[i, : len(vl)] = vl
 
     # Negative‑peak  = first peak in the list
     # Valley         = first valley in the list
     # Positive‑peak  = **last** peak in the list (≠ third column!)
 
-    neg = pk_mat[:, 0]
-    val = vl_mat[:, 0]
+    neg = pk_mat[:, 0] if max_pk > 0 else np.full(n, np.nan)
+    val = vl_mat[:, 0] if max_vl > 0 else np.full(n, np.nan)
 
     # the “last” peak has to be extracted explicitly or it disappears
-    pos = np.full(len(peaks), np.nan)
+    pos = np.full(n, np.nan)
     for i, pk in enumerate(peaks):
-        if pk:                           # non‑empty list
-            pos[i] = pk[-1]              # last element, no matter how many
+        if pk and len(pk) > 1:           # needs a distinct positive peak
+            pos[i] = pk[-1]              # last element, true positive peak
     neg_thr = neg_thr if neg_thr is not None else np.arcsinh(10 / 5 + 1)
 
     if align_type == "valley":
@@ -76,33 +92,49 @@ def fill_landmark_matrix(
     # If the caller asked for the 3-landmark mode we still have to deliver
     # three columns, therefore we **impute** the missing positive peak by
     #   pos = valley + median(pos-valley)   (R logic)
-    if pk_mat.shape[1] == 1:
+    if max_pk <= 1:
         out = np.vstack([neg, val]).T          # (N, 2)  so far
 
         # fill NAs (neg & val) exactly as in the R code ------------------
         nan_neg = np.isnan(out[:, 0])
-        out[nan_neg, 0] = np.nanmedian(out[~nan_neg, 0])
+        if np.any(~nan_neg):
+            out[nan_neg, 0] = np.nanmedian(out[~nan_neg, 0])
+
         nan_val = np.isnan(out[:, 1])
-        alt     = np.nanmedian(out[~nan_val, 1])
-        out[nan_val, 1] = np.where(
+        alt = np.nanmedian(out[~nan_val, 1]) if np.any(~nan_val) else np.nan
+        fill_val = np.where(
             neg_thr > out[nan_val, 0], neg_thr, alt
         )
+        if np.isnan(alt):
+            fill_val[:] = neg_thr
+        out[nan_val, 1] = fill_val
 
         # --- return early for 1- or 2-anchor regimes --------------------
         if align_type == "negPeak":
             return out[:, :1]
-        if align_type == "negPeak_valley":
+        if align_type == "negPeak_valley" or (has_val_orig and not has_pos_orig):
             return out
 
         # ---- need a surrogate positive peak ----------------------------
-        diff_med = np.nanmedian(out[:, 1] * 0 + 1)  # avoid NaN when all miss
-        # any real sample with ≥2 peaks will **overwrite** the surrogate
-        pos      = out[:, 1] + diff_med
-        out      = np.column_stack([out, pos])
+        diff_candidates = pos - val
+        valid_diff = ~np.isnan(diff_candidates)
+        if np.any(valid_diff):
+            diff_med = np.nanmedian(diff_candidates[valid_diff])
+        else:
+            diff_med = np.nanmedian(out[:, 1])
+        if np.isnan(diff_med) or diff_med <= 0:
+            diff_med = max(neg_thr, 1.0)
+
+        pos_imputed = np.where(
+            np.isnan(pos),
+            out[:, 1] + diff_med,
+            pos,
+        )
+        out = np.column_stack([out, pos_imputed])
         return out
 
     # ── have ≥2 peaks ──────────────────────────────────────────────────────
-    if midpoint_type == "midpoint" and pk_mat.shape[1] > 2:
+    if midpoint_type == "midpoint" and max_pk > 2 and max_vl > 0:
         use_val = np.nanmean(vl_mat, axis=1)
     else:
         use_val = val
@@ -119,7 +151,12 @@ def fill_landmark_matrix(
 
     # pos-peak NAs
     nan_pos = np.isnan(out[:, 2])
-    diff_med = np.nanmedian(out[~nan_pos, 2] - out[~nan_pos, 1])
+    if np.any(~nan_pos):
+        diff_med = np.nanmedian(out[~nan_pos, 2] - out[~nan_pos, 1])
+    else:
+        diff_med = np.nanmedian(out[:, 1])
+    if np.isnan(diff_med) or diff_med <= 0:
+        diff_med = max(neg_thr, 1.0)
     out[nan_pos, 2] = out[nan_pos, 1] + diff_med
 
     if align_type == "negPeak":
@@ -187,6 +224,15 @@ def build_warp_function(
 
 
 # ------------------------------------------------------------------  
+AlignmentReturn = Tuple[List[np.ndarray], np.ndarray, List]
+AlignmentReturnWithDensity = Tuple[
+    List[np.ndarray],
+    np.ndarray,
+    List,
+    List[Optional[Tuple[np.ndarray, np.ndarray]]],
+]
+
+
 def align_distributions(
     counts         : List[np.ndarray],
     peaks          : List[Sequence[float]],
@@ -194,10 +240,12 @@ def align_distributions(
     align_type     : str = "negPeak_valley_posPeak",
     landmark_matrix: Optional[np.ndarray] = None,
     target_landmark: Optional[Sequence[float]] = None,
-) -> Tuple[List[np.ndarray], np.ndarray, List]:
+    density_grids  : Optional[Sequence[Optional[DensityGrid]]] = None,
+) -> Union[AlignmentReturn, AlignmentReturnWithDensity]:
     """
     • *counts* – list of raw (arcsinh-transformed) count vectors  
     • returns (normalised_counts, warped_landmarks_matrix)
+    • optionally returns aligned density grids when *density_grids* provided
     """
     # ---------- fill / merge landmark matrix -----------------------------
     # 1. build / accept the landmark matrix  -----------------------------
@@ -210,6 +258,25 @@ def align_distributions(
         if lm.shape[0] != len(counts):
             raise ValueError("landmark_matrix rows ≠ #samples")
 
+    n_samples = lm.shape[0]
+
+    if density_grids is None:
+        density_list = None
+    else:
+        if len(density_grids) != n_samples:
+            raise ValueError("density_grids length does not match #samples")
+        density_list: List[Optional[Tuple[np.ndarray, np.ndarray]]] = []
+        for grid in density_grids:
+            if grid is None:
+                density_list.append(None)
+                continue
+            xs, ys = grid
+            xs_arr = np.asarray(xs, float)
+            ys_arr = np.asarray(ys, float)
+            if xs_arr.shape != ys_arr.shape:
+                raise ValueError("density grid x/y arrays must share shape")
+            density_list.append((xs_arr, ys_arr))
+
     # ---------- fill any remaining NA  (R’s rules: cohort median) --------
     nan_by_col = np.isnan(lm)
     if nan_by_col.any():
@@ -217,30 +284,55 @@ def align_distributions(
         lm[nan_by_col] = np.take(col_median, np.where(nan_by_col)[1])
 
     # ---------- choose the common target positions -----------------------
-    tgt = (np.mean(lm, axis=0)
+    tgt = (np.nanmean(lm, axis=0)
            if target_landmark is None else np.asarray(target_landmark, float))
+    if tgt.shape[0] != lm.shape[1]:
+        raise ValueError(
+            "target_landmark length does not match landmark columns"
+        )
 
     # ---------- build & apply warps --------------------------------------
     warped_counts   : List[np.ndarray] = []
     warped_landmark = np.empty_like(lm)
     warp_funs       : List[callable]   = []      # <<< keep 1-to-1 length
-    for i, (c, l_src) in enumerate(zip(counts, lm)):
+    warped_density: Optional[List[Optional[Tuple[np.ndarray, np.ndarray]]]]
+    if density_grids is None:
+        warped_density = None
+    else:
+        warped_density = [None] * n_samples
+
+    for i in range(n_samples):
+        c = np.asarray(counts[i], float)
+        l_src = lm[i]
         valid = ~np.isnan(l_src)
-        if not valid.any():                 # nothing to align…
+
+        if valid.any():
+            f = build_warp_function(l_src[valid], tgt[valid])
+
+            new_c = f(c)
+            # keep NaNs intact (e.g. missing cells in whole-dataset mode)
+            new_c[np.isnan(c)] = np.nan
+
+            warped_counts.append(new_c)
+            wl = np.full_like(l_src, np.nan)
+            wl[valid] = f(l_src[valid])
+        else:
+            f = _identity_warp
             warped_counts.append(c.copy())
-            warped_landmark[i] = l_src
-            continue
+            wl = l_src.copy()
 
-        f = build_warp_function(l_src[valid], tgt[valid])
-
-        new_c = f(c)
-        # keep NaNs intact (e.g. missing cells in whole-dataset mode)
-        new_c[np.isnan(c)] = np.nan
-
-        warped_counts.append(new_c)
-        wl = np.full_like(l_src, np.nan)
-        wl[valid] = f(l_src[valid])
         warped_landmark[i] = wl
-        warp_funs.append(f)             # <<< inside the loop!
+        warp_funs.append(f)
 
-    return warped_counts, warped_landmark, warp_funs
+        if warped_density is not None:
+            dens = density_list[i]
+            if dens is None:
+                warped_density[i] = None
+            else:
+                xs, ys = dens
+                warped_density[i] = (f(xs), ys.copy())
+
+    if warped_density is None:
+        return warped_counts, warped_landmark, warp_funs
+
+    return warped_counts, warped_landmark, warp_funs, warped_density

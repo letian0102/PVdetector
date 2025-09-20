@@ -1,246 +1,325 @@
 # peak_valley/alignment.py
 # --------------------------------------------------------------
 """
-Light-weight landmark alignment for 1-D ADT distributions.
+Landmark alignment for 1-D ADT distributions.
 
-The implementation is an intentionally simple, **piece-wise linear,
-monotone warping** that mimics the behaviour of the original R/fda
-`landmarkreg()` call but without external heavy dependencies.
+This module ports the alignment logic from the original ADTnorm R
+implementation:
 
-•  If three landmarks are available
-      (negPeak, valley, posPeak)  → 3-segment warp  
-•  If two landmarks are available (negPeak, valley) → 2-segment warp  
-•  If only one landmark            (negPeak)        → pure shift
+•  build a common evaluation grid spanning the observed counts with a
+   small safety margin
+•  smooth each sample's density on that grid via a cubic B-spline fit
+•  derive monotone warping curves that map the sample-specific landmarks
+   to the cohort-wide targets (or user supplied positions)
+•  evaluate the forward / inverse maps on that grid and apply them to the
+   raw counts as well as the landmark coordinates
 
-The target landmark set defaults to the **column means** across samples
-(just like the R code) but may be overridden.
+When every sample exposes a single landmark the procedure degenerates to
+pure translations so the distribution shapes remain untouched while the
+landmarks align to the cohort median.
 """
 from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
+
 import numpy as np
-from typing import Sequence, Tuple, List, Optional, Iterable
+from scipy.interpolate import PchipInterpolator, make_interp_spline
+from scipy.stats import gaussian_kde
 
-__all__ = ["fill_landmark_matrix",
-           "build_warp_function",
-           "align_distributions"]
+__all__ = [
+    "fill_landmark_matrix",
+    "build_warp_function",
+    "align_distributions",
+]
 
 
-# ------------------------------------------------------------------  
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+def _nanmedian(values: np.ndarray, default: float) -> float:
+    """Return the nanmedian or a fallback if all entries are NaN."""
+    med = np.nanmedian(values)
+    if np.isnan(med):
+        return default
+    return float(med)
+
+
+def _ensure_strictly_increasing(arr: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """Force an array to be strictly increasing by nudging ties forward."""
+    out = np.array(arr, dtype=float, copy=True)
+    for idx in range(1, out.size):
+        if out[idx] <= out[idx - 1]:
+            out[idx] = out[idx - 1] + eps
+    return out
+
+
+def _build_common_grid(counts: Sequence[np.ndarray], margin: float = 0.05,
+                       n_points: int = 512) -> np.ndarray:
+    """Construct a grid that spans all observed counts with a safety margin."""
+    cleaned = []
+    for arr in counts:
+        a = np.asarray(arr, dtype=float)
+        if a.size:
+            cleaned.append(a[~np.isnan(a)])
+    if cleaned:
+        flat = np.concatenate(cleaned)
+    else:
+        flat = np.array([], dtype=float)
+
+    if flat.size == 0:
+        return np.linspace(-1.0, 1.0, n_points)
+
+    lo = float(np.min(flat))
+    hi = float(np.max(flat))
+    if lo == hi:
+        span = max(abs(lo), 1.0)
+        lo -= margin * span
+        hi += margin * span
+    else:
+        pad = margin * (hi - lo)
+        lo -= pad
+        hi += pad
+    return np.linspace(lo, hi, n_points)
+
+
+def _smooth_density(values: np.ndarray, grid: np.ndarray) -> np.ndarray:
+    """Evaluate a smoothed density estimate on *grid* using B-splines."""
+    finite = values[~np.isnan(values)]
+    if finite.size < 2:
+        return np.zeros_like(grid)
+
+    try:
+        kde = gaussian_kde(finite)
+        dens = kde(grid)
+    except (np.linalg.LinAlgError, ValueError):
+        mean = float(np.mean(finite))
+        sd = float(np.std(finite))
+        if not np.isfinite(sd) or sd == 0:
+            sd = max(abs(mean), 1.0)
+        z = (grid - mean) / sd
+        dens = np.exp(-0.5 * z * z) / (sd * math.sqrt(2.0 * math.pi))
+
+    spline = make_interp_spline(grid, dens, k=3)
+    smoothed = spline(grid)
+    smoothed[smoothed < 0] = 0.0
+    return smoothed
+
+
+def _build_monotone_warp(src: np.ndarray, dst: np.ndarray,
+                         grid: np.ndarray) -> "WarpMap":
+    """Create a monotone warp that matches *src* landmarks to *dst*."""
+    src_sorted = np.sort(src)
+    dst_sorted = dst[np.argsort(src)]
+
+    src_unique, idx = np.unique(src_sorted, return_index=True)
+    dst_unique = dst_sorted[idx]
+
+    src_ext = np.concatenate(([grid[0]], _ensure_strictly_increasing(src_unique),
+                              [grid[-1]]))
+    dst_ext = np.concatenate(([grid[0]], _ensure_strictly_increasing(dst_unique),
+                              [grid[-1]]))
+
+    forward = PchipInterpolator(src_ext, dst_ext, extrapolate=True)
+    inverse = PchipInterpolator(dst_ext, src_ext, extrapolate=True)
+    return WarpMap(forward=forward, inverse=inverse, grid=grid)
+
+
+# ---------------------------------------------------------------------------
+# public API
+# ---------------------------------------------------------------------------
+
 def fill_landmark_matrix(
-    peaks   : List[Sequence[float]],
-    valleys : List[Sequence[float]],
-    align_type     : str = "negPeak_valley_posPeak",
-    midpoint_type  : str = "valley",
-    neg_thr        : float | None = None,
+    peaks: List[Sequence[float]],
+    valleys: List[Sequence[float]],
+    align_type: str = "negPeak_valley_posPeak",
+    midpoint_type: str = "valley",
+    neg_thr: float | None = None,
 ) -> np.ndarray:
-    """
-    Re-implement (in Python) the `landmark_fill_na()` logic from R.
-    Only the modes that matter for our UI are ported.
-    """
+    """Python port of the ADTnorm `landmark_fill_na()` routine."""
     if align_type not in {
-        "negPeak", "negPeak_valley", "negPeak_valley_posPeak", "valley"
+        "negPeak",
+        "negPeak_valley",
+        "negPeak_valley_posPeak",
+        "valley",
     }:
         raise ValueError(f"Unknown align_type '{align_type}'")
 
-    # ----- convert ragged → dense ------------------------------------------------
-    # Every distribution has at most *one* negative peak and valley in our UI
-    pk_mat = np.full((len(peaks), 3), np.nan)
-    vl_mat = np.full((len(valleys), 3), np.nan)
+    n = len(peaks)
+    neg = np.full(n, np.nan)
+    val = np.full(n, np.nan)
+    pos = np.full(n, np.nan)
 
     for i, pk in enumerate(peaks):
         if pk:
-            pk_mat[i, : len(pk)] = pk[:3]
+            neg[i] = pk[0]
+            pos[i] = pk[-1]
+
     for i, vl in enumerate(valleys):
         if vl:
-            vl_mat[i, : len(vl)] = vl[:3]
+            val[i] = vl[0]
 
-    # Negative‑peak  = first peak in the list
-    # Valley         = first valley in the list
-    # Positive‑peak  = **last** peak in the list (≠ third column!)
-
-    neg = pk_mat[:, 0]
-    val = vl_mat[:, 0]
-
-    # the “last” peak has to be extracted explicitly or it disappears
-    pos = np.full(len(peaks), np.nan)
-    for i, pk in enumerate(peaks):
-        if pk:                           # non‑empty list
-            pos[i] = pk[-1]              # last element, no matter how many
     neg_thr = neg_thr if neg_thr is not None else np.arcsinh(10 / 5 + 1)
 
+    # valley-only mode
     if align_type == "valley":
         out = val[:, None]
-        out[np.isnan(out[:, 0]), 0] = neg_thr
+        nan_val = np.isnan(out[:, 0])
+        out[nan_val, 0] = neg_thr
         return out
 
-    # ---- only ONE peak detected ----------------------------------------
-    # If the caller asked for the 3-landmark mode we still have to deliver
-    # three columns, therefore we **impute** the missing positive peak by
-    #   pos = valley + median(pos-valley)   (R logic)
-    if pk_mat.shape[1] == 1:
-        out = np.vstack([neg, val]).T          # (N, 2)  so far
+    has_val_orig = np.isfinite(val).any()
+    has_pos_orig = np.isfinite(pos).any()
 
-        # fill NAs (neg & val) exactly as in the R code ------------------
+    # If the cohort truly has a single landmark fall back to that mode.
+    if not has_val_orig and not has_pos_orig:
+        out = neg[:, None]
         nan_neg = np.isnan(out[:, 0])
-        out[nan_neg, 0] = np.nanmedian(out[~nan_neg, 0])
-        nan_val = np.isnan(out[:, 1])
-        alt     = np.nanmedian(out[~nan_val, 1])
-        out[nan_val, 1] = np.where(
-            neg_thr > out[nan_val, 0], neg_thr, alt
-        )
-
-        # --- return early for 1- or 2-anchor regimes --------------------
-        if align_type == "negPeak":
-            return out[:, :1]
-        if align_type == "negPeak_valley":
-            return out
-
-        # ---- need a surrogate positive peak ----------------------------
-        diff_med = np.nanmedian(out[:, 1] * 0 + 1)  # avoid NaN when all miss
-        # any real sample with ≥2 peaks will **overwrite** the surrogate
-        pos      = out[:, 1] + diff_med
-        out      = np.column_stack([out, pos])
+        default = neg_thr
+        if np.any(~nan_neg):
+            default = _nanmedian(out[~nan_neg, 0], neg_thr)
+        out[nan_neg, 0] = default
         return out
 
-    # ── have ≥2 peaks ──────────────────────────────────────────────────────
-    if midpoint_type == "midpoint" and pk_mat.shape[1] > 2:
-        use_val = np.nanmean(vl_mat, axis=1)
-    else:
-        use_val = val
+    # Build the full landmark table and then apply the R-style imputations.
+    out = np.vstack([neg, val, pos]).T
 
-    out = np.vstack([neg, use_val, pos]).T
-
-    # valley NAs
+    # valley NAs → negative threshold
     nan_val = np.isnan(out[:, 1])
     out[nan_val, 1] = neg_thr
 
-    # neg-peak NAs
+    # negative peak NAs → half of the (filled) valley
     nan_neg = np.isnan(out[:, 0])
     out[nan_neg, 0] = out[nan_neg, 1] / 2.0
 
-    # pos-peak NAs
+    # positive peak NAs → valley + cohort median offset
     nan_pos = np.isnan(out[:, 2])
-    diff_med = np.nanmedian(out[~nan_pos, 2] - out[~nan_pos, 1])
+    diff = out[:, 2] - out[:, 1]
+    diff_med = _nanmedian(diff, 0.0)
     out[nan_pos, 2] = out[nan_pos, 1] + diff_med
 
+    # honour the requested alignment regime
     if align_type == "negPeak":
         return out[:, :1]
-    if align_type == "negPeak_valley":
+    if align_type == "negPeak_valley" or (has_val_orig and not has_pos_orig):
         return out[:, :2]
     return out
 
 
-# ------------------------------------------------------------------  
+@dataclass
+class WarpMap:
+    """Container for the forward/inverse warp and auxiliary metadata."""
+
+    forward: Callable[[Iterable[float]], np.ndarray]
+    inverse: Callable[[Iterable[float]], np.ndarray]
+    grid: Optional[np.ndarray] = None
+    density: Optional[np.ndarray] = None
+
+    def __call__(self, x: Iterable[float]) -> np.ndarray:
+        return self.forward(np.asarray(x, dtype=float))
+
+
 def build_warp_function(
-    landmarks_src : Sequence[float],
-    landmarks_tgt : Sequence[float],
-):
+    landmarks_src: Sequence[float],
+    landmarks_tgt: Sequence[float],
+) -> Callable[[Iterable[float]], np.ndarray]:
     """
-    Return a **monotone piece-wise linear** function f such that
-        f(landmarks_src[i]) == landmarks_tgt[i]     for all i
-    and the slopes of the segments outside the landmark range equal the
-    first / last internal slope, respectively.
+    Compatibility wrapper that exposes the forward monotone warp used by the
+    alignment routine.  The returned callable maps the source landmarks to the
+    targets and extrapolates with the boundary slopes, mimicking the behaviour
+    of `fda::landmarkreg` from the original R code.
     """
-    ls = np.asarray(landmarks_src, float)
-    lt = np.asarray(landmarks_tgt, float)
+    ls = np.asarray(landmarks_src, dtype=float)
+    lt = np.asarray(landmarks_tgt, dtype=float)
     if ls.size == 0 or np.any(np.isnan(ls)) or np.any(np.isnan(lt)):
         raise ValueError("Landmarks must be defined & numeric")
 
-    # sort by source x
-    order = np.argsort(ls)
-    ls, lt = ls[order], lt[order]
-
-    # —— single-landmark → constant shift ————————————————
     if ls.size == 1:
-        delta = float(lt[0] - ls[0])    
-        def f(x):
-            return np.asarray(x, float) + delta
-    
-        return f
-    
-    # slopes for each interval  (≥ 2 landmarks from here on)
-    slopes = np.diff(lt) / np.diff(ls)
+        delta = float(lt[0] - ls[0])
 
-    def f(x):
-        x = np.asarray(x, float)
-        y = np.empty_like(x)
+        def forward(x, d=delta):
+            return np.asarray(x, dtype=float) + d
 
-        # three regions: left of ls[0], internal, right of ls[-1]
-        left_mask  = x <= ls[0]
-        right_mask = x >= ls[-1]
-        mid_mask   = ~(left_mask | right_mask)
+        return forward
 
-        # ---- left - constant slope == slopes[0] --------------------------
-        y[left_mask] = lt[0] + slopes[0] * (x[left_mask] - ls[0])
-
-        # ---- right -------------------------------------------------------
-        y[right_mask] = lt[-1] + slopes[-1] * (x[right_mask] - ls[-1])
-
-        # ---- interior: vectorised piece-wise linear ---------------------
-        if mid_mask.any():
-            idx = np.searchsorted(ls, x[mid_mask], side="right") - 1
-            d   = x[mid_mask] - ls[idx]
-            y[mid_mask] = lt[idx] + slopes[idx] * d
-
-        return y
-
-    return f
+    grid = _build_common_grid([ls, lt], margin=0.0, n_points=max(ls.size + 2, 8))
+    warp = _build_monotone_warp(ls, lt, grid)
+    return warp.forward
 
 
-# ------------------------------------------------------------------  
+# ---------------------------------------------------------------------------
+# main entry point
+# ---------------------------------------------------------------------------
+
 def align_distributions(
-    counts         : List[np.ndarray],
-    peaks          : List[Sequence[float]],
-    valleys        : List[Sequence[float]],
-    align_type     : str = "negPeak_valley_posPeak",
+    counts: List[np.ndarray],
+    peaks: List[Sequence[float]],
+    valleys: List[Sequence[float]],
+    align_type: str = "negPeak_valley_posPeak",
     landmark_matrix: Optional[np.ndarray] = None,
     target_landmark: Optional[Sequence[float]] = None,
-) -> Tuple[List[np.ndarray], np.ndarray, List]:
-    """
-    • *counts* – list of raw (arcsinh-transformed) count vectors  
-    • returns (normalised_counts, warped_landmarks_matrix)
-    """
-    # ---------- fill / merge landmark matrix -----------------------------
-    # 1. build / accept the landmark matrix  -----------------------------
+) -> Tuple[List[np.ndarray], np.ndarray, List[WarpMap]]:
+    """Align raw count vectors by warping their landmarks to a common target."""
     if landmark_matrix is None:
-        lm = fill_landmark_matrix(
-            peaks, valleys, align_type=align_type
-        )
+        lm = fill_landmark_matrix(peaks, valleys, align_type=align_type)
     else:
-        lm = np.asarray(landmark_matrix, float)
+        lm = np.asarray(landmark_matrix, dtype=float)
         if lm.shape[0] != len(counts):
             raise ValueError("landmark_matrix rows ≠ #samples")
 
-    # ---------- fill any remaining NA  (R’s rules: cohort median) --------
-    nan_by_col = np.isnan(lm)
-    if nan_by_col.any():
+    nan_mask = np.isnan(lm)
+    if np.any(nan_mask):
         col_median = np.nanmedian(lm, axis=0)
-        lm[nan_by_col] = np.take(col_median, np.where(nan_by_col)[1])
+        lm[nan_mask] = np.take(col_median, np.where(nan_mask)[1])
 
-    # ---------- choose the common target positions -----------------------
-    tgt = (np.mean(lm, axis=0)
-           if target_landmark is None else np.asarray(target_landmark, float))
+    tgt = (
+        np.mean(lm, axis=0)
+        if target_landmark is None
+        else np.asarray(target_landmark, dtype=float)
+    )
 
-    # ---------- build & apply warps --------------------------------------
-    warped_counts   : List[np.ndarray] = []
+    grid = _build_common_grid(counts)
+    densities = [_smooth_density(np.asarray(c, dtype=float), grid) for c in counts]
+
+    warped_counts: List[np.ndarray] = []
     warped_landmark = np.empty_like(lm)
-    warp_funs       : List[callable]   = []      # <<< keep 1-to-1 length
+    warp_funs: List[WarpMap] = []
+
     for i, (c, l_src) in enumerate(zip(counts, lm)):
+        c_arr = np.asarray(c, dtype=float)
+        density = densities[i]
         valid = ~np.isnan(l_src)
-        if not valid.any():                 # nothing to align…
-            warped_counts.append(c.copy())
+        if not np.any(valid):
+            warped_counts.append(c_arr.copy())
             warped_landmark[i] = l_src
             continue
 
-        f = build_warp_function(l_src[valid], tgt[valid])
+        src = np.asarray(l_src[valid], dtype=float)
+        dst = np.asarray(tgt[valid], dtype=float)
 
-        new_c = f(c)
-        # keep NaNs intact (e.g. missing cells in whole-dataset mode)
-        new_c[np.isnan(c)] = np.nan
+        if src.size == 1:
+            delta = float(dst[0] - src[0])
 
+            def forward(x, d=delta):
+                return np.asarray(x, dtype=float) + d
+
+            def inverse(x, d=delta):
+                return np.asarray(x, dtype=float) - d
+
+            warp = WarpMap(forward=forward, inverse=inverse, grid=grid, density=density)
+        else:
+            warp = _build_monotone_warp(src, dst, grid)
+            warp.density = density
+
+        new_c = warp.forward(c_arr)
+        new_c[np.isnan(c_arr)] = np.nan
         warped_counts.append(new_c)
+
         wl = np.full_like(l_src, np.nan)
-        wl[valid] = f(l_src[valid])
+        wl[valid] = warp.forward(src)
         warped_landmark[i] = wl
-        warp_funs.append(f)             # <<< inside the loop!
+        warp_funs.append(warp)
 
     return warped_counts, warped_landmark, warp_funs

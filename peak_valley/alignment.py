@@ -85,6 +85,55 @@ def _build_common_grid(counts: Sequence[np.ndarray], margin: float = 0.05,
     return np.linspace(lo, hi, n_points)
 
 
+def _prepare_alignment_grid(
+    counts: Sequence[np.ndarray],
+    landmark_matrix: np.ndarray,
+    targets: np.ndarray,
+    extend: float = 0.15,
+    n_points: int = 1001,
+) -> Tuple[np.ndarray, float, float]:
+    """Replicate the range expansion used by ADTnorm's ``peak_alignment``."""
+
+    cleaned: List[np.ndarray] = []
+    for arr in counts:
+        a = np.asarray(arr, dtype=float)
+        if a.size:
+            cleaned.append(a[~np.isnan(a)])
+
+    if cleaned:
+        flat = np.concatenate(cleaned)
+        data_min = float(np.min(flat))
+        data_max = float(np.max(flat))
+    else:
+        data_min, data_max = -1.0, 1.0
+
+    span = data_max - data_min
+    if span == 0:
+        span = max(abs(data_min), 1.0)
+
+    pad = extend * span
+
+    finite_landmarks = landmark_matrix[np.isfinite(landmark_matrix)]
+    finite_targets = targets[np.isfinite(targets)]
+
+    min_candidates: List[float] = [data_min]
+    max_candidates: List[float] = [data_max]
+
+    if finite_landmarks.size:
+        min_candidates.append(float(np.min(finite_landmarks)))
+        max_candidates.append(float(np.max(finite_landmarks)))
+
+    if finite_targets.size:
+        min_candidates.append(float(np.min(finite_targets)))
+        max_candidates.append(float(np.max(finite_targets)))
+
+    lo = min(min_candidates) - pad
+    hi = max(max_candidates) + pad
+
+    grid = np.linspace(lo, hi, n_points)
+    return grid, data_min, data_max
+
+
 def _smooth_density(values: np.ndarray, grid: np.ndarray) -> np.ndarray:
     """Evaluate a smoothed density estimate on *grid* using B-splines."""
     finite = values[~np.isnan(values)]
@@ -111,8 +160,9 @@ def _smooth_density(values: np.ndarray, grid: np.ndarray) -> np.ndarray:
 def _build_monotone_warp(src: np.ndarray, dst: np.ndarray,
                          grid: np.ndarray) -> "WarpMap":
     """Create a monotone warp that matches *src* landmarks to *dst*."""
-    src_sorted = np.sort(src)
-    dst_sorted = dst[np.argsort(src)]
+    order = np.argsort(src)
+    src_sorted = np.asarray(src, dtype=float)[order]
+    dst_sorted = np.asarray(dst, dtype=float)[order]
 
     src_unique, idx = np.unique(src_sorted, return_index=True)
     dst_unique = dst_sorted[idx]
@@ -121,9 +171,14 @@ def _build_monotone_warp(src: np.ndarray, dst: np.ndarray,
                               [grid[-1]]))
     dst_ext = np.concatenate(([grid[0]], _ensure_strictly_increasing(dst_unique),
                               [grid[-1]]))
+    src_ext = _ensure_strictly_increasing(src_ext)
+    dst_ext = _ensure_strictly_increasing(dst_ext)
 
-    forward = PchipInterpolator(src_ext, dst_ext, extrapolate=True)
-    inverse = PchipInterpolator(dst_ext, src_ext, extrapolate=True)
+    warp_vals = np.interp(grid, src_ext, dst_ext)
+    warp_vals = _ensure_strictly_increasing(warp_vals)
+
+    forward = PchipInterpolator(grid, warp_vals, extrapolate=True)
+    inverse = PchipInterpolator(warp_vals, grid, extrapolate=True)
     return WarpMap(forward=forward, inverse=inverse, grid=grid)
 
 
@@ -272,20 +327,45 @@ def align_distributions(
     nan_mask = np.isnan(lm)
     if np.any(nan_mask):
         col_median = np.nanmedian(lm, axis=0)
+        col_median = np.where(np.isnan(col_median), 0.0, col_median)
         lm[nan_mask] = np.take(col_median, np.where(nan_mask)[1])
 
-    tgt = (
-        np.mean(lm, axis=0)
-        if target_landmark is None
-        else np.asarray(target_landmark, dtype=float)
-    )
+    if target_landmark is None:
+        tgt = np.nanmean(lm, axis=0)
+        nan_tgt = np.isnan(tgt)
+        if np.any(nan_tgt):
+            medians = np.nanmedian(lm, axis=0)
+            tgt[nan_tgt] = medians[nan_tgt]
+    else:
+        tgt = np.asarray(target_landmark, dtype=float)
+        if tgt.size != lm.shape[1]:
+            raise ValueError("target_landmark length ≠ #landmarks")
 
-    grid = _build_common_grid(counts)
+    tgt = np.atleast_1d(np.asarray(tgt, dtype=float))
+
+    grid, lower_bound, upper_bound = _prepare_alignment_grid(counts, lm, tgt)
     densities = [_smooth_density(np.asarray(c, dtype=float), grid) for c in counts]
+
+    if lm.shape[1] >= 2:
+        valley = lm[:, 1]
+        too_high = valley > upper_bound
+        if np.any(too_high):
+            lm[too_high, 1] = upper_bound
+
+    if lm.shape[1] >= 1:
+        neg = lm[:, 0]
+        too_low = neg < lower_bound
+        if np.any(too_low):
+            lm[too_low, 0] = lower_bound
 
     warped_counts: List[np.ndarray] = []
     warped_landmark = np.empty_like(lm)
     warp_funs: List[WarpMap] = []
+
+    if lm.shape[1] == 1:
+        offsets = lm[:, 0] - np.nanmedian(lm[:, 0])
+    else:
+        offsets = np.zeros(lm.shape[0])
 
     for i, (c, l_src) in enumerate(zip(counts, lm)):
         c_arr = np.asarray(c, dtype=float)
@@ -310,13 +390,13 @@ def align_distributions(
         dst = np.asarray(tgt[valid], dtype=float)
 
         if src.size == 1:
-            delta = float(dst[0] - src[0])
+            delta = float(offsets[i])
 
             def forward(x, d=delta):
-                return np.asarray(x, dtype=float) + d
+                return np.asarray(x, dtype=float) - d
 
             def inverse(x, d=delta):
-                return np.asarray(x, dtype=float) - d
+                return np.asarray(x, dtype=float) + d
 
             warp = WarpMap(forward=forward, inverse=inverse, grid=grid, density=density)
         else:
@@ -324,7 +404,9 @@ def align_distributions(
             warp.density = density
 
         new_c = warp.forward(c_arr)
-        new_c[np.isnan(c_arr)] = np.nan
+        missing = np.isnan(new_c)
+        if np.any(missing):
+            new_c[missing] = c_arr[missing]
         warped_counts.append(new_c)
 
         wl = np.full_like(l_src, np.nan)

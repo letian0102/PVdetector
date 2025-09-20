@@ -292,8 +292,18 @@ def align_distributions(
         density = densities[i]
         valid = ~np.isnan(l_src)
         if not np.any(valid):
+            def identity(x):
+                return np.asarray(x, dtype=float)
+
+            warp = WarpMap(
+                forward=identity,
+                inverse=identity,
+                grid=grid,
+                density=density,
+            )
             warped_counts.append(c_arr.copy())
             warped_landmark[i] = l_src
+            warp_funs.append(warp)
             continue
 
         src = np.asarray(l_src[valid], dtype=float)

@@ -17,7 +17,14 @@ The target landmark set defaults to the **column means** across samples
 """
 from __future__ import annotations
 import numpy as np
-from typing import Sequence, Tuple, List, Optional, Iterable
+from typing import Sequence, Tuple, List, Optional, Union
+
+DensityGrid = Tuple[Sequence[float], Sequence[float]]
+
+
+def _identity_warp(x):
+    """Return a numpy array copy of *x* (used when no warping is needed)."""
+    return np.asarray(x, float)
 
 __all__ = ["fill_landmark_matrix",
            "build_warp_function",
@@ -212,6 +219,15 @@ def build_warp_function(
 
 
 # ------------------------------------------------------------------  
+AlignmentReturn = Tuple[List[np.ndarray], np.ndarray, List]
+AlignmentReturnWithDensity = Tuple[
+    List[np.ndarray],
+    np.ndarray,
+    List,
+    List[Optional[Tuple[np.ndarray, np.ndarray]]],
+]
+
+
 def align_distributions(
     counts         : List[np.ndarray],
     peaks          : List[Sequence[float]],
@@ -219,10 +235,12 @@ def align_distributions(
     align_type     : str = "negPeak_valley_posPeak",
     landmark_matrix: Optional[np.ndarray] = None,
     target_landmark: Optional[Sequence[float]] = None,
-) -> Tuple[List[np.ndarray], np.ndarray, List]:
+    density_grids  : Optional[Sequence[Optional[DensityGrid]]] = None,
+) -> Union[AlignmentReturn, AlignmentReturnWithDensity]:
     """
     • *counts* – list of raw (arcsinh-transformed) count vectors  
     • returns (normalised_counts, warped_landmarks_matrix)
+    • optionally returns aligned density grids when *density_grids* provided
     """
     # ---------- fill / merge landmark matrix -----------------------------
     # 1. build / accept the landmark matrix  -----------------------------
@@ -234,6 +252,25 @@ def align_distributions(
         lm = np.asarray(landmark_matrix, float)
         if lm.shape[0] != len(counts):
             raise ValueError("landmark_matrix rows ≠ #samples")
+
+    n_samples = lm.shape[0]
+
+    if density_grids is None:
+        density_list = None
+    else:
+        if len(density_grids) != n_samples:
+            raise ValueError("density_grids length does not match #samples")
+        density_list: List[Optional[Tuple[np.ndarray, np.ndarray]]] = []
+        for grid in density_grids:
+            if grid is None:
+                density_list.append(None)
+                continue
+            xs, ys = grid
+            xs_arr = np.asarray(xs, float)
+            ys_arr = np.asarray(ys, float)
+            if xs_arr.shape != ys_arr.shape:
+                raise ValueError("density grid x/y arrays must share shape")
+            density_list.append((xs_arr, ys_arr))
 
     # ---------- fill any remaining NA  (R’s rules: cohort median) --------
     nan_by_col = np.isnan(lm)
@@ -253,28 +290,44 @@ def align_distributions(
     warped_counts   : List[np.ndarray] = []
     warped_landmark = np.empty_like(lm)
     warp_funs       : List[callable]   = []      # <<< keep 1-to-1 length
-    for i, (c, l_src) in enumerate(zip(counts, lm)):
+    warped_density: Optional[List[Optional[Tuple[np.ndarray, np.ndarray]]]]
+    if density_grids is None:
+        warped_density = None
+    else:
+        warped_density = [None] * n_samples
+
+    for i in range(n_samples):
+        c = np.asarray(counts[i], float)
+        l_src = lm[i]
         valid = ~np.isnan(l_src)
-        if not valid.any():                 # nothing to align…
+
+        if valid.any():
+            f = build_warp_function(l_src[valid], tgt[valid])
+
+            new_c = f(c)
+            # keep NaNs intact (e.g. missing cells in whole-dataset mode)
+            new_c[np.isnan(c)] = np.nan
+
+            warped_counts.append(new_c)
+            wl = np.full_like(l_src, np.nan)
+            wl[valid] = f(l_src[valid])
+        else:
+            f = _identity_warp
             warped_counts.append(c.copy())
-            warped_landmark[i] = l_src
+            wl = l_src.copy()
 
-            def _identity(x):
-                return np.asarray(x, float)
-
-            warp_funs.append(_identity)
-            continue
-
-        f = build_warp_function(l_src[valid], tgt[valid])
-
-        new_c = f(c)
-        # keep NaNs intact (e.g. missing cells in whole-dataset mode)
-        new_c[np.isnan(c)] = np.nan
-
-        warped_counts.append(new_c)
-        wl = np.full_like(l_src, np.nan)
-        wl[valid] = f(l_src[valid])
         warped_landmark[i] = wl
-        warp_funs.append(f)             # <<< inside the loop!
+        warp_funs.append(f)
 
-    return warped_counts, warped_landmark, warp_funs
+        if warped_density is not None:
+            dens = density_list[i]
+            if dens is None:
+                warped_density[i] = None
+            else:
+                xs, ys = dens
+                warped_density[i] = (f(xs), ys.copy())
+
+    if warped_density is None:
+        return warped_counts, warped_landmark, warp_funs
+
+    return warped_counts, warped_landmark, warp_funs, warped_density

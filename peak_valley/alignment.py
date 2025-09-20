@@ -192,8 +192,15 @@ def fill_landmark_matrix(
     align_type: str = "negPeak_valley_posPeak",
     midpoint_type: str = "valley",
     neg_thr: float | None = None,
-) -> np.ndarray:
-    """Python port of the ADTnorm `landmark_fill_na()` routine."""
+    return_observed: bool = False,
+) -> np.ndarray | Tuple[np.ndarray, np.ndarray]:
+    """Python port of the ADTnorm `landmark_fill_na()` routine.
+
+    When ``return_observed`` is True the function returns a tuple containing
+    the filled landmark matrix and a boolean mask flagging which entries were
+    observed in the raw peak/valley detections (``True``) versus imputed
+    during the fill-in process (``False``).
+    """
     if align_type not in {
         "negPeak",
         "negPeak_valley",
@@ -207,14 +214,21 @@ def fill_landmark_matrix(
     val = np.full(n, np.nan)
     pos = np.full(n, np.nan)
 
+    neg_obs = np.zeros(n, dtype=bool)
+    val_obs = np.zeros(n, dtype=bool)
+    pos_obs = np.zeros(n, dtype=bool)
+
     for i, pk in enumerate(peaks):
         if pk:
             neg[i] = pk[0]
+            neg_obs[i] = True
             pos[i] = pk[-1]
+            pos_obs[i] = len(pk) > 1
 
     for i, vl in enumerate(valleys):
         if vl:
             val[i] = vl[0]
+            val_obs[i] = True
 
     neg_thr = neg_thr if neg_thr is not None else np.arcsinh(10 / 5 + 1)
 
@@ -223,6 +237,9 @@ def fill_landmark_matrix(
         out = val[:, None]
         nan_val = np.isnan(out[:, 0])
         out[nan_val, 0] = neg_thr
+        if return_observed:
+            obs = val_obs[:, None]
+            return out, obs
         return out
 
     has_val_orig = np.isfinite(val).any()
@@ -236,10 +253,14 @@ def fill_landmark_matrix(
         if np.any(~nan_neg):
             default = _nanmedian(out[~nan_neg, 0], neg_thr)
         out[nan_neg, 0] = default
+        if return_observed:
+            obs = neg_obs[:, None]
+            return out, obs
         return out
 
     # Build the full landmark table and then apply the R-style imputations.
     out = np.vstack([neg, val, pos]).T
+    obs = np.vstack([neg_obs, val_obs, pos_obs]).T
 
     # valley NAs → negative threshold
     nan_val = np.isnan(out[:, 1])
@@ -257,9 +278,15 @@ def fill_landmark_matrix(
 
     # honour the requested alignment regime
     if align_type == "negPeak":
+        if return_observed:
+            return out[:, :1], obs[:, :1]
         return out[:, :1]
     if align_type == "negPeak_valley" or (has_val_orig and not has_pos_orig):
+        if return_observed:
+            return out[:, :2], obs[:, :2]
         return out[:, :2]
+    if return_observed:
+        return out, obs
     return out
 
 
@@ -318,24 +345,31 @@ def align_distributions(
 ) -> Tuple[List[np.ndarray], np.ndarray, List[WarpMap]]:
     """Align raw count vectors by warping their landmarks to a common target."""
     if landmark_matrix is None:
-        lm = fill_landmark_matrix(peaks, valleys, align_type=align_type)
+        lm, observed_mask = fill_landmark_matrix(
+            peaks,
+            valleys,
+            align_type=align_type,
+            return_observed=True,
+        )
     else:
         lm = np.asarray(landmark_matrix, dtype=float)
         if lm.shape[0] != len(counts):
             raise ValueError("landmark_matrix rows ≠ #samples")
-
-    nan_mask = np.isnan(lm)
-    if np.any(nan_mask):
-        col_median = np.nanmedian(lm, axis=0)
-        col_median = np.where(np.isnan(col_median), 0.0, col_median)
-        lm[nan_mask] = np.take(col_median, np.where(nan_mask)[1])
+        observed_mask = np.isfinite(lm)
+        if np.any(~observed_mask):
+            _, nan_cols = np.where(~observed_mask)
+            col_median = np.nanmedian(lm, axis=0)
+            col_median = np.where(np.isnan(col_median), 0.0, col_median)
+            lm[~observed_mask] = col_median[nan_cols]
 
     if target_landmark is None:
-        tgt = np.nanmean(lm, axis=0)
-        nan_tgt = np.isnan(tgt)
-        if np.any(nan_tgt):
-            medians = np.nanmedian(lm, axis=0)
-            tgt[nan_tgt] = medians[nan_tgt]
+        tgt = np.empty(lm.shape[1], dtype=float)
+        for j in range(lm.shape[1]):
+            obs_col = observed_mask[:, j]
+            if np.any(obs_col):
+                tgt[j] = float(np.mean(lm[obs_col, j]))
+            else:
+                tgt[j] = float(np.mean(lm[:, j]))
     else:
         tgt = np.asarray(target_landmark, dtype=float)
         if tgt.size != lm.shape[1]:
@@ -362,15 +396,10 @@ def align_distributions(
     warped_landmark = np.empty_like(lm)
     warp_funs: List[WarpMap] = []
 
-    if lm.shape[1] == 1:
-        offsets = lm[:, 0] - np.nanmedian(lm[:, 0])
-    else:
-        offsets = np.zeros(lm.shape[0])
-
     for i, (c, l_src) in enumerate(zip(counts, lm)):
         c_arr = np.asarray(c, dtype=float)
         density = densities[i]
-        valid = ~np.isnan(l_src)
+        valid = observed_mask[i]
         if not np.any(valid):
             def identity(x):
                 return np.asarray(x, dtype=float)
@@ -390,7 +419,7 @@ def align_distributions(
         dst = np.asarray(tgt[valid], dtype=float)
 
         if src.size == 1:
-            delta = float(offsets[i])
+            delta = float(src[0] - dst[0])
 
             def forward(x, d=delta):
                 return np.asarray(x, dtype=float) - d
@@ -409,9 +438,7 @@ def align_distributions(
             new_c[missing] = c_arr[missing]
         warped_counts.append(new_c)
 
-        wl = np.full_like(l_src, np.nan)
-        wl[valid] = warp.forward(src)
-        warped_landmark[i] = wl
+        warped_landmark[i] = warp.forward(l_src)
         warp_funs.append(warp)
 
     return warped_counts, warped_landmark, warp_funs

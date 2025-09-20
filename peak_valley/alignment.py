@@ -49,6 +49,9 @@ def fill_landmark_matrix(
     max_pk = max(pk_lengths, default=0)
     max_vl = max(vl_lengths, default=0)
 
+    has_val_orig = max_vl > 0
+    has_pos_orig = any(length > 1 for length in pk_lengths)
+
     pk_mat = np.full((n, max_pk if max_pk > 0 else 1), np.nan)
     vl_mat = np.full((n, max_vl if max_vl > 0 else 1), np.nan)
 
@@ -102,7 +105,7 @@ def fill_landmark_matrix(
         # --- return early for 1- or 2-anchor regimes --------------------
         if align_type == "negPeak":
             return out[:, :1]
-        if align_type == "negPeak_valley":
+        if align_type == "negPeak_valley" or (has_val_orig and not has_pos_orig):
             return out
 
         # ---- need a surrogate positive peak ----------------------------

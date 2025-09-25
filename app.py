@@ -48,6 +48,7 @@ st.session_state.setdefault("invalid_api_key", False)
 for key, default in {
     "results":     {},         # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
     "results_raw": {},         # stem → raw counts (np.ndarray)
+    "results_raw_meta": {},    # stem → (apply_arcsinh, a, b, c)
     "fig_pngs":    {},         # stem.png → png bytes (latest)
     "params":      {},         # stem → {"bw":…, "prom":…, "n_peaks":…}
     "dirty":       {},         # stem → True if user edited params *or* positions
@@ -73,6 +74,7 @@ for key, default in {
     "aligned_fig_pngs": {},  # stem_aligned.png → bytes
     "aligned_ridge_png":    None,
     "apply_consistency": False,  # enforce marker consistency across samples
+    "raw_ridge_png": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -457,6 +459,22 @@ def _refresh_raw_ridge() -> None:
     )
 
 
+def _mark_raw_ridge_stale() -> None:
+    """Flag the cached raw ridge plot so it will be regenerated lazily."""
+    st.session_state.raw_ridge_png = None
+
+
+def _current_arcsinh_signature() -> tuple[bool, float, float, float]:
+    """Return a tuple describing the current arcsinh configuration."""
+    apply_arc = bool(st.session_state.get("apply_arcsinh", True))
+    return (
+        apply_arc,
+        float(st.session_state.get("arcsinh_a", 1.0)),
+        float(st.session_state.get("arcsinh_b", 1 / 5)),
+        float(st.session_state.get("arcsinh_c", 0.0)),
+    )
+
+
 def _ridge_plot_for_stems(
     stems: list[str],
     results_map: dict[str, dict[str, object]],
@@ -580,16 +598,18 @@ def _make_aligned_zip() -> bytes:
     with zipfile.ZipFile(out, "w") as z:
 
         # 1  aligned counts (one CSV per sample)
-        for stem, arr in st.session_state.aligned_counts.items():
+        aligned_counts = st.session_state.get("aligned_counts") or {}
+        for stem, arr in aligned_counts.items():
             bio = io.BytesIO()
             np.savetxt(bio, arr, delimiter=",")
             z.writestr(f"{stem}_aligned.csv", bio.getvalue())
 
         # 2  aligned figures (per-sample + ridge)
-        for fn, png in st.session_state.aligned_fig_pngs.items():
+        for fn, png in (st.session_state.get("aligned_fig_pngs") or {}).items():
             z.writestr(fn, png)
-        if st.session_state.aligned_ridge_png:
-            z.writestr("aligned_ridge.png", st.session_state.aligned_ridge_png)
+        aligned_ridge = st.session_state.get("aligned_ridge_png")
+        if aligned_ridge:
+            z.writestr("aligned_ridge.png", aligned_ridge)
 
         # ───────────── 3  **NEW** overall summary ─────────────
         if st.session_state.aligned_results:                 # make sure it exists
@@ -674,7 +694,7 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
 
     # drop outdated results
     keep = set(desired)
-    for bucket in ("results", "results_raw", "params", "dirty",
+    for bucket in ("results", "results_raw", "results_raw_meta", "params", "dirty",
                    "aligned_results"):
         st.session_state[bucket] = {
             k: v for k, v in st.session_state[bucket].items() if k in keep
@@ -690,6 +710,7 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
     st.session_state.aligned_counts = None
     st.session_state.aligned_landmarks = None
     st.session_state.aligned_ridge_png = None
+    _mark_raw_ridge_stale()
 
     existing = {stem for stem, _ in st.session_state.generated_csvs}
     for stem, (s, m, b) in desired.items():
@@ -846,7 +867,7 @@ def _manual_editor(stem: str):
     if st.button("Apply changes", key=apply_key):
         st.session_state.results[stem]["peaks"]   = pk_list.copy()
         st.session_state.results[stem]["valleys"] = vl_list.copy()
-        _refresh_raw_ridge()                       # ← REBUILD HERE
+        _mark_raw_ridge_stale()                    # ← rebuild lazily
         st.rerun()
 
 
@@ -1452,9 +1473,11 @@ def render_results(container):
             st.session_state.pre_overrides.pop(stem, None)
             st.session_state.group_assignments.pop(stem, None)
             st.session_state.dirty_reason.pop(stem, None)
+            st.session_state.results_raw.pop(stem, None)
+            st.session_state.results_raw_meta.pop(stem, None)
             for k in (f"{stem}__pk_list", f"{stem}__vl_list"):
                 st.session_state.pop(k, None)
-            _refresh_raw_ridge()                   # ← keep ridge in sync
+            _mark_raw_ridge_stale()                # ← rebuild lazily
             st.rerun()
 
 
@@ -2096,12 +2119,13 @@ if clear_col.button("Clear results"):
     for bucket in ("results", "fig_pngs", "params", "dirty", "dirty_reason",
                    "aligned_results", "aligned_fig_pngs",
                    "results_raw",          # ← keep as dict, not None
+                   "results_raw_meta",
                    ):
         st.session_state[bucket] = {}       # {} stays {}
 
     # scalar keys or arrays
     for key in ("aligned_counts", "aligned_landmarks",
-                "aligned_ridge_png"):
+                "aligned_ridge_png", "raw_ridge_png"):
         st.session_state[key] = None
 
     st.session_state.generated_csvs.clear()
@@ -2176,15 +2200,22 @@ if st.session_state.run_active and st.session_state.pending:
     f      = st.session_state.pending.pop(0)
     stem   = Path(f.name).stem
     marker = getattr(f, "marker", None)
-    cnts   = read_counts(f, header_row, skip_rows)
-    if st.session_state.get("apply_arcsinh", True) and not getattr(f, "arcsinh", False):
-        cnts = arcsinh_transform(
-            cnts,
-            a=st.session_state.get("arcsinh_a", 1.0),
-            b=st.session_state.get("arcsinh_b", 1 / 5),
-            c=st.session_state.get("arcsinh_c", 0.0),
-        )
-    st.session_state.results_raw.setdefault(stem, cnts)
+    arcsinh_sig = _current_arcsinh_signature()
+    cached_cnts = st.session_state.results_raw.get(stem)
+    cached_sig  = st.session_state.results_raw_meta.get(stem)
+    if cached_cnts is not None and cached_sig == arcsinh_sig:
+        cnts = cached_cnts
+    else:
+        cnts = read_counts(f, header_row, skip_rows)
+        if arcsinh_sig[0] and not getattr(f, "arcsinh", False):
+            cnts = arcsinh_transform(
+                cnts,
+                a=arcsinh_sig[1],
+                b=arcsinh_sig[2],
+                c=arcsinh_sig[3],
+            )
+        st.session_state.results_raw[stem] = cnts
+        st.session_state.results_raw_meta[stem] = arcsinh_sig
 
     per_sample_over = dict(st.session_state.pre_overrides.get(stem, {}))
     reason_raw = st.session_state.dirty_reason.get(stem)
@@ -2375,8 +2406,7 @@ if st.session_state.run_active and st.session_state.pending:
     )
     st.session_state[f"{stem}__pk_list"] = pk1.copy()
     st.session_state[f"{stem}__vl_list"] = vl1.copy()
-
-    _refresh_raw_ridge()
+    _mark_raw_ridge_stale()
 
     st.session_state.params[stem] = {
         "bw": bw_use,
@@ -2405,7 +2435,7 @@ if st.session_state.run_active and st.session_state.pending:
                 )
                 st.session_state[f"{stem2}__pk_list"] = pk2.copy()
                 st.session_state[f"{stem2}__vl_list"] = vl2.copy()
-            _refresh_raw_ridge()
+            _mark_raw_ridge_stale()
         st.session_state.run_active = False
         st.success("All files processed!")
 

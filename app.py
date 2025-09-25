@@ -696,9 +696,8 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
     keep = set(desired)
     for bucket in ("results", "results_raw", "results_raw_meta", "params", "dirty",
                    "aligned_results"):
-        st.session_state[bucket] = {
-            k: v for k, v in st.session_state[bucket].items() if k in keep
-        }
+        current = st.session_state.get(bucket) or {}
+        st.session_state[bucket] = {k: v for k, v in current.items() if k in keep}
     st.session_state.fig_pngs = {
         fn: png for fn, png in st.session_state.fig_pngs.items()
         if fn.split(".")[0] in keep

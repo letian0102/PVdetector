@@ -1,7 +1,7 @@
 from __future__ import annotations
 import numpy as np
 from scipy.stats  import gaussian_kde
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, fftconvolve
 from .consistency import _enforce_valley_rule
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
@@ -85,6 +85,84 @@ def _mostly_small_discrete(x: np.ndarray, threshold: float = 0.9) -> bool:
 
     uniq = np.unique(np.round(good[mask]))
     return uniq.size <= 4
+
+
+def _fft_gaussian_kde(
+    x: np.ndarray,
+    xs: np.ndarray,
+    bandwidth: float,
+) -> np.ndarray:
+    """Approximate Gaussian KDE via FFT-based convolution.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        1-D sample array (finite values only).
+    xs : np.ndarray
+        Evaluation grid (uniform spacing assumed).
+    bandwidth : float
+        Scalar bandwidth of the 1-D Gaussian kernel.
+
+    Returns
+    -------
+    np.ndarray
+        KDE evaluated on ``xs``.
+    """
+
+    if not np.isfinite(bandwidth) or bandwidth <= 0:
+        return np.zeros_like(xs)
+
+    if xs.size < 2:
+        return np.zeros_like(xs)
+
+    grid_dx = float(xs[1] - xs[0])
+    if not np.isfinite(grid_dx) or grid_dx <= 0:
+        return np.zeros_like(xs)
+
+    # Histogram aligned with the KDE grid (bin centers = xs)
+    edges = np.linspace(
+        xs[0] - 0.5 * grid_dx,
+        xs[-1] + 0.5 * grid_dx,
+        xs.size + 1,
+    )
+    counts, _ = np.histogram(x, bins=edges)
+
+    if not counts.any():
+        return np.zeros_like(xs)
+
+    # Truncate kernel at ±4σ (covers >99.99 % of mass)
+    max_radius = max(1, int(np.ceil(4.0 * bandwidth / grid_dx)))
+    max_radius = min(max_radius, xs.size // 2)
+    offsets = np.arange(-max_radius, max_radius + 1)
+    kernel = np.exp(-0.5 * ((offsets * grid_dx) / bandwidth) ** 2)
+    kernel /= kernel.sum()
+
+    smooth = fftconvolve(counts, kernel, mode="same")
+    return smooth / (x.size * grid_dx)
+
+
+def _evaluate_kde(
+    x: np.ndarray,
+    xs: np.ndarray,
+    kde: gaussian_kde,
+) -> np.ndarray:
+    """Evaluate KDE, switching to FFT when the grid is large."""
+
+    n = x.size
+    if n == 0:
+        return np.zeros_like(xs)
+
+    # ``gaussian_kde`` evaluation cost grows with ``n × len(xs)``.
+    brute_cost = n * xs.size
+
+    # ``kde.factor`` already incorporates any ``set_bandwidth`` calls.
+    sample_std = float(np.std(x, ddof=1)) if n > 1 else 0.0
+    bandwidth = kde.factor * sample_std
+
+    if brute_cost <= 5_000_000 or bandwidth <= 0:
+        return kde(xs)
+
+    return _fft_gaussian_kde(x, xs, bandwidth)
 
 
 def _first_valley_slope(xs: np.ndarray,
@@ -269,7 +347,7 @@ def kde_peaks_valleys(
     h   = kde.factor * x.std(ddof=1)
     xs  = np.linspace(x.min() - h, x.max() + h,
                       min(grid_size, max(4000, 4 * x.size)))
-    ys  = kde(xs)
+    ys  = _evaluate_kde(x, xs, kde)
 
     # ---------- primary peaks ----------
 

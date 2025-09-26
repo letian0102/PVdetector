@@ -1,7 +1,7 @@
 # app.py  – GPT-assisted bandwidth detector with
 #           live incremental results + per-sample overrides
 from __future__ import annotations
-import io, zipfile, re
+import io, zipfile, re, json
 from pathlib import Path
 
 import numpy as np
@@ -592,52 +592,172 @@ def _group_stems_with_results() -> dict[str, list[str]]:
 
     return groups
 
-def _make_aligned_zip() -> bytes:
-    """Build a ZIP with *everything* related to the aligned data."""
+
+def _ensure_raw_ridge_png() -> bytes | None:
+    """Return the cached raw ridge plot, recomputing it when needed."""
+
+    if st.session_state.get("raw_ridge_png") is None:
+        _refresh_raw_ridge()
+    return st.session_state.get("raw_ridge_png")
+
+
+def _serializable_counts(array: np.ndarray | None) -> list[float | None]:
+    """Convert a numeric array to a JSON-serialisable list of floats/None."""
+
+    if array is None:
+        return []
+
+    arr = np.asarray(array, float).ravel()
+    serialisable: list[float | None] = []
+    for value in arr:
+        if np.isnan(value):
+            serialisable.append(None)
+        elif np.isfinite(value):
+            serialisable.append(float(value))
+        else:
+            serialisable.append(None)
+    return serialisable
+
+
+def _sample_metadata(stem: str) -> dict[str, str]:
+    """Collect exported metadata for ``stem`` from cached dataset info."""
+
+    meta_map = st.session_state.get("generated_meta", {}) or {}
+    meta = meta_map.get(stem, {})
+
+    def _clean(value: object) -> str:
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            return ""
+        return str(value)
+
+    batch_val = meta.get("batch_label", meta.get("batch"))
+
+    return {
+        "stem": stem,
+        "sample": _clean(meta.get("sample", "")),
+        "marker": _clean(meta.get("marker", "")),
+        "batch": _clean(batch_val),
+    }
+
+
+def _processed_counts_csv() -> bytes:
+    """Return a CSV (bytes) with all processed, pre-alignment counts."""
+
+    rows: list[dict[str, object]] = []
+    for stem in st.session_state.results:
+        counts = st.session_state.results_raw.get(stem)
+        if counts is None:
+            continue
+        meta = _sample_metadata(stem)
+        meta["normalized_counts"] = json.dumps(_serializable_counts(counts))
+        rows.append(meta)
+
+    if rows:
+        df = pd.DataFrame(rows)
+    else:
+        df = pd.DataFrame(columns=["stem", "sample", "marker", "batch", "normalized_counts"])
+
+    return df.to_csv(index=False).encode()
+
+
+def _aligned_counts_csv() -> bytes:
+    """Return a CSV (bytes) with aligned counts for every processed sample."""
+
+    aligned_counts = st.session_state.get("aligned_counts") or {}
+    rows: list[dict[str, object]] = []
+    for stem in st.session_state.results:
+        counts = aligned_counts.get(stem)
+        if counts is None:
+            continue
+        meta = _sample_metadata(stem)
+        meta["aligned_normalized_counts"] = json.dumps(_serializable_counts(counts))
+        rows.append(meta)
+
+    if rows:
+        df = pd.DataFrame(rows)
+    else:
+        df = pd.DataFrame(
+            columns=["stem", "sample", "marker", "batch", "aligned_normalized_counts"]
+        )
+
+    return df.to_csv(index=False).encode()
+
+
+def _protein_label() -> str:
+    """Return a filesystem-safe protein/marker label for export filenames."""
+
+    markers: set[str] = set()
+    meta_map = st.session_state.get("generated_meta", {}) or {}
+    for meta in meta_map.values():
+        marker = meta.get("marker")
+        if marker:
+            markers.add(str(marker))
+
+    if not markers:
+        stems = list(st.session_state.results)
+        for stem in stems:
+            core = stem
+            if stem.endswith("_raw_counts"):
+                core = stem[: -len("_raw_counts")]
+            parts = [p for p in core.split("_") if p]
+            if parts:
+                markers.add(parts[-1])
+
+    if not markers:
+        sel_markers = st.session_state.get("sel_markers")
+        if isinstance(sel_markers, list) and sel_markers:
+            markers.update(str(m) for m in sel_markers if m)
+
+    if len(markers) == 1:
+        base = markers.pop()
+    elif len(markers) > 1:
+        base = "multiple_proteins"
+    else:
+        expr_name = st.session_state.get("expr_name")
+        base = Path(expr_name).stem if expr_name else "PeakValleyResults"
+
+    safe = re.sub(r"[^0-9A-Za-z_-]+", "_", str(base)).strip("_")
+    return safe or "PeakValleyResults"
+
+
+def _before_alignment_zip_name() -> str:
+    return f"{_protein_label()}_before_alignment.zip"
+
+
+def _final_alignment_zip_name() -> str:
+    return f"{_protein_label()}.zip"
+
+
+def _make_before_alignment_zip() -> bytes:
+    """Bundle the pre-alignment ridge plot and processed counts into a ZIP."""
+
+    raw_png = _ensure_raw_ridge_png()
+    processed_csv = _processed_counts_csv()
+
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
-
-        # 1  aligned counts (one CSV per sample)
-        aligned_counts = st.session_state.get("aligned_counts") or {}
-        for stem, arr in aligned_counts.items():
-            bio = io.BytesIO()
-            np.savetxt(bio, arr, delimiter=",")
-            z.writestr(f"{stem}_aligned.csv", bio.getvalue())
-
-        # 2  aligned figures (per-sample + ridge)
-        for fn, png in (st.session_state.get("aligned_fig_pngs") or {}).items():
-            z.writestr(fn, png)
-        aligned_ridge = st.session_state.get("aligned_ridge_png")
-        if aligned_ridge:
-            z.writestr("aligned_ridge.png", aligned_ridge)
-
-        # ───────────── 3  **NEW** overall summary ─────────────
-        if st.session_state.aligned_results:                 # make sure it exists
-            import pandas as pd                              # local import is fine
-            rows = [
-                {
-                    "file":    stem,
-                    "peaks":   info["peaks"],
-                    "valleys": info["valleys"],
-                }
-                for stem, info in st.session_state.aligned_results.items()
-            ]
-            df_sum = pd.DataFrame(rows)
-            z.writestr("aligned_summary.csv",
-                       df_sum.to_csv(index=False).encode())
-
+        if raw_png:
+            z.writestr("before_alignment_ridge.png", raw_png)
+        z.writestr("processed_data.csv", processed_csv)
     return out.getvalue()
 
 
-# ── helper #2 : curves ZIP  (xs/ys for every sample) ────────────────
-def _make_curves_zip() -> bytes:
+def _make_final_alignment_zip() -> bytes:
+    """Bundle both ridge plots plus processed/aligned CSV exports."""
+
+    raw_png = _ensure_raw_ridge_png()
+    aligned_png = st.session_state.get("aligned_ridge_png")
+    processed_csv = _processed_counts_csv()
+    aligned_csv = _aligned_counts_csv()
+
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
-        for stem, info in st.session_state.results.items():
-            bio_xs = io.BytesIO(); np.savetxt(bio_xs, info["xs"], delimiter=",")
-            bio_ys = io.BytesIO(); np.savetxt(bio_ys, info["ys"], delimiter=",")
-            z.writestr(f"{stem}_xs.csv", bio_xs.getvalue())
-            z.writestr(f"{stem}_ys.csv", bio_ys.getvalue())
+        if raw_png:
+            z.writestr("before_alignment_ridge.png", raw_png)
+        if aligned_png:
+            z.writestr("aligned_ridge.png", aligned_png)
+        z.writestr("processed_data.csv", processed_csv)
+        z.writestr("aligned_data.csv", aligned_csv)
     return out.getvalue()
 
 
@@ -2456,7 +2576,6 @@ render_results(results_container)
 
 # ──────────────  SUMMARY  +  RIDGE-PLOT TABS  ──────────────
 if st.session_state.results:
-    # summary table
     df = pd.DataFrame(
         [{
             "file":     k,
@@ -2465,59 +2584,23 @@ if st.session_state.results:
             "quality":  round(v.get("quality", np.nan), 4),
         } for k, v in st.session_state.results.items()]
     )
-
-    # ZIP with per-sample PNGs + summary CSV  (same as before)
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("summary.csv", df.to_csv(index=False).encode())
-        for fn, png in st.session_state.fig_pngs.items():
-            z.writestr(fn, png)
-    buf.seek(0)                             #  ← be sure to rewind!
-
-    # quality table for the extra download button
-    qual_df = df[["file", "quality"]]
-
 else:
-    df = pd.DataFrame()                     # empty placeholders
-    buf = io.BytesIO()
-    qual_df = pd.DataFrame()
+    df = pd.DataFrame()
+
+download_section = st.container()
 
 tab_sum, tab_quality, tab_cmp = st.tabs(
-    ["Summary ∣ downloads",
+    ["Summary",
     "Quality",
     "Comparison"]
 )
 
-# TAB 1  – summary table & the three download buttons
+# TAB 1  – summary table
 with tab_sum:
     if not df.empty:
         st.dataframe(df, use_container_width=True)
-
-        # the two extra download buttons you already kept:
-        st.download_button("Download per-sample xs / ys",
-                   _make_curves_zip(),
-                   "SampleCurves.zip",
-                   mime="application/zip",
-                   key="curves_dl_tab")
-        
-        if st.session_state.aligned_results:
-            st.download_button(
-                "Download Aligned Data",
-                _make_aligned_zip(),
-                "alignedData.zip",
-                mime="application/zip",
-                key="aligned_dl_tab",
-            )
-
-        st.download_button("Download quality table",
-                   qual_df.to_csv(index=False).encode(),
-                   "StainQuality.csv",
-                   "text/csv",
-                   key="qual_dl_tab")
     else:
-        st.info("Run the detector first to see summary & downloads.")
-        # the two extra download buttons stay where they are
-        # (nothing else to change here)
+        st.info("Run the detector first to see summary information.")
 
 # TAB 2 – quality‐score bar plot
 with tab_quality:
@@ -2535,6 +2618,30 @@ with tab_quality:
         st.pyplot(fig)
     else:
         st.info("Run the detector first to see quality scores.")
+
+with download_section:
+    if st.session_state.results:
+        st.markdown("### Downloads")
+        col_before, col_after = st.columns(2)
+
+        col_before.download_button(
+            "Download before-alignment data",
+            _make_before_alignment_zip(),
+            _before_alignment_zip_name(),
+            mime="application/zip",
+            key="before_alignment_download",
+        )
+
+        if st.session_state.get("aligned_counts"):
+            col_after.download_button(
+                "Download aligned data",
+                _make_final_alignment_zip(),
+                _final_alignment_zip_name(),
+                mime="application/zip",
+                key="aligned_download",
+            )
+        else:
+            col_after.button("Download aligned data", disabled=True)
 
 # # TAB 2  – raw ridge
 # with tab_raw:

@@ -1,7 +1,7 @@
 # app.py  – GPT-assisted bandwidth detector with
 #           live incremental results + per-sample overrides
 from __future__ import annotations
-import io, zipfile, re, json
+import io, zipfile, re
 from pathlib import Path
 
 import numpy as np
@@ -619,6 +619,23 @@ def _serializable_counts(array: np.ndarray | None) -> list[float | None]:
     return serialisable
 
 
+def _counts_csv_field(array: np.ndarray | None) -> str:
+    """Return a CSV-safe string representation of the ``array`` values."""
+
+    values = _serializable_counts(array)
+    if not values:
+        return "[]"
+
+    parts: list[str] = []
+    for value in values:
+        if value is None:
+            parts.append("null")
+        else:
+            parts.append(format(value, ".15g"))
+
+    return "[" + "; ".join(parts) + "]"
+
+
 def _sample_metadata(stem: str) -> dict[str, str]:
     """Collect exported metadata for ``stem`` from cached dataset info."""
 
@@ -649,7 +666,7 @@ def _processed_counts_csv() -> bytes:
         if counts is None:
             continue
         meta = _sample_metadata(stem)
-        meta["normalized_counts"] = json.dumps(_serializable_counts(counts))
+        meta["normalized_counts"] = _counts_csv_field(counts)
         rows.append(meta)
 
     if rows:
@@ -670,7 +687,7 @@ def _aligned_counts_csv() -> bytes:
         if counts is None:
             continue
         meta = _sample_metadata(stem)
-        meta["aligned_normalized_counts"] = json.dumps(_serializable_counts(counts))
+        meta["aligned_normalized_counts"] = _counts_csv_field(counts)
         rows.append(meta)
 
     if rows:

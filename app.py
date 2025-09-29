@@ -13,7 +13,7 @@ from openai import OpenAI, AuthenticationError
 from peak_valley.quality import stain_quality
 
 from peak_valley import (
-    arcsinh_transform, read_counts,
+    arcsinh_transform, read_counts, load_combined_csv,
     kde_peaks_valleys, quick_peak_estimate,
     fig_to_png, enforce_marker_consistency,
 )
@@ -64,6 +64,7 @@ for key, default in {
     "sel_markers": [], "sel_samples": [], "sel_batches": [],
     "expr_df": None, "meta_df": None,
     "expr_name": None, "meta_name": None,
+    "expr_sources": [], "meta_sources": [],
     # incremental‑run machinery
     "pending":     [],         # list[io.BytesIO] still to process
     "total_todo":  0,
@@ -83,6 +84,20 @@ for key, default in {
 def _keyify(label: str) -> str:
     """Sanitize labels so they are safe to use in Streamlit widget keys."""
     return re.sub(r"[^0-9A-Za-z_]+", "_", label)
+
+
+def _summarize_sources(label: str, sources: list[str]) -> str | None:
+    """Return a short human-readable summary for combined CSV parts."""
+
+    if not sources:
+        return None
+
+    display = ", ".join(Path(src).name for src in sources[:3])
+    if len(sources) > 3:
+        display += ", …"
+
+    plural = "part" if len(sources) == 1 else "parts"
+    return f"{label} combined from {len(sources)} {plural}: {display}"
 
 
 def _summarize_overrides(overrides: dict[str, object]) -> list[str]:
@@ -1951,8 +1966,15 @@ with st.sidebar:
                         st.session_state.pre_overrides.pop(stem, None)
                 st.session_state.generated_csvs.clear()
                 st.session_state.generated_meta = {}
-                for k in ("expr_df", "meta_df", "expr_name", "meta_name"):
+                for k in (
+                    "expr_df",
+                    "meta_df",
+                    "expr_name",
+                    "meta_name",
+                ):
                     st.session_state[k] = None
+                st.session_state["expr_sources"] = []
+                st.session_state["meta_sources"] = []
                 st.rerun()
 
         if expr_file and meta_file:
@@ -1961,16 +1983,43 @@ with st.sidebar:
                     meta_file.name != st.session_state.meta_name)
             if need:
                 with st.spinner("Parsing expression / metadata …"):
-                    st.session_state.expr_df = pd.read_csv(expr_file,
-                                                           low_memory=False)
-                    st.session_state.meta_df = pd.read_csv(meta_file,
-                                                           low_memory=False)
-                    st.session_state.expr_name, st.session_state.meta_name = (
-                        expr_file.name, meta_file.name
-                    )
+                    try:
+                        expr_df, expr_sources = load_combined_csv(
+                            expr_file, low_memory=False
+                        )
+                        meta_df, meta_sources = load_combined_csv(
+                            meta_file, low_memory=False
+                        )
+                    except ValueError as exc:
+                        st.session_state.expr_df = None
+                        st.session_state.meta_df = None
+                        st.session_state.expr_sources = []
+                        st.session_state.meta_sources = []
+                        st.session_state.expr_name = None
+                        st.session_state.meta_name = None
+                        st.error(f"Failed to parse uploaded dataset: {exc}")
+                    else:
+                        st.session_state.expr_df = expr_df
+                        st.session_state.meta_df = meta_df
+                        st.session_state.expr_sources = expr_sources
+                        st.session_state.meta_sources = meta_sources
+                        st.session_state.expr_name, st.session_state.meta_name = (
+                            expr_file.name, meta_file.name
+                        )
 
         expr_df, meta_df = st.session_state.expr_df, st.session_state.meta_df
         if expr_df is not None and meta_df is not None:
+            expr_summary = _summarize_sources(
+                "Expression matrix", st.session_state.get("expr_sources") or []
+            )
+            meta_summary = _summarize_sources(
+                "Cell metadata", st.session_state.get("meta_sources") or []
+            )
+            if expr_summary:
+                st.caption(expr_summary)
+            if meta_summary:
+                st.caption(meta_summary)
+
             markers = [c for c in expr_df.columns if c != "cell_id"]
             if "batch" in meta_df.columns:
                 batches = meta_df["batch"].unique().tolist()

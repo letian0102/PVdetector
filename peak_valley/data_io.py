@@ -1,10 +1,11 @@
 from __future__ import annotations
 import io
 from pathlib import Path
+import zipfile
 import numpy as np
 import pandas as pd
 
-__all__ = ["arcsinh_transform", "read_counts"]
+__all__ = ["arcsinh_transform", "read_counts", "load_combined_csv"]
 
 
 # ------------------------------------------------------------------
@@ -92,3 +93,91 @@ def read_counts(
 
     metadata = {"protein_name": protein_name}
     return values, metadata
+
+
+# ------------------------------------------------------------------
+def load_combined_csv(
+    file: io.BytesIO | bytes | str | Path,
+    *,
+    low_memory: bool = False,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Return a DataFrame from ``file``, concatenating CSV parts when needed.
+
+    Parameters
+    ----------
+    file:
+        A path or file-like object pointing to a CSV file. The input may also be
+        a ZIP archive containing one or more CSV files that share the same
+        column structure. When multiple CSV files are present in the archive,
+        they are read in sorted order and concatenated row-wise.
+    low_memory:
+        Passed to :func:`pandas.read_csv` for every CSV that is parsed.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, list[str]]
+        The combined dataframe together with a list of source file names used
+        to produce it. The list is empty when a plain CSV was provided.
+
+    Raises
+    ------
+    ValueError
+        If the archive contains no CSV files or if the CSV parts disagree on
+        their column layout.
+    """
+
+    close_after = False
+
+    if isinstance(file, (str, Path)):
+        file = open(file, "rb")
+        close_after = True
+
+    try:
+        data: bytes
+        if isinstance(file, bytes):
+            data = file
+        else:
+            data = file.read()
+            if hasattr(file, "seek"):
+                file.seek(0)
+
+        buffer = io.BytesIO(data)
+        buffer.seek(0)
+
+        if zipfile.is_zipfile(buffer):
+            buffer.seek(0)
+            with zipfile.ZipFile(buffer) as archive:
+                members = [
+                    name
+                    for name in archive.namelist()
+                    if name.lower().endswith(".csv")
+                    and not name.endswith("/")
+                    and "__MACOSX" not in name
+                ]
+                members.sort()
+
+                frames: list[pd.DataFrame] = []
+                for name in members:
+                    with archive.open(name) as fh:
+                        frames.append(pd.read_csv(fh, low_memory=low_memory))
+
+                if not frames:
+                    raise ValueError("The archive does not contain any CSV files.")
+
+                columns = list(frames[0].columns)
+                for idx, frame in enumerate(frames[1:], start=1):
+                    if list(frame.columns) != columns:
+                        raise ValueError(
+                            "CSV files in the archive have inconsistent columns "
+                            f"(mismatch at part {idx + 1})."
+                        )
+
+                combined = pd.concat(frames, ignore_index=True)
+                return combined, members
+
+        buffer.seek(0)
+        frame = pd.read_csv(buffer, low_memory=low_memory)
+        return frame, []
+    finally:
+        if close_after:
+            file.close()

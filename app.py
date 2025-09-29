@@ -48,7 +48,7 @@ st.session_state.setdefault("invalid_api_key", False)
 for key, default in {
     "results":     {},         # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
     "results_raw": {},         # stem → raw counts (np.ndarray)
-    "results_raw_meta": {},    # stem → (apply_arcsinh, a, b, c)
+    "results_raw_meta": {},    # stem → {"arcsinh": tuple, "protein_name": str, …}
     "fig_pngs":    {},         # stem.png → png bytes (latest)
     "params":      {},         # stem → {"bw":…, "prom":…, "n_peaks":…}
     "dirty":       {},         # stem → True if user edited params *or* positions
@@ -799,6 +799,71 @@ def _dataset_csv_exports(*, aligned: bool = False) -> tuple[bytes | None, bytes 
     return meta_tbl.to_csv(index=False).encode(), expr_tbl.to_csv(index=False).encode()
 
 
+def _raw_meta_for(stem: str) -> dict[str, object]:
+    """Return metadata captured while parsing ``stem``'s source CSV."""
+
+    meta_map = st.session_state.get("results_raw_meta", {}) or {}
+    info = meta_map.get(stem)
+    if isinstance(info, tuple):  # legacy cache
+        info = {"arcsinh": info}
+    return dict(info or {})
+
+
+def _sample_export_filename(stem: str, info: dict[str, object], *, aligned: bool) -> str:
+    """Derive a filename for a per-sample export."""
+
+    source = info.get("source_name")
+    if source:
+        name = Path(str(source)).name
+    else:
+        name = f"{stem}.csv"
+
+    path = Path(name)
+    suffix = path.suffix or ".csv"
+    base = path.stem if path.suffix else name
+    if aligned:
+        base = f"{base}_aligned"
+    return f"{base}{suffix}"
+
+
+def _counts_column_csv(protein: str | None, counts: np.ndarray, fallback: str) -> bytes:
+    """Return CSV bytes with the marker name in the first row and counts below."""
+
+    header = (protein or "").strip()
+    if not header:
+        header = fallback
+
+    arr = np.asarray(counts, dtype=float).ravel()
+    column: list[object] = [header]
+    column.extend(arr.tolist())
+
+    series = pd.Series(column, dtype="object")
+    return series.to_csv(index=False, header=False).encode()
+
+
+def _sample_csv_exports(*, aligned: bool = False) -> list[tuple[str, bytes]]:
+    """Build per-sample CSV exports for before/after alignment downloads."""
+
+    data_map = (
+        st.session_state.get("aligned_counts")
+        if aligned
+        else st.session_state.get("results_raw")
+    ) or {}
+    if not data_map:
+        return []
+
+    exports: list[tuple[str, bytes]] = []
+    for stem in st.session_state.get("results", {}):
+        counts = data_map.get(stem)
+        if counts is None:
+            continue
+        info = _raw_meta_for(stem)
+        filename = _sample_export_filename(stem, info, aligned=aligned)
+        csv_bytes = _counts_column_csv(info.get("protein_name"), counts, Path(filename).stem)
+        exports.append((filename, csv_bytes))
+    return exports
+
+
 def _protein_label() -> str:
     """Return a filesystem-safe protein/marker label for export filenames."""
 
@@ -849,11 +914,14 @@ def _make_before_alignment_zip() -> bytes:
 
     raw_png = _ensure_raw_ridge_png()
     meta_csv, expr_csv = _dataset_csv_exports(aligned=False)
+    sample_exports = _sample_csv_exports(aligned=False)
 
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
         if raw_png:
             z.writestr("before_alignment_ridge.png", raw_png)
+        for filename, csv_bytes in sample_exports:
+            z.writestr(filename, csv_bytes)
         if meta_csv and expr_csv:
             z.writestr("cell_metadata_combined.csv", meta_csv)
             z.writestr("expression_matrix_combined.csv", expr_csv)
@@ -868,6 +936,7 @@ def _make_final_alignment_zip() -> bytes:
     aligned_csv = _aligned_counts_csv()
     meta_aligned_csv, expr_aligned_csv = _dataset_csv_exports(aligned=True)
     meta_csv, expr_csv = _dataset_csv_exports(aligned=False)
+    aligned_sample_exports = _sample_csv_exports(aligned=True)
 
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
@@ -875,6 +944,8 @@ def _make_final_alignment_zip() -> bytes:
             z.writestr("before_alignment_ridge.png", raw_png)
         if aligned_png:
             z.writestr("aligned_ridge.png", aligned_png)
+        for filename, csv_bytes in aligned_sample_exports:
+            z.writestr(filename, csv_bytes)
         meta_bytes = meta_aligned_csv or meta_csv
         if expr_aligned_csv:
             if meta_bytes:
@@ -2509,11 +2580,23 @@ if st.session_state.run_active and st.session_state.pending:
     marker = getattr(f, "marker", None)
     arcsinh_sig = _current_arcsinh_signature()
     cached_cnts = st.session_state.results_raw.get(stem)
-    cached_sig  = st.session_state.results_raw_meta.get(stem)
+    meta_entry_raw = st.session_state.results_raw_meta.get(stem) or {}
+    if isinstance(meta_entry_raw, tuple):
+        cached_sig = meta_entry_raw
+        meta_entry = {"arcsinh": meta_entry_raw}
+        st.session_state.results_raw_meta[stem] = meta_entry
+    else:
+        meta_entry = dict(meta_entry_raw)
+        cached_sig = meta_entry.get("arcsinh")
+
     if cached_cnts is not None and cached_sig == arcsinh_sig:
         cnts = cached_cnts
+        # ensure legacy caches gain the richer metadata
+        if "source_name" not in meta_entry:
+            meta_entry["source_name"] = getattr(f, "name", None)
+            st.session_state.results_raw_meta[stem] = meta_entry
     else:
-        cnts = read_counts(f, header_row, skip_rows)
+        cnts, meta = read_counts(f, header_row, skip_rows)
         if arcsinh_sig[0] and not getattr(f, "arcsinh", False):
             cnts = arcsinh_transform(
                 cnts,
@@ -2522,7 +2605,13 @@ if st.session_state.run_active and st.session_state.pending:
                 c=arcsinh_sig[3],
             )
         st.session_state.results_raw[stem] = cnts
-        st.session_state.results_raw_meta[stem] = arcsinh_sig
+        protein_name = meta.get("protein_name") or meta_entry.get("protein_name")
+        meta_entry = {
+            "arcsinh": arcsinh_sig,
+            "protein_name": protein_name,
+            "source_name": meta.get("source_name") or getattr(f, "name", None),
+        }
+        st.session_state.results_raw_meta[stem] = meta_entry
 
     per_sample_over = dict(st.session_state.pre_overrides.get(stem, {}))
     reason_raw = st.session_state.dirty_reason.get(stem)

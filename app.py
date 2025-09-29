@@ -845,10 +845,9 @@ def _final_alignment_zip_name() -> str:
 
 
 def _make_before_alignment_zip() -> bytes:
-    """Bundle the pre-alignment ridge plot and processed counts into a ZIP."""
+    """Bundle the pre-alignment ridge plot and dataset exports into a ZIP."""
 
     raw_png = _ensure_raw_ridge_png()
-    processed_csv = _processed_counts_csv()
     meta_csv, expr_csv = _dataset_csv_exports(aligned=False)
 
     out = io.BytesIO()
@@ -858,19 +857,17 @@ def _make_before_alignment_zip() -> bytes:
         if meta_csv and expr_csv:
             z.writestr("cell_metadata_combined.csv", meta_csv)
             z.writestr("expression_matrix_combined.csv", expr_csv)
-        z.writestr("processed_data.csv", processed_csv)
     return out.getvalue()
 
 
 def _make_final_alignment_zip() -> bytes:
-    """Bundle both ridge plots plus processed/aligned CSV exports."""
+    """Bundle ridge plots plus aligned dataset exports into a ZIP."""
 
     raw_png = _ensure_raw_ridge_png()
     aligned_png = st.session_state.get("aligned_ridge_png")
-    processed_csv = _processed_counts_csv()
     aligned_csv = _aligned_counts_csv()
-    meta_csv, expr_csv = _dataset_csv_exports(aligned=False)
     meta_aligned_csv, expr_aligned_csv = _dataset_csv_exports(aligned=True)
+    meta_csv, expr_csv = _dataset_csv_exports(aligned=False)
 
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
@@ -878,17 +875,38 @@ def _make_final_alignment_zip() -> bytes:
             z.writestr("before_alignment_ridge.png", raw_png)
         if aligned_png:
             z.writestr("aligned_ridge.png", aligned_png)
-        if meta_csv and expr_csv:
-            z.writestr("cell_metadata_combined.csv", meta_csv)
-            z.writestr("expression_matrix_combined.csv", expr_csv)
-            if expr_aligned_csv:
-                z.writestr("expression_matrix_aligned.csv", expr_aligned_csv)
-        elif expr_aligned_csv:
-            if meta_aligned_csv:
-                z.writestr("cell_metadata_combined.csv", meta_aligned_csv)
+        meta_bytes = meta_aligned_csv or meta_csv
+        if expr_aligned_csv:
+            if meta_bytes:
+                z.writestr("cell_metadata_combined.csv", meta_bytes)
             z.writestr("expression_matrix_aligned.csv", expr_aligned_csv)
-        z.writestr("processed_data.csv", processed_csv)
+        elif meta_bytes and expr_csv:
+            z.writestr("cell_metadata_combined.csv", meta_bytes)
+            z.writestr("expression_matrix_combined.csv", expr_csv)
         z.writestr("aligned_data.csv", aligned_csv)
+    return out.getvalue()
+
+
+def _combined_alignment_zip_name() -> str:
+    return f"{_protein_label()}_before_after_alignment.zip"
+
+
+def _make_combined_alignment_zip() -> bytes:
+    """Bundle before- and after-alignment dataset exports into a single ZIP."""
+
+    meta_before, expr_before = _dataset_csv_exports(aligned=False)
+    meta_after, expr_after = _dataset_csv_exports(aligned=True)
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        if meta_before and expr_before:
+            z.writestr("before_alignment/cell_metadata_combined.csv", meta_before)
+            z.writestr("before_alignment/expression_matrix_combined.csv", expr_before)
+        if expr_after:
+            meta_bytes = meta_after or meta_before
+            if meta_bytes:
+                z.writestr("after_alignment/cell_metadata_combined.csv", meta_bytes)
+            z.writestr("after_alignment/expression_matrix_aligned.csv", expr_after)
     return out.getvalue()
 
 
@@ -1025,7 +1043,8 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
             counts = vals.astype(float)
             arcsinh_applied = False
         bio = io.BytesIO()
-        counts.to_csv(bio, index=False, header=False)
+        counts_df = pd.DataFrame({m: np.asarray(counts).ravel()})
+        counts_df.to_csv(bio, index=False)
         bio.seek(0)
         bio.name = f"{stem}.csv"
         setattr(bio, "marker", m)
@@ -2791,7 +2810,7 @@ with tab_quality:
 with download_section:
     if st.session_state.results:
         st.markdown("### Downloads")
-        col_before, col_after = st.columns(2)
+        col_before, col_after, col_both = st.columns(3)
 
         col_before.download_button(
             "Download before-alignment data",
@@ -2809,8 +2828,16 @@ with download_section:
                 mime="application/zip",
                 key="aligned_download",
             )
+            col_both.download_button(
+                "Download before & after data",
+                _make_combined_alignment_zip(),
+                _combined_alignment_zip_name(),
+                mime="application/zip",
+                key="before_after_download",
+            )
         else:
             col_after.button("Download aligned data", disabled=True)
+            col_both.button("Download before & after data", disabled=True)
 
 # # TAB 2  – raw ridge
 # with tab_raw:

@@ -29,7 +29,8 @@ def setup_state():
 
 def read_bio(bio: io.BytesIO) -> np.ndarray:
     bio.seek(0)
-    return np.loadtxt(bio)
+    df = pd.read_csv(bio)
+    return df.iloc[:, 0].to_numpy()
 
 
 def test_arcsinh_applied():

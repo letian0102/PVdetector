@@ -967,17 +967,32 @@ def _make_combined_alignment_zip() -> bytes:
 
     meta_before, expr_before = _dataset_csv_exports(aligned=False)
     meta_after, expr_after = _dataset_csv_exports(aligned=True)
+    sample_before = _sample_csv_exports(aligned=False)
+    sample_after = _sample_csv_exports(aligned=True)
+    raw_png = _ensure_raw_ridge_png()
+    aligned_png = st.session_state.get("aligned_ridge_png")
+    aligned_csv = _aligned_counts_csv()
 
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
         if meta_before and expr_before:
             z.writestr("before_alignment/cell_metadata_combined.csv", meta_before)
             z.writestr("before_alignment/expression_matrix_combined.csv", expr_before)
+        for filename, csv_bytes in sample_before:
+            z.writestr(f"before_alignment/{filename}", csv_bytes)
+        if raw_png:
+            z.writestr("before_alignment/before_alignment_ridge.png", raw_png)
         if expr_after:
             meta_bytes = meta_after or meta_before
             if meta_bytes:
                 z.writestr("after_alignment/cell_metadata_combined.csv", meta_bytes)
             z.writestr("after_alignment/expression_matrix_aligned.csv", expr_after)
+        for filename, csv_bytes in sample_after:
+            z.writestr(f"after_alignment/{filename}", csv_bytes)
+        if aligned_png:
+            z.writestr("after_alignment/aligned_ridge.png", aligned_png)
+        if aligned_csv:
+            z.writestr("after_alignment/aligned_data.csv", aligned_csv)
     return out.getvalue()
 
 

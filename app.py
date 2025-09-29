@@ -64,7 +64,14 @@ for key, default in {
     "sel_markers": [], "sel_samples": [], "sel_batches": [],
     "expr_df": None, "meta_df": None,
     "expr_name": None, "meta_name": None,
-    "expr_sources": [], "meta_sources": [],
+    "combined_expr_df": None,
+    "combined_meta_df": None,
+    "combined_expr_bytes": None,
+    "combined_meta_bytes": None,
+    "combined_expr_sources": [],
+    "combined_meta_sources": [],
+    "combined_expr_name": None,
+    "combined_meta_name": None,
     # incremental‑run machinery
     "pending":     [],         # list[io.BytesIO] still to process
     "total_todo":  0,
@@ -1973,9 +1980,137 @@ with st.sidebar:
                     "meta_name",
                 ):
                     st.session_state[k] = None
-                st.session_state["expr_sources"] = []
-                st.session_state["meta_sources"] = []
                 st.rerun()
+
+        with st.expander("Optional: Combine dataset CSV parts"):
+            st.markdown(
+                "Upload expression and cell metadata CSVs (or ZIP archives of CSV "
+                "parts) to merge them into single combined files for download or "
+                "direct use in the workflow."
+            )
+            with st.form("combine_dataset_form", clear_on_submit=False):
+                expr_combo = st.file_uploader(
+                    "Expression CSV or ZIP",
+                    type=["csv", "zip"],
+                    help="Provide a single CSV or a ZIP archive containing expression parts.",
+                    key="combine_expr_file",
+                )
+                meta_combo = st.file_uploader(
+                    "Cell metadata CSV or ZIP",
+                    type=["csv", "zip"],
+                    help="Provide a single CSV or a ZIP archive containing metadata parts.",
+                    key="combine_meta_file",
+                )
+                submitted = st.form_submit_button("Combine files")
+
+            if submitted:
+                if not expr_combo or not meta_combo:
+                    st.warning(
+                        "Upload both an expression file and a cell metadata file before combining."
+                    )
+                else:
+                    try:
+                        expr_df_combo, expr_sources = load_combined_csv(
+                            expr_combo, low_memory=False
+                        )
+                        meta_df_combo, meta_sources = load_combined_csv(
+                            meta_combo, low_memory=False
+                        )
+                    except ValueError as exc:
+                        st.error(f"Unable to combine files: {exc}")
+                    else:
+                        st.session_state.combined_expr_df = expr_df_combo
+                        st.session_state.combined_meta_df = meta_df_combo
+                        st.session_state.combined_expr_sources = expr_sources
+                        st.session_state.combined_meta_sources = meta_sources
+                        st.session_state.combined_expr_bytes = expr_df_combo.to_csv(
+                            index=False
+                        ).encode("utf-8")
+                        st.session_state.combined_meta_bytes = meta_df_combo.to_csv(
+                            index=False
+                        ).encode("utf-8")
+                        st.session_state.combined_expr_name = "expression_matrix_combined.csv"
+                        st.session_state.combined_meta_name = "cell_metadata_combined.csv"
+                        st.success("Combined dataset ready below.")
+
+            combined_expr_bytes = st.session_state.get("combined_expr_bytes")
+            combined_meta_bytes = st.session_state.get("combined_meta_bytes")
+            if combined_expr_bytes is not None and combined_meta_bytes is not None:
+                expr_df_combo = st.session_state["combined_expr_df"]
+                meta_df_combo = st.session_state["combined_meta_df"]
+                expr_summary = _summarize_sources(
+                    "Expression matrix", st.session_state.get("combined_expr_sources", [])
+                )
+                meta_summary = _summarize_sources(
+                    "Cell metadata", st.session_state.get("combined_meta_sources", [])
+                )
+                if expr_summary:
+                    st.caption(expr_summary)
+                if meta_summary:
+                    st.caption(meta_summary)
+                st.markdown(
+                    f"**Expression matrix:** {expr_df_combo.shape[0]:,} rows × "
+                    f"{expr_df_combo.shape[1]:,} columns"
+                )
+                st.markdown(
+                    f"**Cell metadata:** {meta_df_combo.shape[0]:,} rows × "
+                    f"{meta_df_combo.shape[1]:,} columns"
+                )
+                st.download_button(
+                    "Download expression_matrix_combined.csv",
+                    data=combined_expr_bytes,
+                    file_name=(
+                        st.session_state.get("combined_expr_name")
+                        or "expression_matrix_combined.csv"
+                    ),
+                    mime="text/csv",
+                    key="download_combined_expr",
+                )
+                st.download_button(
+                    "Download cell_metadata_combined.csv",
+                    data=combined_meta_bytes,
+                    file_name=(
+                        st.session_state.get("combined_meta_name")
+                        or "cell_metadata_combined.csv"
+                    ),
+                    mime="text/csv",
+                    key="download_combined_meta",
+                )
+                col_use, col_clear = st.columns(2)
+                if col_use.button(
+                    "Load combined data into dataset workflow",
+                    key="use_combined_dataset",
+                ):
+                    st.session_state.expr_df = expr_df_combo.copy()
+                    st.session_state.meta_df = meta_df_combo.copy()
+                    st.session_state.expr_name = (
+                        st.session_state.get("combined_expr_name")
+                        or "expression_matrix_combined.csv"
+                    )
+                    st.session_state.meta_name = (
+                        st.session_state.get("combined_meta_name")
+                        or "cell_metadata_combined.csv"
+                    )
+                    st.rerun()
+                if col_clear.button(
+                    "Clear combined dataset files",
+                    key="clear_combined_dataset",
+                ):
+                    for key in (
+                        "combined_expr_df",
+                        "combined_meta_df",
+                        "combined_expr_bytes",
+                        "combined_meta_bytes",
+                        "combined_expr_sources",
+                        "combined_meta_sources",
+                        "combined_expr_name",
+                        "combined_meta_name",
+                    ):
+                        if isinstance(st.session_state.get(key), list):
+                            st.session_state[key] = []
+                        else:
+                            st.session_state[key] = None
+                    st.rerun()
 
         if expr_file and meta_file:
             need = (st.session_state.expr_df is None or
@@ -1983,43 +2118,14 @@ with st.sidebar:
                     meta_file.name != st.session_state.meta_name)
             if need:
                 with st.spinner("Parsing expression / metadata …"):
-                    try:
-                        expr_df, expr_sources = load_combined_csv(
-                            expr_file, low_memory=False
-                        )
-                        meta_df, meta_sources = load_combined_csv(
-                            meta_file, low_memory=False
-                        )
-                    except ValueError as exc:
-                        st.session_state.expr_df = None
-                        st.session_state.meta_df = None
-                        st.session_state.expr_sources = []
-                        st.session_state.meta_sources = []
-                        st.session_state.expr_name = None
-                        st.session_state.meta_name = None
-                        st.error(f"Failed to parse uploaded dataset: {exc}")
-                    else:
-                        st.session_state.expr_df = expr_df
-                        st.session_state.meta_df = meta_df
-                        st.session_state.expr_sources = expr_sources
-                        st.session_state.meta_sources = meta_sources
-                        st.session_state.expr_name, st.session_state.meta_name = (
-                            expr_file.name, meta_file.name
-                        )
+                    st.session_state.expr_df = pd.read_csv(expr_file, low_memory=False)
+                    st.session_state.meta_df = pd.read_csv(meta_file, low_memory=False)
+                    st.session_state.expr_name, st.session_state.meta_name = (
+                        expr_file.name, meta_file.name
+                    )
 
         expr_df, meta_df = st.session_state.expr_df, st.session_state.meta_df
         if expr_df is not None and meta_df is not None:
-            expr_summary = _summarize_sources(
-                "Expression matrix", st.session_state.get("expr_sources") or []
-            )
-            meta_summary = _summarize_sources(
-                "Cell metadata", st.session_state.get("meta_sources") or []
-            )
-            if expr_summary:
-                st.caption(expr_summary)
-            if meta_summary:
-                st.caption(meta_summary)
-
             markers = [c for c in expr_df.columns if c != "cell_id"]
             if "batch" in meta_df.columns:
                 batches = meta_df["batch"].unique().tolist()

@@ -700,6 +700,105 @@ def _aligned_counts_csv() -> bytes:
     return df.to_csv(index=False).encode()
 
 
+def _dataset_tables(use_aligned: bool = False) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    """Build metadata/expression tables mirroring the combined CSV format."""
+
+    meta_df = st.session_state.get("meta_df")
+    expr_df = st.session_state.get("expr_df")
+    if meta_df is None or expr_df is None:
+        return None
+
+    meta_map = st.session_state.get("generated_meta", {}) or {}
+    if not meta_map:
+        return None
+
+    data_map = (
+        st.session_state.get("aligned_counts")
+        if use_aligned
+        else st.session_state.get("results_raw")
+    ) or {}
+    if not data_map:
+        return None
+
+    stems = [
+        stem
+        for stem in st.session_state.get("results", {})
+        if stem in data_map and stem in meta_map
+    ]
+    if not stems:
+        return None
+
+    marker_seen: list[str] = []
+    union_indices: set = set()
+    series_entries: list[tuple[str, pd.Series]] = []
+
+    for stem in stems:
+        info = meta_map.get(stem, {})
+        marker = info.get("marker")
+        sample = info.get("sample")
+        batch = info.get("batch")
+        if not marker:
+            continue
+        counts = data_map.get(stem)
+        if counts is None:
+            continue
+        indices = info.get("cell_indices")
+        if indices and not isinstance(indices, list):
+            indices = list(indices)
+        if not indices:
+            indices = _cell_indices_for(meta_df, sample, batch)
+        if not indices:
+            continue
+        arr = np.asarray(counts, dtype=float).ravel()
+        if arr.size == 0:
+            continue
+        if arr.size != len(indices):
+            limit = min(arr.size, len(indices))
+            arr = arr[:limit]
+            indices = list(indices)[:limit]
+        series = pd.Series(arr, index=pd.Index(indices))
+        series_entries.append((marker, series))
+        union_indices.update(series.index.tolist())
+        if marker not in marker_seen:
+            marker_seen.append(marker)
+
+    if not series_entries or not union_indices:
+        return None
+
+    mask = meta_df.index.isin(union_indices)
+    if not mask.any():
+        return None
+    meta_subset = meta_df.loc[mask].copy()
+
+    expr_columns = [c for c in expr_df.columns if c != "cell_id"]
+    marker_order = [c for c in expr_columns if c in marker_seen]
+    for marker in marker_seen:
+        if marker not in marker_order:
+            marker_order.append(marker)
+
+    expr_table = pd.DataFrame(index=meta_subset.index, columns=marker_order, dtype=float)
+    for marker, series in series_entries:
+        expr_table.loc[series.index, marker] = series.values
+
+    expr_table = expr_table.reindex(meta_subset.index)
+
+    if "cell_id" in expr_df.columns:
+        cell_ids = expr_df.loc[meta_subset.index, "cell_id"]
+        expr_table.insert(0, "cell_id", cell_ids.values)
+
+    return meta_subset.reset_index(drop=True), expr_table.reset_index(drop=True)
+
+
+def _dataset_csv_exports(*, aligned: bool = False) -> tuple[bytes | None, bytes | None]:
+    """Return (metadata_csv, expression_csv) for dataset-mode exports."""
+
+    tables = _dataset_tables(use_aligned=aligned)
+    if not tables:
+        return None, None
+    meta_tbl, expr_tbl = tables
+    return meta_tbl.to_csv(index=False).encode(), expr_tbl.to_csv(index=False).encode()
+
+
 def _protein_label() -> str:
     """Return a filesystem-safe protein/marker label for export filenames."""
 
@@ -750,11 +849,15 @@ def _make_before_alignment_zip() -> bytes:
 
     raw_png = _ensure_raw_ridge_png()
     processed_csv = _processed_counts_csv()
+    meta_csv, expr_csv = _dataset_csv_exports(aligned=False)
 
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
         if raw_png:
             z.writestr("before_alignment_ridge.png", raw_png)
+        if meta_csv and expr_csv:
+            z.writestr("cell_metadata_combined.csv", meta_csv)
+            z.writestr("expression_matrix_combined.csv", expr_csv)
         z.writestr("processed_data.csv", processed_csv)
     return out.getvalue()
 
@@ -766,6 +869,8 @@ def _make_final_alignment_zip() -> bytes:
     aligned_png = st.session_state.get("aligned_ridge_png")
     processed_csv = _processed_counts_csv()
     aligned_csv = _aligned_counts_csv()
+    meta_csv, expr_csv = _dataset_csv_exports(aligned=False)
+    meta_aligned_csv, expr_aligned_csv = _dataset_csv_exports(aligned=True)
 
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
@@ -773,9 +878,34 @@ def _make_final_alignment_zip() -> bytes:
             z.writestr("before_alignment_ridge.png", raw_png)
         if aligned_png:
             z.writestr("aligned_ridge.png", aligned_png)
+        if meta_csv and expr_csv:
+            z.writestr("cell_metadata_combined.csv", meta_csv)
+            z.writestr("expression_matrix_combined.csv", expr_csv)
+            if expr_aligned_csv:
+                z.writestr("expression_matrix_aligned.csv", expr_aligned_csv)
+        elif expr_aligned_csv:
+            if meta_aligned_csv:
+                z.writestr("cell_metadata_combined.csv", meta_aligned_csv)
+            z.writestr("expression_matrix_aligned.csv", expr_aligned_csv)
         z.writestr("processed_data.csv", processed_csv)
         z.writestr("aligned_data.csv", aligned_csv)
     return out.getvalue()
+
+
+def _cell_indices_for(
+    meta_df: pd.DataFrame,
+    sample: str,
+    batch: str | None,
+) -> list[int]:
+    """Return the DataFrame indices for ``sample`` and optional ``batch``."""
+
+    mask = meta_df["sample"].eq(sample)
+    if "batch" in meta_df.columns:
+        if batch is None:
+            mask &= meta_df["batch"].isna()
+        else:
+            mask &= meta_df["batch"].eq(batch)
+    return meta_df.index[mask].tolist()
 
 
 def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
@@ -792,6 +922,13 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
     sel_batch_set = set(sel_batch_clean)
 
     desired: dict[str, tuple[str, str, str | None]] = {}
+    index_cache: dict[tuple[str, str | None], list[int]] = {}
+
+    def _cached_indices(sample: str, batch: str | None) -> list[int]:
+        key = (sample, batch)
+        if key not in index_cache:
+            index_cache[key] = _cell_indices_for(meta_df, sample, batch)
+        return index_cache[key]
     for s in sel_s:
         batches = [None]
         if use_batches:
@@ -806,6 +943,9 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
                 continue
             batches = cleaned
         for b in batches:
+            cell_idx = _cached_indices(s, b)
+            if not cell_idx:
+                continue
             for m in sel_m:
                 stem = (
                     f"{s}_{m}_raw_counts"
@@ -819,15 +959,22 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         (stem, bio) for stem, bio in st.session_state.generated_csvs
         if stem in desired
     ]
-    st.session_state.generated_meta = {
-        stem: {
-            "sample": s,
-            "marker": m,
-            "batch": b,
-            "batch_label": _format_batch_label(b),
-        }
-        for stem, (s, m, b) in desired.items()
-    }
+    prev_meta = st.session_state.get("generated_meta", {}) or {}
+    updated_meta: dict[str, dict[str, object]] = {}
+    for stem, (s, m, b) in desired.items():
+        entry = dict(prev_meta.get(stem, {}))
+        entry.update(
+            {
+                "sample": s,
+                "marker": m,
+                "batch": b,
+                "batch_label": _format_batch_label(b),
+            }
+        )
+        if not entry.get("cell_indices"):
+            entry["cell_indices"] = list(_cached_indices(s, b))
+        updated_meta[stem] = entry
+    st.session_state.generated_meta = updated_meta
 
     # drop outdated results
     keep = set(desired)
@@ -852,10 +999,20 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
     for stem, (s, m, b) in desired.items():
         if stem in existing:
             continue
-        mask = meta_df["sample"].eq(s)
-        if use_batches and b is not None:
-            mask &= meta_df["batch"].eq(b)
-        vals = expr_df.loc[mask, m]
+        entry = st.session_state.generated_meta.setdefault(stem, {})
+        entry.update(
+            {
+                "sample": s,
+                "marker": m,
+                "batch": b,
+                "batch_label": _format_batch_label(b),
+            }
+        )
+        indices = entry.get("cell_indices")
+        if not indices:
+            indices = _cached_indices(s, b)
+        vals = expr_df.loc[indices, m]
+        entry["cell_indices"] = vals.index.tolist()
         if st.session_state.get("apply_arcsinh", True):
             counts = arcsinh_transform(
                 vals,
@@ -876,12 +1033,7 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         setattr(bio, "sample", s)
         setattr(bio, "batch", b)
         st.session_state.generated_csvs.append((stem, bio))
-        st.session_state.generated_meta[stem] = {
-            "sample": s,
-            "marker": m,
-            "batch": b,
-            "batch_label": _format_batch_label(b),
-        }
+        st.session_state.generated_meta[stem] = entry
 
 
 # ───────────────────────── helper: (re)plot a dataset ───────────────────────

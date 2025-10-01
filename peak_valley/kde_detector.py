@@ -8,11 +8,45 @@ __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
 
 
 # ----------------------------------------------------------------------
-# peak_valley/kde_detector.py
-import numpy as np
-
-# peak_valley/kde_detector.py  (only the helper changed)
+# Numerical stability guards
 # ----------------------------------------------------------------------
+
+# Require valleys to remain a safe fraction away from their neighbouring peaks.
+#
+# The previous implementation only ensured that the valley lay strictly between
+# the peaks.  When the KDE is very flat the numerical maximisation sometimes
+# returned a valley coordinate almost identical to a peak.  Downstream alignment
+# then attempted to stretch this near-zero interval to match the cohort average
+# which resulted in huge warp slopes (x-ranges exploding past 10^4 as reported
+# by users).  By enforcing a minimum spacing we keep the geometry well behaved.
+_VALLEY_GAP_FRACTION = 0.08
+
+
+def _enforce_min_valley_gap(
+    xs: np.ndarray,
+    left_idx: int,
+    valley_x: float,
+    right_idx: int | None,
+    gap_fraction: float = _VALLEY_GAP_FRACTION,
+) -> float:
+    """Clamp *valley_x* to stay a safe distance from neighbouring peaks."""
+
+    left_x = float(xs[left_idx])
+    if right_idx is None:
+        right_x = float(xs[-1])
+    else:
+        right_x = float(xs[right_idx])
+
+    span = max(right_x - left_x, np.finfo(float).eps)
+    min_gap = gap_fraction * span
+    valley_x = max(valley_x, left_x + min_gap)
+
+    if right_idx is not None:
+        valley_x = min(valley_x, right_x - min_gap)
+
+    return float(valley_x)
+
+
 def _merge_close_peaks(xs: np.ndarray,
                        ys: np.ndarray,
                        p_idx: np.ndarray,
@@ -216,7 +250,8 @@ def _first_valley_slope(xs: np.ndarray,
         if idx > min_idx:
             idx = min_idx
 
-    return float(xs[idx])
+    valley_x = float(xs[idx])
+    return _enforce_min_valley_gap(xs, p_left, valley_x, p_right)
 
 
 def _first_valley_drop(xs: np.ndarray,
@@ -242,7 +277,9 @@ def _first_valley_drop(xs: np.ndarray,
         idx_val = seg[turn[0]]
     else:
         idx_val = seg[np.argmin(ys[seg])]
-    return float(xs[idx_val])
+
+    valley_x = float(xs[idx_val])
+    return _enforce_min_valley_gap(xs, p_left, valley_x, None)
 
 
 def _valley_between(xs: np.ndarray,
@@ -261,11 +298,11 @@ def _valley_between(xs: np.ndarray,
     2. *Turning-point rule* from previous version (first slope –→+ bend).
     3. *Steep-slope rule* (NEW):
        • if right-hand peak is HIGHER   →  pick the grid point where the
-         **up-slope**  (first derivative) is most positive;  
+         **up-slope**  (first derivative) is most positive;
        • if right-hand peak is LOWER    →  pick the grid point where the
          **down-slope** (first derivative) is most negative.
-    A small safety shift (`grid_half`) is applied at the end so the
-    valley is at least ~½ % of the interval away from either peak.
+    A safety shift is applied at the end so the valley stays roughly
+    8 % of the interval away from either peak.
     """
     seg = np.arange(p_left + 1, p_right)           # interior points
     if seg.size == 0:                              # adjacent peaks
@@ -307,14 +344,8 @@ def _valley_between(xs: np.ndarray,
             rel = np.argmin(dy_seg)                         # steepest ↓ slope
         valley_idx = cand_left + rel
 
-        # ── 4. safety-shift so valley ≠ peak ──────────────────────────
-    min_sep   = 0.05 * (xs[p_right] - xs[p_left])      # 10 % of peak gap
-    if (xs[valley_idx] - xs[p_left]  < min_sep or
-        xs[p_right]  - xs[valley_idx] < min_sep):
-
-        valley_idx = (p_left + p_right) // 2           # exact mid-point
-
-    return float(xs[valley_idx])
+    valley_x = float(xs[valley_idx])
+    return _enforce_min_valley_gap(xs, p_left, valley_x, p_right)
 
 
 

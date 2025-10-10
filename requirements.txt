@@ -4,6 +4,7 @@ numpy
 pandas
 matplotlib
 scipy
-streamlit
 openai
 scikit-learn
+# Optional for CUDA acceleration (install manually if desired)
+# cupy-cuda11x

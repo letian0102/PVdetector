@@ -1,7 +1,9 @@
 from __future__ import annotations
 import numpy as np
 from scipy.stats  import gaussian_kde
-from scipy.signal import find_peaks, fftconvolve
+from scipy.signal import find_peaks
+
+from .backend import get_array_backend
 from .consistency import _enforce_valley_rule
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
@@ -119,26 +121,34 @@ def _fft_gaussian_kde(
     if not np.isfinite(grid_dx) or grid_dx <= 0:
         return np.zeros_like(xs)
 
-    # Histogram aligned with the KDE grid (bin centers = xs)
-    edges = np.linspace(
-        xs[0] - 0.5 * grid_dx,
-        xs[-1] + 0.5 * grid_dx,
-        xs.size + 1,
-    )
-    counts, _ = np.histogram(x, bins=edges)
+    backend = get_array_backend()
+    xp = backend.xp
+    signal = backend.signal
 
-    if not counts.any():
+    x_dev = xp.asarray(x)
+    xs_dev = xp.asarray(xs)
+
+    # Histogram aligned with the KDE grid (bin centers = xs)
+    edges = xp.linspace(
+        xs_dev[0] - 0.5 * grid_dx,
+        xs_dev[-1] + 0.5 * grid_dx,
+        xs_dev.size + 1,
+    )
+    counts, _ = xp.histogram(x_dev, bins=edges)
+
+    if counts.sum().item() == 0:
         return np.zeros_like(xs)
 
     # Truncate kernel at ±4σ (covers >99.99 % of mass)
     max_radius = max(1, int(np.ceil(4.0 * bandwidth / grid_dx)))
     max_radius = min(max_radius, xs.size // 2)
-    offsets = np.arange(-max_radius, max_radius + 1)
-    kernel = np.exp(-0.5 * ((offsets * grid_dx) / bandwidth) ** 2)
+    offsets = xp.arange(-max_radius, max_radius + 1)
+    kernel = xp.exp(-0.5 * ((offsets * grid_dx) / bandwidth) ** 2)
     kernel /= kernel.sum()
 
-    smooth = fftconvolve(counts, kernel, mode="same")
-    return smooth / (x.size * grid_dx)
+    smooth = signal.fftconvolve(counts, kernel, mode="same")
+    result = smooth / (x_dev.size * grid_dx)
+    return backend.to_cpu(result)
 
 
 def _evaluate_kde(

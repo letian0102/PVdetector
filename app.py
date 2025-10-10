@@ -17,6 +17,7 @@ from peak_valley import (
     kde_peaks_valleys, quick_peak_estimate,
     fig_to_png, enforce_marker_consistency,
 )
+from peak_valley.backend import backend_description, get_array_backend
 from peak_valley.gpt_adapter import (
     ask_gpt_peak_count, ask_gpt_prominence, ask_gpt_bandwidth,
 )
@@ -28,6 +29,15 @@ st.title("Peak & Valley Detector — CSV *or* full dataset")
 st.warning(
     "**Heads-up:** if you refresh or close this page, all of your uploaded data and results will be lost."
 )
+
+backend = get_array_backend()
+backend_label = backend_description()
+if backend.is_gpu:
+    st.success(f"CUDA acceleration enabled ({backend_label}).")
+else:
+    st.caption(
+        f"Computation backend: {backend_label}. Set PV_USE_CUDA=1 to prefer CUDA when available."
+    )
 
 st.markdown(
     (

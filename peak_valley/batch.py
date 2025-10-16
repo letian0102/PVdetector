@@ -78,6 +78,7 @@ class BatchOptions:
     arcsinh_a: float = 1.0
     arcsinh_b: float = 1 / 5
     arcsinh_c: float = 0.0
+    export_plots: bool = False
 
     # detector configuration
     n_peaks: Optional[int] = None
@@ -843,107 +844,46 @@ def export_summary(batch: BatchResults) -> pd.DataFrame:
     return pd.DataFrame(columns=["stem", "sample", "marker", "batch", "n_peaks", "peaks", "valleys", "quality"])
 
 
-def counts_to_string(array: np.ndarray | None) -> str:
-    if array is None or array.size == 0:
-        return "[]"
-    values: list[str] = []
-    for val in np.asarray(array).ravel():
-        if val is None or (isinstance(val, float) and not math.isfinite(val)):
-            values.append("null")
-        else:
-            values.append(format(float(val), ".15g"))
-    return "[" + "; ".join(values) + "]"
-
-
 def save_outputs(
     batch: BatchResults,
     output_dir: str | Path,
     *,
     run_metadata: Mapping[str, Any] | None = None,
+    export_plots: bool = False,
 ) -> None:
-    """Persist summary files, per-sample exports and optional alignment."""
+    """Persist batch outputs mirroring the Streamlit downloads."""
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    plots_dir = out / "plots"
-    curves_dir = out / "curves"
-    counts_dir = out / "counts"
-    aligned_dir = out / "aligned_curves"
-    plots_dir.mkdir(exist_ok=True)
-    curves_dir.mkdir(exist_ok=True)
-    counts_dir.mkdir(exist_ok=True)
-    if batch.aligned_landmarks is not None:
-        aligned_dir.mkdir(exist_ok=True)
-
-    import matplotlib.pyplot as plt
-
     summary_df = export_summary(batch)
     summary_df.to_csv(out / "summary.csv", index=False)
 
-    processed_rows: list[dict[str, Any]] = []
-    aligned_rows: list[dict[str, Any]] = []
+    if export_plots:
+        plots_dir = out / "plots"
+        plots_dir.mkdir(exist_ok=True)
 
-    for res in batch.samples:
-        stem = res.stem
-        xs = res.xs
-        ys = res.ys
+        import matplotlib.pyplot as plt
 
-        df_curve = pd.DataFrame({"x": xs, "density": ys})
-        df_curve.to_csv(curves_dir / f"{stem}.csv", index=False)
+        for res in batch.samples:
+            xs = np.asarray(res.xs, float)
+            ys = np.asarray(res.ys, float)
+            if xs.size == 0 or ys.size == 0:
+                continue
 
-        df_counts = pd.DataFrame({"normalized_counts": res.counts})
-        df_counts.to_csv(counts_dir / f"{stem}.csv", index=False)
-
-        fig, ax = plt.subplots(figsize=(5, 2.5), dpi=150)
-        ax.plot(xs, ys, color="tab:blue")
-        ax.fill_between(xs, 0, ys, color="tab:blue", alpha=0.2)
-        for p in res.peaks:
-            ax.axvline(p, color="tab:red", linestyle="--", linewidth=1)
-        for v in res.valleys:
-            ax.axvline(v, color="tab:green", linestyle=":", linewidth=1)
-        ax.set_title(stem)
-        ax.set_xlabel("Arcsinh counts")
-        ax.set_ylabel("Density")
-        fig.tight_layout()
-        fig.savefig(plots_dir / f"{stem}.png")
-        plt.close(fig)
-
-        meta = res.metadata
-        processed_rows.append(
-            {
-                "stem": stem,
-                "sample": meta.get("sample"),
-                "marker": meta.get("marker"),
-                "batch": meta.get("batch"),
-                "normalized_counts": counts_to_string(res.counts),
-            }
-        )
-
-        if res.aligned_counts is not None:
-            aligned_rows.append(
-                {
-                    "stem": stem,
-                    "sample": meta.get("sample"),
-                    "marker": meta.get("marker"),
-                    "batch": meta.get("batch"),
-                    "aligned_normalized_counts": counts_to_string(res.aligned_counts),
-                }
-            )
-            if res.aligned_density is not None:
-                xs_a, ys_a = res.aligned_density
-                pd.DataFrame({"x": xs_a, "density": ys_a}).to_csv(
-                    aligned_dir / f"{stem}.csv",
-                    index=False,
-                )
-
-    pd.DataFrame(processed_rows).to_csv(out / "processed_counts.csv", index=False)
-    if aligned_rows:
-        pd.DataFrame(aligned_rows).to_csv(out / "aligned_counts.csv", index=False)
-    if batch.aligned_landmarks is not None:
-        pd.DataFrame(batch.aligned_landmarks).to_csv(
-            out / "aligned_landmarks.csv", index=False, header=False
-        )
+            fig, ax = plt.subplots(figsize=(5, 2.5), dpi=150)
+            ax.plot(xs, ys, color="tab:blue")
+            ax.fill_between(xs, 0, ys, color="tab:blue", alpha=0.2)
+            for p in res.peaks:
+                ax.axvline(p, color="tab:red", linestyle="--", linewidth=1)
+            for v in res.valleys:
+                ax.axvline(v, color="tab:green", linestyle=":", linewidth=1)
+            ax.set_title(res.stem)
+            ax.set_xlabel("Arcsinh counts")
+            ax.set_ylabel("Density")
+            fig.tight_layout()
+            fig.savefig(plots_dir / f"{res.stem}.png")
+            plt.close(fig)
 
     manifest = results_to_dict(batch)
     if run_metadata:
@@ -1086,7 +1026,7 @@ def _dataset_exports(
 
 
 def _ridge_plot_png(samples: Sequence[SampleResult], *, aligned: bool) -> bytes | None:
-    curves: list[tuple[str, np.ndarray, np.ndarray, list[float], list[float]]] = []
+    curves: list[tuple[str, np.ndarray, np.ndarray, list[float], list[float], float]] = []
     for res in samples:
         xs: np.ndarray
         ys: np.ndarray
@@ -1100,13 +1040,14 @@ def _ridge_plot_png(samples: Sequence[SampleResult], *, aligned: bool) -> bytes 
             ys = np.asarray(res.ys, float)
         if xs.size == 0 or ys.size == 0:
             continue
-        curves.append((res.stem, xs, ys, list(res.peaks), list(res.valleys)))
+        height = max(float(np.nanmax(ys)), 1e-6)
+        curves.append((res.stem, xs, ys, list(res.peaks), list(res.valleys), height))
 
     if not curves:
         return None
 
-    x_min = min(float(xs.min()) for _, xs, _, _, _ in curves)
-    x_max = max(float(xs.max()) for _, xs, _, _, _ in curves)
+    x_min = min(float(xs.min()) for _, xs, _, _, _, _ in curves)
+    x_max = max(float(xs.max()) for _, xs, _, _, _, _ in curves)
     if not np.isfinite(x_min) or not np.isfinite(x_max):
         return None
 
@@ -1115,20 +1056,21 @@ def _ridge_plot_png(samples: Sequence[SampleResult], *, aligned: bool) -> bytes 
     else:
         pad = 0.05 * (x_max - x_min)
 
-    y_max = max(float(ys.max()) for _, _, ys, _, _ in curves)
-    if not np.isfinite(y_max) or y_max <= 0:
-        y_max = 1.0
-    gap = 1.2 * y_max
+    offsets: list[float] = []
+    current_offset = 0.0
+    for _, _, _, _, _, height in curves:
+        offsets.append(current_offset)
+        step = max(height, 1e-6) * 1.2
+        current_offset += step
 
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(6, 0.8 * max(len(curves), 1)), dpi=150, sharex=True)
 
-    for idx, (stem, xs, ys, peaks, valleys) in enumerate(curves):
-        offset = idx * gap
+    for offset, (stem, xs, ys, peaks, valleys, height) in zip(offsets, curves):
         ax.plot(xs, ys + offset, color="black", lw=1)
         ax.fill_between(xs, offset, ys + offset, color="#FFA50088", lw=0)
-        ymax_local = max(float(ys.max()), 1e-6)
+        ymax_local = max(height, 1e-6)
         for p in peaks:
             try:
                 peak_val = float(p)
@@ -1152,7 +1094,7 @@ def _ridge_plot_png(samples: Sequence[SampleResult], *, aligned: bool) -> bytes 
                 )
         ax.text(
             x_min,
-            offset + 0.5 * y_max,
+            offset + 0.5 * ymax_local,
             stem,
             ha="right",
             va="center",

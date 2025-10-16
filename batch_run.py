@@ -199,6 +199,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="api_key",
         help="OpenAI API key for GPT-assisted suggestions (overrides OPENAI_API_KEY environment variable).",
     )
+    parser.add_argument(
+        "--export-plots",
+        action="store_true",
+        help="Also write per-sample density plots into an output 'plots' folder.",
+    )
 
     return parser
 
@@ -221,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     options.arcsinh_b = args.arcsinh_b
     options.arcsinh_c = args.arcsinh_c
     options.apply_arcsinh = True if args.apply_arcsinh is None else bool(args.apply_arcsinh)
+    options.export_plots = bool(args.export_plots)
 
     options.max_peaks = max(1, args.max_peaks)
     options.min_width = max(0, args.min_width)
@@ -326,7 +332,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[warning] Failed to initialise OpenAI client: {exc}", file=sys.stderr)
 
     batch = run_batch(samples_inputs, options, overrides, gpt_client)
-    save_outputs(batch, args.output_dir, run_metadata=run_metadata)
+    save_outputs(
+        batch,
+        args.output_dir,
+        run_metadata=run_metadata,
+        export_plots=options.export_plots,
+    )
 
     print(f"Processed {len(batch.samples)} sample(s). Results saved to {args.output_dir}.")
     return 0

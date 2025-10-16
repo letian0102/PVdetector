@@ -70,13 +70,14 @@ Key flags:
 - `--workers`: run multiple samples in parallel.
 - Pass `--bandwidth auto`, `--prominence auto`, or `--n-peaks auto` to enable
   GPT-powered suggestions (requires `OPENAI_API_KEY`).
+- `--export-plots`: include per-sample density PNGs alongside the summary
+  outputs.
 
-Outputs are written to `--output-dir` and include per-sample density plots,
-counts, summaries, optional aligned data, and a `results.json` manifest. A
-`before_after_alignment.zip` bundle mirrors the Streamlit "before/after"
-download, providing combined metadata/expression CSVs and stacked ridge plots
-without per-sample CSVs. Counts can be uploaded back into the Streamlit
-interface for ad-hoc fine-tuning if needed.
+By default, outputs in `--output-dir` comprise `summary.csv`, `results.json`,
+and the `before_after_alignment.zip` bundle that mirrors the Streamlit
+"before/after" download (combined metadata/expression CSVs plus stacked ridge
+plots, without per-sample CSVs). Pass `--export-plots` to add a `plots/`
+directory containing the individual density visuals.
 
 ## Usage
 ### A. Upload counts CSV files

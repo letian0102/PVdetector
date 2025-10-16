@@ -48,8 +48,10 @@ def test_run_batch_on_counts(tmp_path):
     summary_df = pd.read_csv(summary_path)
     assert counts_path.stem in summary_df["stem"].tolist()
 
-    plots = list((out_dir / "plots").glob("*.png"))
-    assert plots, "Expected per-sample plot export"
+    assert not (out_dir / "plots").exists()
+    assert not (out_dir / "counts").exists()
+    assert not (out_dir / "curves").exists()
+    assert not (out_dir / "aligned_curves").exists()
 
     results_path = out_dir / "results.json"
     assert results_path.exists()
@@ -122,6 +124,28 @@ def test_combined_zip_has_expected_exports(tmp_path):
         meta_bytes = archive.read("before_alignment/cell_metadata_combined.csv")
         meta_df = pd.read_csv(io.BytesIO(meta_bytes))
         assert set(meta_df["sample"]) == {"S1", "S2"}
+
+    assert not (out_dir / "processed_counts.csv").exists()
+    assert not (out_dir / "aligned_counts.csv").exists()
+    assert not (out_dir / "aligned_landmarks.csv").exists()
+
+
+def test_optional_plot_export(tmp_path):
+    rng = np.random.default_rng(123)
+    values = rng.normal(size=400)
+    counts_path = tmp_path / "SampleB_CD19_raw_counts.csv"
+    _write_counts(counts_path, values)
+
+    options = BatchOptions(apply_arcsinh=False)
+    samples = collect_counts_files([counts_path], options, header_row=-1, skip_rows=0)
+    batch = run_batch(samples, options)
+
+    out_dir = tmp_path / "with_plots"
+    save_outputs(batch, out_dir, export_plots=True)
+
+    plots_dir = out_dir / "plots"
+    assert plots_dir.exists()
+    assert any(plots_dir.glob("*.png"))
 
 
 def test_stain_quality_handles_missing_valleys():

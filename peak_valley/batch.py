@@ -96,7 +96,7 @@ class BatchOptions:
     valley_drop: float = 10.0  # percent of peak height
     first_valley: str = "slope"  # or "drop"
 
-    apply_consistency: bool = True
+    apply_consistency: bool = False
     consistency_tol: float = 0.5
 
     align: bool = False

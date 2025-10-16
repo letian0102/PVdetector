@@ -7,7 +7,7 @@ PVdetector is a Streamlit application for detecting density peaks and valleys in
 - Optional arcsinh transformation with adjustable parameters \(a, b, c\).
 - Automatic or manual control over KDE bandwidth, peak count, and prominence. GPT-based suggestions (bandwidth scans multiple candidates for optimal peak separation) are available when an OpenAI API key is provided.
 - Interactive per-sample visualization with manual editing of peaks and valleys.
-- Optional enforcement of marker consistency across samples.
+- Optional enforcement of marker consistency across samples (disabled by default for batch runs).
 - Landmark alignment and piece-wise linear normalization across samples.
 - Downloadable outputs: per-sample curves, aligned data, stain-quality scores, and summary tables.
 
@@ -49,17 +49,7 @@ python batch_run.py \
 Key flags:
 
 - `--counts`: process individual `*_raw_counts.csv` files (repeatable).
-- `--expression-file` / `--metadata-file`: analyse a whole dataset; combine with
-  `--marker`, `--sample`, and `--batch` to filter selections. Pass `--marker all`
-  or `--sample all` to process every marker/sample without enumerating them.
-- Preprocessing mirrors the app: use `--apply-arcsinh` (default) or
-  `--skip-arcsinh`, and customise the transform via `--arcsinh-a`,
-  `--arcsinh-b`, and `--arcsinh-c`.
-- Detection parameters (`--n-peaks`, `--bandwidth`, `--prominence`,
-  `--min-width`, `--curvature`, `--turning-points`, `--min-separation`,
-  `--grid-size`, `--valley-drop`, `--first-valley`) mirror the Streamlit controls.
-- `--align` with optional `--alignment-mode` and `--alignment-target` performs
-  landmark alignment and exports aligned densities and counts.
+- `--expression-file` / `--metadata-file`: analyse a whole dataset; combine with `--marker`, `--sample`, and `--batch` to filter selections. Pass `--marker all` or `--sample all` to process every marker/sample without enumerating them.
 - `--override-file`: JSON mapping of global/marker/sample/stem overrides, e.g.
   ```json
   {
@@ -67,11 +57,45 @@ Key flags:
     "stems": {"SampleA_CD3_raw_counts": {"bandwidth": 0.8}}
   }
   ```
-- `--workers`: run multiple samples in parallel.
-- Pass `--bandwidth auto`, `--prominence auto`, or `--n-peaks auto` to enable
-  GPT-powered suggestions (requires `OPENAI_API_KEY`).
-- `--export-plots`: include per-sample density PNGs alongside the summary
-  outputs.
+
+### CLI parameter reference
+
+| Parameter | Example usage | Accepted values / notes |
+|-----------|---------------|-------------------------|
+| `--counts` | `--counts SampleA_CD3_raw_counts.csv --counts SampleB_CD4_raw_counts.csv` | Path(s) to individual counts CSV files; repeat per file. |
+| `--expression-file` | `--expression-file expression_matrix_combined.csv` | Combined expression matrix for dataset mode; use with `--metadata-file`. |
+| `--metadata-file` | `--metadata-file cell_metadata_combined.csv` | Metadata CSV that pairs with `--expression-file`. |
+| `--marker` | `--marker CD3` | Comma-separated or repeatable marker list; use `--marker all`/`*` for every marker. |
+| `--sample` | `--sample SampleA,SampleB` | Comma-separated or repeatable sample list; use `--sample all`/`*` for every sample. |
+| `--batch` | `--batch B1 --batch none` | Comma-separated or repeatable batch filters; `none`/`null` selects missing batches. |
+| `--output-dir` | `--output-dir results_batch` | Destination folder; created if absent. |
+| `--header-row` | `--header-row -1` | Header row index for raw counts (`-1` = no header). |
+| `--skip-rows` | `--skip-rows 2` | Number of initial lines to ignore in counts CSVs. |
+| `--apply-arcsinh` / `--skip-arcsinh` | `--skip-arcsinh` | Toggle arcsinh preprocessing; default is to apply it. |
+| `--arcsinh-a` | `--arcsinh-a 1.5` | Positive scaling parameter `a` for arcsinh transform. |
+| `--arcsinh-b` | `--arcsinh-b 0.2` | Scaling parameter `b`; provide a decimal float. |
+| `--arcsinh-c` | `--arcsinh-c -1.0` | Offset parameter `c`; may be negative. |
+| `--n-peaks` | `--n-peaks 2` | Fixed peak count or `auto`/`gpt` for automatic selection. |
+| `--max-peaks` | `--max-peaks 4` | Upper bound on peaks considered during automatic runs. |
+| `--bandwidth` | `--bandwidth 0.6` | KDE bandwidth value, preset (`scott`, `silverman`), or `auto`/`gpt`. |
+| `--prominence` | `--prominence 0.08` | Minimum prominence (`auto`/`gpt` allowed). |
+| `--min-width` | `--min-width 30` | Minimum sample count per detected peak. |
+| `--curvature` | `--curvature 0.0005` | Curvature threshold for peak detection. |
+| `--turning-points` | `--turning-points` | Flag to treat concave-down turning points as peaks. |
+| `--min-separation` | `--min-separation 0.5` | Minimum distance between peaks in marker units. |
+| `--grid-size` | `--grid-size 40000` | Number of KDE evaluation points (minimum 4000). |
+| `--valley-drop` | `--valley-drop 12.5` | Percent drop required between peaks. |
+| `--first-valley` | `--first-valley drop` | Strategy for the first valley: `slope` or `drop`. |
+| `--apply-consistency-match` / `--skip-consistency-match` | `--apply-consistency-match` | Toggle cross-sample marker consistency; disabled by default. |
+| `--consistency-tol` | `--consistency-tol 0.3` | Allowed variation when consistency matching is enabled. |
+| `--align` | `--align` | Enable landmark alignment and normalisation. |
+| `--alignment-mode` | `--alignment-mode negPeak_valley` | Alignment template: `negPeak`, `negPeak_valley`, `negPeak_valley_posPeak`, or `valley`. |
+| `--alignment-target` | `--alignment-target -1.5,0.0,1.5` | Comma-separated landmark targets; defaults to cohort medians. |
+| `--workers` | `--workers 4` | Number of parallel worker threads. |
+| `--override-file` | `--override-file overrides.json` | JSON overrides for global/marker/sample/stem settings. |
+| `--gpt-model` | `--gpt-model gpt-4o-mini` | Override GPT model name when using automatic suggestions. |
+| `--api-key` | `--api-key sk-...` | OpenAI API key; overrides the `OPENAI_API_KEY` environment variable. |
+| `--export-plots` | `--export-plots` | Emit per-sample ridge PNGs inside a `plots/` folder. |
 
 By default, outputs in `--output-dir` comprise `summary.csv`, `results.json`,
 and the `before_after_alignment.zip` bundle that mirrors the Streamlit

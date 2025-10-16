@@ -268,10 +268,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Method for the first valley after the leading peak.",
     )
 
-    parser.add_argument("--consistency-tol", type=float, default=0.5, help="Tolerance for marker consistency enforcement.")
-    parser.add_argument("--consistency", dest="consistency", action="store_true", help="Enforce marker consistency.")
-    parser.add_argument("--no-consistency", dest="consistency", action="store_false", help="Disable marker consistency.")
-    parser.set_defaults(consistency=None)
+    parser.add_argument(
+        "--consistency-tol",
+        type=float,
+        default=0.5,
+        help="Tolerance for marker consistency enforcement.",
+    )
+    parser.add_argument(
+        "--apply-consistency-match",
+        dest="apply_consistency",
+        action="store_true",
+        help="Enforce marker consistency across samples.",
+    )
+    parser.add_argument(
+        "--skip-consistency-match",
+        dest="apply_consistency",
+        action="store_false",
+        help="Skip marker consistency matching (default).",
+    )
+    # Backwards compatibility for previous --consistency/--no-consistency flags.
+    parser.add_argument(
+        "--consistency",
+        dest="apply_consistency",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--no-consistency",
+        dest="apply_consistency",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    parser.set_defaults(apply_consistency=False)
 
     parser.add_argument("--align", action="store_true", help="Align and normalise distributions after detection.")
     parser.add_argument(
@@ -330,8 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     options.valley_drop = args.valley_drop
     options.first_valley = args.first_valley
     options.consistency_tol = args.consistency_tol
-    if args.consistency is not None:
-        options.apply_consistency = bool(args.consistency)
+    options.apply_consistency = bool(args.apply_consistency)
 
     options.align = bool(args.align)
     options.align_mode = args.alignment_mode

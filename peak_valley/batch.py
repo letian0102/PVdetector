@@ -12,6 +12,7 @@ import io
 import json
 import math
 import zipfile
+from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
@@ -755,6 +756,28 @@ def collect_dataset_samples(
     return prepared, run_meta
 
 
+def _jsonify(value: Any) -> Any:
+    """Convert numpy/pandas objects into JSON-serialisable Python values."""
+
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return [_jsonify(v) for v in value.tolist()]
+    if isinstance(value, MappingABC):
+        return {str(k): _jsonify(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonify(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    if value is pd.NaT:
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, pd.Timedelta):
+        return value.isoformat()
+    return value
+
+
 def results_to_dict(batch: BatchResults) -> dict[str, Any]:
     """Convert results into a JSON-serialisable structure."""
 
@@ -763,11 +786,11 @@ def results_to_dict(batch: BatchResults) -> dict[str, Any]:
     }
 
     if batch.aligned_landmarks is not None:
-        payload["aligned_landmarks"] = batch.aligned_landmarks.tolist()
+        payload["aligned_landmarks"] = _jsonify(batch.aligned_landmarks)
     if batch.alignment_mode:
         payload["alignment_mode"] = batch.alignment_mode
     if batch.target_landmarks is not None:
-        payload["target_landmarks"] = list(batch.target_landmarks)
+        payload["target_landmarks"] = _jsonify(batch.target_landmarks)
 
     for res in batch.samples:
         sample_payload = {
@@ -775,8 +798,8 @@ def results_to_dict(batch: BatchResults) -> dict[str, Any]:
             "peaks": [float(p) for p in res.peaks],
             "valleys": [float(v) for v in res.valleys],
             "quality": float(res.quality),
-            "metadata": dict(res.metadata),
-            "params": res.params,
+            "metadata": _jsonify(res.metadata),
+            "params": _jsonify(res.params),
             "arcsinh": {
                 "applied": bool(res.arcsinh_signature[0]),
                 "a": float(res.arcsinh_signature[1]),
@@ -924,7 +947,7 @@ def save_outputs(
 
     manifest = results_to_dict(batch)
     if run_metadata:
-        manifest["run_metadata"] = dict(run_metadata)
+        manifest["run_metadata"] = _jsonify(run_metadata)
     with open(out / "results.json", "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
 

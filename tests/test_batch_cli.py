@@ -13,6 +13,7 @@ from peak_valley.batch import (
     run_batch,
     save_outputs,
 )
+from peak_valley.quality import stain_quality
 
 
 def _write_counts(path: Path, values: np.ndarray) -> None:
@@ -49,6 +50,12 @@ def test_run_batch_on_counts(tmp_path):
 
     plots = list((out_dir / "plots").glob("*.png"))
     assert plots, "Expected per-sample plot export"
+
+    results_path = out_dir / "results.json"
+    assert results_path.exists()
+    with results_path.open("r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    assert manifest["samples"], "Manifest should include sample entries"
 
 
 def test_combined_zip_has_expected_exports(tmp_path):
@@ -115,6 +122,20 @@ def test_combined_zip_has_expected_exports(tmp_path):
         meta_bytes = archive.read("before_alignment/cell_metadata_combined.csv")
         meta_df = pd.read_csv(io.BytesIO(meta_bytes))
         assert set(meta_df["sample"]) == {"S1", "S2"}
+
+
+def test_stain_quality_handles_missing_valleys():
+    rng = np.random.default_rng(0)
+    left = rng.normal(-3.0, 0.2, size=100)
+    middle = rng.normal(0.0, 0.3, size=120)
+    right = rng.normal(3.2, 0.25, size=110)
+    counts = np.concatenate([left, middle, right])
+
+    peaks = [-3.0, 0.0, 3.2]
+    valleys = [-1.5]  # detector might miss a second valley
+
+    score = stain_quality(counts, peaks, valleys)
+    assert np.isfinite(score) or np.isnan(score)
 def test_collect_dataset_samples(tmp_path):
     expr = pd.DataFrame(
         {

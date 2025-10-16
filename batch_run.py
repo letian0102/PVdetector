@@ -178,6 +178,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workers", type=int, default=1, help="Number of parallel worker threads.")
     parser.add_argument("--override-file", help="JSON file with per-sample or per-marker overrides.")
     parser.add_argument("--gpt-model", help="Custom OpenAI model name for GPT-assisted suggestions.")
+    parser.add_argument(
+        "--api-key",
+        dest="api_key",
+        help="OpenAI API key for GPT-assisted suggestions (overrides OPENAI_API_KEY environment variable).",
+    )
 
     return parser
 
@@ -287,9 +292,13 @@ def main(argv: list[str] | None = None) -> int:
     need_gpt = options.bandwidth_auto or options.prominence_auto or options.n_peaks_auto
     gpt_client = None
     if need_gpt:
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = args.api_key or os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            print("[warning] GPT-enabled options requested but OPENAI_API_KEY is not set. Falling back to defaults.", file=sys.stderr)
+            print(
+                "[warning] GPT-enabled options requested but no API key was provided via --api-key or OPENAI_API_KEY. "
+                "Falling back to defaults.",
+                file=sys.stderr,
+            )
         elif OpenAI is None:
             print("[warning] openai package is not available. GPT features will be skipped.", file=sys.stderr)
         else:

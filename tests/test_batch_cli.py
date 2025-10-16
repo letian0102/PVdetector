@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from peak_valley.batch import (
     BatchOptions,
@@ -34,6 +35,8 @@ def test_run_batch_on_counts(tmp_path):
     options = BatchOptions(apply_arcsinh=False)
     samples = collect_counts_files([counts_path], options, header_row=-1, skip_rows=0)
     batch = run_batch(samples, options)
+    assert not batch.interrupted
+    assert not batch.interrupted
 
     assert len(batch.samples) == 1
     result = batch.samples[0]
@@ -58,6 +61,7 @@ def test_run_batch_on_counts(tmp_path):
     with results_path.open("r", encoding="utf-8") as fh:
         manifest = json.load(fh)
     assert manifest["samples"], "Manifest should include sample entries"
+    assert manifest.get("interrupted") is False
 
 
 def test_combined_zip_has_expected_exports(tmp_path):
@@ -105,6 +109,7 @@ def test_combined_zip_has_expected_exports(tmp_path):
     )
 
     batch = run_batch(samples, options)
+    assert not batch.interrupted
     out_dir = tmp_path / "outputs"
     save_outputs(batch, out_dir, run_metadata=meta_info)
 
@@ -139,6 +144,7 @@ def test_optional_plot_export(tmp_path):
     options = BatchOptions(apply_arcsinh=False)
     samples = collect_counts_files([counts_path], options, header_row=-1, skip_rows=0)
     batch = run_batch(samples, options)
+    assert not batch.interrupted
 
     out_dir = tmp_path / "with_plots"
     save_outputs(batch, out_dir, export_plots=True)
@@ -196,3 +202,46 @@ def test_collect_dataset_samples(tmp_path):
     assert sample.metadata["batch"] == "B1"
     assert np.allclose(sample.counts, np.array([1.0, 2.0]))
     assert "expression_sources" in meta_info
+
+
+def test_run_batch_handles_keyboard_interrupt(tmp_path, monkeypatch):
+    rng = np.random.default_rng(321)
+    values_a = rng.normal(loc=0.5, scale=0.1, size=200)
+    values_b = rng.normal(loc=1.5, scale=0.2, size=200)
+
+    path_a = tmp_path / "SampleX_CD3_raw_counts.csv"
+    path_b = tmp_path / "SampleY_CD3_raw_counts.csv"
+    _write_counts(path_a, values_a)
+    _write_counts(path_b, values_b)
+
+    options = BatchOptions(apply_arcsinh=False)
+    samples = collect_counts_files([path_a, path_b], options, header_row=-1, skip_rows=0)
+
+    import peak_valley.batch as batch_mod
+
+    original_process = batch_mod.process_sample
+    call_count = {"count": 0}
+
+    def fake_process(sample, opts, overrides, gpt_client):
+        call_count["count"] += 1
+        if call_count["count"] >= 2:
+            raise KeyboardInterrupt()
+        return original_process(sample, opts, overrides, gpt_client)
+
+    monkeypatch.setattr(batch_mod, "process_sample", fake_process)
+
+    batch = run_batch(samples, options)
+
+    assert batch.interrupted is True
+    assert len(batch.samples) == 1
+
+    out_dir = tmp_path / "partial"
+    save_outputs(batch, out_dir)
+
+    summary_path = out_dir / "summary.csv"
+    assert summary_path.exists()
+    results_path = out_dir / "results.json"
+    with results_path.open("r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    assert manifest.get("interrupted") is True
+    assert manifest["samples"], "Partial samples should still be exported"

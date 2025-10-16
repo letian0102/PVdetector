@@ -15,7 +15,7 @@ import zipfile
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
@@ -125,6 +125,20 @@ class BatchResults:
     aligned_landmarks: Optional[np.ndarray] = None
     alignment_mode: Optional[str] = None
     target_landmarks: Optional[Sequence[float]] = None
+    interrupted: bool = False
+
+
+class BatchProgress(Protocol):
+    """Callback interface for reporting batch progress."""
+
+    def start(self, total: int) -> None:
+        ...
+
+    def advance(self, stem: str, completed: int, total: int) -> None:
+        ...
+
+    def finish(self, completed: int, total: int, interrupted: bool) -> None:
+        ...
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -512,82 +526,156 @@ def run_batch(
     options: BatchOptions,
     overrides: Mapping[str, Any] | None = None,
     gpt_client: OpenAI | None = None,
+    progress: BatchProgress | None = None,
 ) -> BatchResults:
     """Process all samples and optionally align them."""
 
     ordered = sorted(samples, key=lambda s: s.order)
     order_map = {s.stem: idx for idx, s in enumerate(ordered)}
     results: list[SampleResult] = []
+    seen_stems: set[str] = set()
+    total = len(ordered)
+    completed = 0
+    interrupted = False
 
-    if options.workers and options.workers > 1:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+    if progress is not None:
+        try:
+            progress.start(total)
+        except Exception:
+            progress = None
 
-        with ThreadPoolExecutor(max_workers=options.workers) as pool:
-            future_map = {
-                pool.submit(process_sample, sample, options, overrides, gpt_client): sample
-                for sample in ordered
-            }
-            for future in as_completed(future_map):
-                res = future.result()
-                results.append(res)
-    else:
-        for sample in ordered:
-            results.append(process_sample(sample, options, overrides, gpt_client))
-
-    results.sort(key=lambda r: order_map.get(r.stem, 0))
-
-    if options.apply_consistency and len(results) > 1:
-        info_map = {
-            r.stem: {
-                "peaks": list(r.peaks),
-                "valleys": list(r.valleys),
-                "xs": r.xs.tolist(),
-                "ys": r.ys.tolist(),
-                "marker": r.metadata.get("marker"),
-            }
-            for r in results
-        }
-        enforce_marker_consistency(info_map, tol=options.consistency_tol)
-        for res in results:
-            info = info_map.get(res.stem)
-            if not info:
-                continue
-            res.peaks = list(map(float, info.get("peaks", [])))
-            res.valleys = list(map(float, info.get("valleys", [])))
-            res.quality = float(stain_quality(res.counts, res.peaks, res.valleys))
+    def _append_result(res: SampleResult) -> None:
+        nonlocal completed, progress
+        if res.stem in seen_stems:
+            return
+        results.append(res)
+        seen_stems.add(res.stem)
+        completed += 1
+        if progress is not None:
+            try:
+                progress.advance(res.stem, completed, total)
+            except Exception:
+                progress = None
 
     aligned_landmarks: Optional[np.ndarray] = None
 
-    if options.align and results:
-        counts_list = [r.counts for r in results]
-        peaks_list = [r.peaks for r in results]
-        valleys_list = [r.valleys for r in results]
-        density = [(r.xs, r.ys) for r in results]
+    try:
+        if options.workers and options.workers > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        alignment = align_distributions(
-            counts_list,
-            peaks_list,
-            valleys_list,
-            align_type=options.align_mode,
-            target_landmark=options.target_landmarks,
-            density_grids=density,
-        )
+            error: BaseException | None = None
+            with ThreadPoolExecutor(max_workers=options.workers) as pool:
+                future_map = {
+                    pool.submit(process_sample, sample, options, overrides, gpt_client): sample
+                    for sample in ordered
+                }
+                try:
+                    for future in as_completed(future_map):
+                        sample = future_map[future]
+                        try:
+                            res = future.result()
+                        except KeyboardInterrupt:
+                            interrupted = True
+                            break
+                        except BaseException as exc:  # capture other errors to re-raise later
+                            error = exc
+                            interrupted = True
+                            break
+                        _append_result(res)
+                except KeyboardInterrupt:
+                    interrupted = True
+                finally:
+                    if interrupted:
+                        for future, sample in future_map.items():
+                            if future.done():
+                                try:
+                                    res = future.result()
+                                except KeyboardInterrupt:
+                                    continue
+                                except BaseException:
+                                    continue
+                                _append_result(res)
+                            else:
+                                future.cancel()
+            if error is not None:
+                raise error
+        else:
+            for sample in ordered:
+                if interrupted:
+                    break
+                try:
+                    res = process_sample(sample, options, overrides, gpt_client)
+                except KeyboardInterrupt:
+                    interrupted = True
+                    break
+                _append_result(res)
 
-        aligned_counts, aligned_landmarks, _warp_funs, warped_density = alignment
+        results.sort(key=lambda r: order_map.get(r.stem, 0))
 
-        for res, counts_aligned, warped in zip(
-            results, aligned_counts, warped_density  # type: ignore[misc]
-        ):
-            res.aligned_counts = np.asarray(counts_aligned, float)
-            if warped is not None:
-                xs_w, ys_w = warped
-                res.aligned_density = (np.asarray(xs_w, float), np.asarray(ys_w, float))
+        if not interrupted and options.apply_consistency and len(results) > 1:
+            info_map = {
+                r.stem: {
+                    "peaks": list(r.peaks),
+                    "valleys": list(r.valleys),
+                    "xs": r.xs.tolist(),
+                    "ys": r.ys.tolist(),
+                    "marker": r.metadata.get("marker"),
+                }
+                for r in results
+            }
+            try:
+                enforce_marker_consistency(info_map, tol=options.consistency_tol)
+            except KeyboardInterrupt:
+                interrupted = True
+            else:
+                for res in results:
+                    info = info_map.get(res.stem)
+                    if not info:
+                        continue
+                    res.peaks = list(map(float, info.get("peaks", [])))
+                    res.valleys = list(map(float, info.get("valleys", [])))
+                    res.quality = float(stain_quality(res.counts, res.peaks, res.valleys))
+
+        if not interrupted and options.align and results:
+            counts_list = [r.counts for r in results]
+            peaks_list = [r.peaks for r in results]
+            valleys_list = [r.valleys for r in results]
+            density = [(r.xs, r.ys) for r in results]
+
+            try:
+                alignment = align_distributions(
+                    counts_list,
+                    peaks_list,
+                    valleys_list,
+                    align_type=options.align_mode,
+                    target_landmark=options.target_landmarks,
+                    density_grids=density,
+                )
+            except KeyboardInterrupt:
+                interrupted = True
+            else:
+                aligned_counts, aligned_landmarks, _warp_funs, warped_density = alignment
+
+                for res, counts_aligned, warped in zip(
+                    results, aligned_counts, warped_density  # type: ignore[misc]
+                ):
+                    res.aligned_counts = np.asarray(counts_aligned, float)
+                    if warped is not None:
+                        xs_w, ys_w = warped
+                        res.aligned_density = (np.asarray(xs_w, float), np.asarray(ys_w, float))
+    finally:
+        if progress is not None:
+            try:
+                progress.finish(completed, total, interrupted)
+            except Exception:
+                pass
 
     return BatchResults(
         samples=results,
         aligned_landmarks=aligned_landmarks,
-        alignment_mode=options.align_mode if options.align else None,
+        alignment_mode=options.align_mode if (options.align and not interrupted) else None,
         target_landmarks=options.target_landmarks,
+        interrupted=interrupted,
     )
 
 
@@ -785,6 +873,8 @@ def results_to_dict(batch: BatchResults) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "samples": [],
     }
+
+    payload["interrupted"] = bool(batch.interrupted)
 
     if batch.aligned_landmarks is not None:
         payload["aligned_landmarks"] = _jsonify(batch.aligned_landmarks)

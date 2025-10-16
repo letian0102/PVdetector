@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import warnings
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,89 @@ except Exception:  # pragma: no cover - OpenAI may not be installed
     OpenAI = None  # type: ignore
 
 
+class ConsoleProgress:
+    """Lightweight console progress bar for batch runs."""
+
+    def __init__(self, stream: Any | None = None) -> None:
+        self._stream = stream or sys.stderr
+        self._lock = threading.Lock()
+        self._total = 0
+        self._completed = 0
+        self._last_label: str | None = None
+        self._active = False
+        self._last_len = 0
+        self._interactive = bool(getattr(self._stream, "isatty", lambda: False)())
+        self._width = 28
+        self._last_plain: str | None = None
+
+    def start(self, total: int) -> None:
+        with self._lock:
+            self._total = max(int(total), 0)
+            self._completed = 0
+            self._last_label = None
+            self._active = True
+            self._last_plain = None
+            if self._interactive and self._total > 0:
+                message = self._format(None, 0, self._total, final=False, interrupted=False)
+                self._emit(message, final=False)
+
+    def advance(self, stem: str, completed: int, total: int) -> None:
+        with self._lock:
+            if not self._active:
+                return
+            self._total = max(self._total, int(total))
+            self._completed = max(0, int(min(completed, max(total, completed))))
+            self._last_label = stem
+            message = self._format(stem, self._completed, self._total, final=False, interrupted=False)
+            self._emit(message, final=False)
+
+    def finish(self, completed: int, total: int, interrupted: bool) -> None:
+        with self._lock:
+            if not self._active:
+                return
+            self._total = max(self._total, int(total))
+            self._completed = max(0, int(min(completed, max(total, completed))))
+            message = self._format(self._last_label, self._completed, self._total, final=True, interrupted=interrupted)
+            self._emit(message, final=True)
+            self._active = False
+            self._last_len = 0
+            self._last_plain = None
+
+    def _format(
+        self,
+        label: str | None,
+        completed: int,
+        total: int,
+        *,
+        final: bool,
+        interrupted: bool,
+    ) -> str:
+        if total > 0:
+            ratio = min(1.0, max(0.0, completed / max(total, 1)))
+            filled = int(round(ratio * self._width))
+            filled = min(self._width, max(0, filled))
+            bar = "█" * filled + "░" * (self._width - filled)
+            message = f"[{bar}] {completed}/{total}"
+        else:
+            message = f"Processed {completed} sample(s)"
+        if label:
+            message += f" ({label})"
+        if final and interrupted:
+            message += " — interrupted"
+        return message
+
+    def _emit(self, message: str, *, final: bool) -> None:
+        if self._interactive:
+            if len(message) < self._last_len:
+                message = message + " " * (self._last_len - len(message))
+            end = "\n" if final else "\r"
+            print(message, end=end, file=self._stream, flush=True)
+            self._last_len = 0 if final else len(message)
+        else:
+            if final and message == self._last_plain:
+                return
+            print(message, file=self._stream, flush=True)
+            self._last_plain = message
 def _parse_multi(values: list[str] | None) -> list[str] | None:
     if not values:
         return None
@@ -331,7 +415,16 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # pragma: no cover - depends on environment
                 print(f"[warning] Failed to initialise OpenAI client: {exc}", file=sys.stderr)
 
-    batch = run_batch(samples_inputs, options, overrides, gpt_client)
+    total_requested = len(samples_inputs)
+    progress = ConsoleProgress()
+
+    batch = run_batch(
+        samples_inputs,
+        options,
+        overrides,
+        gpt_client,
+        progress=progress,
+    )
     save_outputs(
         batch,
         args.output_dir,
@@ -339,7 +432,16 @@ def main(argv: list[str] | None = None) -> int:
         export_plots=options.export_plots,
     )
 
-    print(f"Processed {len(batch.samples)} sample(s). Results saved to {args.output_dir}.")
+    processed = len(batch.samples)
+    if batch.interrupted:
+        print(
+            f"[warning] Processing interrupted after {processed} of {total_requested} sample(s). "
+            f"Partial results saved to {args.output_dir}.",
+            file=sys.stderr,
+        )
+        return 130
+
+    print(f"Processed {processed} sample(s). Results saved to {args.output_dir}.")
     return 0
 if __name__ == "__main__":
     sys.exit(main())

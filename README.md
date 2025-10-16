@@ -41,7 +41,7 @@ features, making it easy to run analyses on a server or inside scheduled jobs.
 python batch_run.py \
     --expression-file expression_matrix_combined.csv \
     --metadata-file cell_metadata_combined.csv \
-    --marker CD3 --marker CD4 \
+    --marker CD3 \
     --sample SampleA,SampleB \
     --align --output-dir results_batch
 ```
@@ -78,6 +78,9 @@ and the `before_after_alignment.zip` bundle that mirrors the Streamlit
 "before/after" download (combined metadata/expression CSVs plus stacked ridge
 plots, without per-sample CSVs). Pass `--export-plots` to add a `plots/`
 directory containing the individual density visuals.
+
+The CLI prints a progress bar while samples are processed and automatically
+finalises partial results if an analysis is interrupted.
 
 ## Usage
 ### A. Upload counts CSV files

@@ -179,6 +179,15 @@ def _configure_environment() -> None:
         category=FutureWarning,
     )
 
+    # Hide the Windows + MKL KMeans warning that scikit-learn emits even when
+    # the clustering path is not used, as it provides no actionable guidance in
+    # the batch context and can confuse users.
+    warnings.filterwarnings(
+        "ignore",
+        category=UserWarning,
+        module="sklearn.cluster._kmeans",
+    )
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(

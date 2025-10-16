@@ -3,6 +3,7 @@
 from __future__ import annotations
 import io, zipfile, re
 from pathlib import Path
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -21,6 +22,12 @@ from peak_valley.gpt_adapter import (
     ask_gpt_peak_count, ask_gpt_prominence, ask_gpt_bandwidth,
 )
 from peak_valley.alignment import align_distributions, fill_landmark_matrix
+
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module="sklearn.cluster._kmeans",
+)
 
 # ────────────────────────── Streamlit page & state ──────────────────────────
 st.set_page_config("Peak & Valley Detector", None, layout="wide")

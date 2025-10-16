@@ -52,6 +52,9 @@ Key flags:
 - `--expression-file` / `--metadata-file`: analyse a whole dataset; combine with
   `--marker`, `--sample`, and `--batch` to filter selections. Pass `--marker all`
   or `--sample all` to process every marker/sample without enumerating them.
+- Preprocessing mirrors the app: use `--apply-arcsinh` (default) or
+  `--skip-arcsinh`, and customise the transform via `--arcsinh-a`,
+  `--arcsinh-b`, and `--arcsinh-c`.
 - Detection parameters (`--n-peaks`, `--bandwidth`, `--prominence`,
   `--min-width`, `--curvature`, `--turning-points`, `--min-separation`,
   `--grid-size`, `--valley-drop`, `--first-valley`) mirror the Streamlit controls.

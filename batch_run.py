@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +79,21 @@ def _parse_target(values: str | None) -> list[float] | None:
         return [float(p) for p in parts]
     except ValueError as exc:
         raise ValueError("Alignment target must be numeric values") from exc
+
+
+def _configure_environment() -> None:
+    """Silence noisy backend warnings and prefer a headless matplotlib backend."""
+
+    # Avoid Qt initialisation when generating plots during batch runs.
+    os.environ.setdefault("MPLBACKEND", "Agg")
+
+    # Suppress the verbose CuPy experimental warning that surfaces in some
+    # environments when cupyx.jit.rawkernel is imported indirectly.
+    warnings.filterwarnings(
+        "ignore",
+        message="cupyx\\.jit\\.rawkernel is experimental",
+        category=FutureWarning,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -188,6 +204,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_environment()
+
     parser = build_parser()
     args = parser.parse_args(argv)
 

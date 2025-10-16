@@ -33,6 +33,45 @@ PVdetector is a Streamlit application for detecting density peaks and valleys in
     ```
 2. A browser window will open. Avoid refreshing or closing the tab—uploaded data lives only in memory.
 
+## Batch processing from the command line
+The repository now includes a non-interactive workflow that mirrors the Streamlit
+features, making it easy to run analyses on a server or inside scheduled jobs.
+
+```bash
+python batch_run.py \
+    --expression-file expression_matrix_combined.csv \
+    --metadata-file cell_metadata_combined.csv \
+    --marker CD3 --marker CD4 \
+    --sample SampleA,SampleB \
+    --align --output-dir results_batch
+```
+
+Key flags:
+
+- `--counts`: process individual `*_raw_counts.csv` files (repeatable).
+- `--expression-file` / `--metadata-file`: analyse a whole dataset; combine with
+  `--marker`, `--sample`, and `--batch` to filter selections.
+- Detection parameters (`--n-peaks`, `--bandwidth`, `--prominence`,
+  `--min-width`, `--curvature`, `--turning-points`, `--min-separation`,
+  `--grid-size`, `--valley-drop`, `--first-valley`) mirror the Streamlit controls.
+- `--align` with optional `--alignment-mode` and `--alignment-target` performs
+  landmark alignment and exports aligned densities and counts.
+- `--override-file`: JSON mapping of global/marker/sample/stem overrides, e.g.
+  ```json
+  {
+    "markers": {"CD3": {"n_peaks": 2}},
+    "stems": {"SampleA_CD3_raw_counts": {"bandwidth": 0.8}}
+  }
+  ```
+- `--workers`: run multiple samples in parallel.
+- Pass `--bandwidth auto`, `--prominence auto`, or `--n-peaks auto` to enable
+  GPT-powered suggestions (requires `OPENAI_API_KEY`).
+
+Outputs are written to `--output-dir` and include per-sample density plots,
+counts, summaries, optional aligned data, and a `results.json` manifest. Counts
+can be uploaded back into the Streamlit interface for ad-hoc fine-tuning if
+needed.
+
 ## Usage
 ### A. Upload counts CSV files
 - Upload one or more `*_raw_counts.csv` files, each containing a single column of numeric counts.

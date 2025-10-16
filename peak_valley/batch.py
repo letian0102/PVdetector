@@ -8,8 +8,10 @@ distributions, and export all intermediate and final artefacts.
 
 from __future__ import annotations
 
+import io
 import json
 import math
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
@@ -44,6 +46,7 @@ class SampleInput:
     arcsinh_signature: tuple[bool, float, float, float]
     source_name: str | None = None
     order: int = 0
+    cell_indices: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -63,6 +66,7 @@ class SampleResult:
     arcsinh_signature: tuple[bool, float, float, float] = (True, 1.0, 0.2, 0.0)
     aligned_counts: Optional[np.ndarray] = None
     aligned_density: Optional[tuple[np.ndarray, np.ndarray]] = None
+    cell_indices: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -411,8 +415,14 @@ def process_sample(
 ) -> SampleResult:
     """Run the detector for a single sample."""
 
-    counts = np.asarray(sample.counts, float)
-    counts = counts[np.isfinite(counts)]
+    counts = np.asarray(sample.counts, float).ravel()
+    cell_idx = None
+    if sample.cell_indices is not None:
+        cell_idx = np.asarray(sample.cell_indices, dtype=int).ravel()
+    finite_mask = np.isfinite(counts)
+    counts = counts[finite_mask]
+    if cell_idx is not None and cell_idx.shape[0] == finite_mask.shape[0]:
+        cell_idx = cell_idx[finite_mask]
     if counts.size == 0:
         return SampleResult(
             stem=sample.stem,
@@ -426,6 +436,7 @@ def process_sample(
             metadata=dict(sample.metadata),
             source_name=sample.source_name,
             arcsinh_signature=sample.arcsinh_signature,
+            cell_indices=cell_idx,
         )
 
     merged_overrides = _merge_overrides(sample.stem, sample.metadata, overrides)
@@ -490,6 +501,7 @@ def process_sample(
         metadata=dict(sample.metadata),
         source_name=sample.source_name,
         arcsinh_signature=sample.arcsinh_signature,
+        cell_indices=cell_idx,
     )
 
 
@@ -728,6 +740,7 @@ def collect_dataset_samples(
                         arcsinh_signature=arcsinh_sig,
                         source_name=str(expression_file),
                         order=order,
+                        cell_indices=np.asarray(cell_idx, dtype=int),
                     )
                 )
                 order += 1
@@ -914,4 +927,222 @@ def save_outputs(
         manifest["run_metadata"] = dict(run_metadata)
     with open(out / "results.json", "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
+
+    _write_combined_zip(
+        batch,
+        out,
+        run_metadata=run_metadata,
+    )
+
+
+def _write_combined_zip(
+    batch: BatchResults,
+    output_dir: Path,
+    *,
+    run_metadata: Mapping[str, Any] | None,
+) -> None:
+    exports = _dataset_exports(batch, run_metadata)
+    if exports is None:
+        return
+
+    before_meta = exports["meta"]
+    before_expr = exports["expr_before"]
+    if before_meta is None and before_expr is None and exports["raw_ridge"] is None:
+        return
+
+    zip_path = output_dir / "before_after_alignment.zip"
+    has_after = exports["expr_after"] is not None or exports["aligned_ridge"] is not None
+
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        if before_meta is not None:
+            archive.writestr("before_alignment/cell_metadata_combined.csv", before_meta)
+        if before_expr is not None:
+            archive.writestr("before_alignment/expression_matrix_combined.csv", before_expr)
+        if exports["raw_ridge"] is not None:
+            archive.writestr("before_alignment/before_alignment_ridge.png", exports["raw_ridge"])
+        if exports["aligned_ridge"] is not None:
+            archive.writestr("after_alignment/aligned_ridge.png", exports["aligned_ridge"])
+        if has_after and exports["meta_after"] is not None:
+            archive.writestr("after_alignment/cell_metadata_combined.csv", exports["meta_after"])
+        if exports["expr_after"] is not None:
+            archive.writestr("after_alignment/expression_matrix_aligned.csv", exports["expr_after"])
+
+
+def _dataset_exports(
+    batch: BatchResults,
+    run_metadata: Mapping[str, Any] | None,
+) -> dict[str, bytes | None] | None:
+    if not run_metadata:
+        return None
+
+    expr_path = run_metadata.get("expression_path")
+    meta_path = run_metadata.get("metadata_path")
+    if not expr_path or not meta_path:
+        return None
+
+    try:
+        expr_df, _ = load_combined_csv(expr_path, low_memory=False)
+        meta_df, _ = load_combined_csv(meta_path, low_memory=False)
+    except Exception:
+        return None
+
+    dataset_results = [res for res in batch.samples if res.cell_indices is not None]
+    if not dataset_results:
+        return None
+
+    union_indices: list[int] = []
+    seen_indices: set[int] = set()
+    markers_order: list[str] = []
+    for res in dataset_results:
+        marker = res.metadata.get("marker")
+        if marker and marker not in markers_order:
+            markers_order.append(str(marker))
+        idx_array = np.asarray(res.cell_indices, dtype=int)
+        for idx in idx_array.tolist():
+            if idx not in seen_indices:
+                seen_indices.add(idx)
+                union_indices.append(idx)
+
+    if not union_indices:
+        return None
+
+    meta_subset = meta_df.loc[union_indices].copy()
+    meta_csv = meta_subset.reset_index(drop=True).to_csv(index=False).encode()
+
+    markers_available = [c for c in expr_df.columns if c not in meta_df.columns]
+    ordered_markers = [m for m in markers_available if m in markers_order]
+    for marker in markers_order:
+        if marker not in ordered_markers:
+            ordered_markers.append(marker)
+
+    expr_before = pd.DataFrame(index=union_indices, columns=ordered_markers, dtype=float)
+    expr_after = pd.DataFrame(index=union_indices, columns=ordered_markers, dtype=float)
+    has_aligned = any(res.aligned_counts is not None for res in dataset_results)
+
+    for res in dataset_results:
+        marker = res.metadata.get("marker")
+        if marker is None:
+            continue
+        marker = str(marker)
+        if marker not in expr_before.columns:
+            expr_before[marker] = np.nan
+            expr_after[marker] = np.nan
+        idx_array = np.asarray(res.cell_indices, dtype=int)
+        expr_before.loc[idx_array, marker] = np.asarray(res.counts, float)
+        values_after = (
+            np.asarray(res.aligned_counts, float)
+            if res.aligned_counts is not None
+            else np.asarray(res.counts, float)
+        )
+        expr_after.loc[idx_array, marker] = values_after
+
+    expr_before = expr_before.loc[union_indices]
+    expr_after = expr_after.loc[union_indices]
+
+    if "cell_id" in expr_df.columns:
+        cell_ids = expr_df.loc[union_indices, "cell_id"].to_numpy()
+        expr_before.insert(0, "cell_id", cell_ids)
+        expr_after.insert(0, "cell_id", cell_ids)
+
+    expr_before_csv = expr_before.reset_index(drop=True).to_csv(index=False).encode()
+    expr_after_csv = expr_after.reset_index(drop=True).to_csv(index=False).encode()
+    if not has_aligned:
+        expr_after_csv = None
+
+    raw_ridge = _ridge_plot_png(batch.samples, aligned=False)
+    aligned_ridge = _ridge_plot_png(batch.samples, aligned=True) if has_aligned else None
+
+    return {
+        "meta": meta_csv,
+        "meta_after": meta_csv,
+        "expr_before": expr_before_csv,
+        "expr_after": expr_after_csv,
+        "raw_ridge": raw_ridge,
+        "aligned_ridge": aligned_ridge,
+    }
+
+
+def _ridge_plot_png(samples: Sequence[SampleResult], *, aligned: bool) -> bytes | None:
+    curves: list[tuple[str, np.ndarray, np.ndarray, list[float], list[float]]] = []
+    for res in samples:
+        xs: np.ndarray
+        ys: np.ndarray
+        if aligned:
+            if res.aligned_density is None:
+                continue
+            xs = np.asarray(res.aligned_density[0], float)
+            ys = np.asarray(res.aligned_density[1], float)
+        else:
+            xs = np.asarray(res.xs, float)
+            ys = np.asarray(res.ys, float)
+        if xs.size == 0 or ys.size == 0:
+            continue
+        curves.append((res.stem, xs, ys, list(res.peaks), list(res.valleys)))
+
+    if not curves:
+        return None
+
+    x_min = min(float(xs.min()) for _, xs, _, _, _ in curves)
+    x_max = max(float(xs.max()) for _, xs, _, _, _ in curves)
+    if not np.isfinite(x_min) or not np.isfinite(x_max):
+        return None
+
+    if x_max == x_min:
+        pad = 0.05 * (abs(x_min) if x_min != 0 else 1.0)
+    else:
+        pad = 0.05 * (x_max - x_min)
+
+    y_max = max(float(ys.max()) for _, _, ys, _, _ in curves)
+    if not np.isfinite(y_max) or y_max <= 0:
+        y_max = 1.0
+    gap = 1.2 * y_max
+
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(6, 0.8 * max(len(curves), 1)), dpi=150, sharex=True)
+
+    for idx, (stem, xs, ys, peaks, valleys) in enumerate(curves):
+        offset = idx * gap
+        ax.plot(xs, ys + offset, color="black", lw=1)
+        ax.fill_between(xs, offset, ys + offset, color="#FFA50088", lw=0)
+        ymax_local = max(float(ys.max()), 1e-6)
+        for p in peaks:
+            try:
+                peak_val = float(p)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(peak_val):
+                ax.vlines(peak_val, offset, offset + ymax_local, color="black", lw=0.8)
+        for v in valleys:
+            try:
+                valley_val = float(v)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(valley_val):
+                ax.vlines(
+                    valley_val,
+                    offset,
+                    offset + ymax_local,
+                    color="grey",
+                    lw=0.8,
+                    linestyles=":",
+                )
+        ax.text(
+            x_min,
+            offset + 0.5 * y_max,
+            stem,
+            ha="right",
+            va="center",
+            fontsize=7,
+        )
+
+    ax.set_yticks([])
+    ax.set_xlim(x_min - pad, x_max + pad)
+    fig.tight_layout()
+
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buffer.seek(0)
+    return buffer.read()
 

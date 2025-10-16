@@ -50,7 +50,8 @@ Key flags:
 
 - `--counts`: process individual `*_raw_counts.csv` files (repeatable).
 - `--expression-file` / `--metadata-file`: analyse a whole dataset; combine with
-  `--marker`, `--sample`, and `--batch` to filter selections.
+  `--marker`, `--sample`, and `--batch` to filter selections. Pass `--marker all`
+  or `--sample all` to process every marker/sample without enumerating them.
 - Detection parameters (`--n-peaks`, `--bandwidth`, `--prominence`,
   `--min-width`, `--curvature`, `--turning-points`, `--min-separation`,
   `--grid-size`, `--valley-drop`, `--first-valley`) mirror the Streamlit controls.
@@ -68,9 +69,11 @@ Key flags:
   GPT-powered suggestions (requires `OPENAI_API_KEY`).
 
 Outputs are written to `--output-dir` and include per-sample density plots,
-counts, summaries, optional aligned data, and a `results.json` manifest. Counts
-can be uploaded back into the Streamlit interface for ad-hoc fine-tuning if
-needed.
+counts, summaries, optional aligned data, and a `results.json` manifest. A
+`before_after_alignment.zip` bundle mirrors the Streamlit "before/after"
+download, providing combined metadata/expression CSVs and stacked ridge plots
+without per-sample CSVs. Counts can be uploaded back into the Streamlit
+interface for ad-hoc fine-tuning if needed.
 
 ## Usage
 ### A. Upload counts CSV files

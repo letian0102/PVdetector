@@ -35,6 +35,15 @@ def _parse_multi(values: list[str] | None) -> list[str] | None:
     return items if items else None
 
 
+def _normalize_all(values: list[str] | None) -> list[str] | None:
+    if not values:
+        return None
+    lowered = {v.strip().lower() for v in values}
+    if any(v in {"all", "*"} for v in lowered):
+        return None
+    return values
+
+
 def _parse_batches(values: list[str] | None) -> list[str | None] | None:
     items = _parse_multi(values)
     if not items:
@@ -178,8 +187,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     counts_paths = args.counts or []
-    markers = _parse_multi(args.markers)
-    samples = _parse_multi(args.samples)
+    markers = _normalize_all(_parse_multi(args.markers))
+    samples = _normalize_all(_parse_multi(args.samples))
     batches = _parse_batches(args.batches)
     target_landmarks = _parse_target(args.alignment_target)
     overrides = _load_overrides(args.override_file)

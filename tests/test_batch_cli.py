@@ -1,4 +1,6 @@
+import io
 import json
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +49,72 @@ def test_run_batch_on_counts(tmp_path):
 
     plots = list((out_dir / "plots").glob("*.png"))
     assert plots, "Expected per-sample plot export"
+
+
+def test_combined_zip_has_expected_exports(tmp_path):
+    expr = pd.DataFrame(
+        {
+            "markerA": [
+                0.8,
+                1.1,
+                1.0,
+                3.8,
+                4.1,
+                4.0,
+                2.2,
+                2.4,
+            ],
+            "markerB": [
+                4.0,
+                4.2,
+                4.1,
+                6.8,
+                7.1,
+                6.9,
+                5.5,
+                5.8,
+            ],
+        }
+    )
+    meta = pd.DataFrame(
+        {
+            "sample": ["S1"] * 4 + ["S2"] * 4,
+            "batch": ["B1"] * 8,
+        }
+    )
+
+    expr_path = tmp_path / "expr.csv"
+    meta_path = tmp_path / "meta.csv"
+    expr.to_csv(expr_path, index=False)
+    meta.to_csv(meta_path, index=False)
+
+    options = BatchOptions(apply_arcsinh=False, align=True, max_peaks=2)
+    samples, meta_info = collect_dataset_samples(
+        expr_path,
+        meta_path,
+        options,
+    )
+
+    batch = run_batch(samples, options)
+    out_dir = tmp_path / "outputs"
+    save_outputs(batch, out_dir, run_metadata=meta_info)
+
+    zip_path = out_dir / "before_after_alignment.zip"
+    assert zip_path.exists(), "Expected combined zip export"
+
+    with zipfile.ZipFile(zip_path) as archive:
+        names = set(archive.namelist())
+        assert "before_alignment/cell_metadata_combined.csv" in names
+        assert "before_alignment/expression_matrix_combined.csv" in names
+        assert "before_alignment/before_alignment_ridge.png" in names
+        assert "after_alignment/aligned_ridge.png" in names
+        assert "after_alignment/expression_matrix_aligned.csv" in names
+        # ensure per-sample CSVs are not exported
+        assert all("raw_counts" not in name for name in names)
+
+        meta_bytes = archive.read("before_alignment/cell_metadata_combined.csv")
+        meta_df = pd.read_csv(io.BytesIO(meta_bytes))
+        assert set(meta_df["sample"]) == {"S1", "S2"}
 def test_collect_dataset_samples(tmp_path):
     expr = pd.DataFrame(
         {

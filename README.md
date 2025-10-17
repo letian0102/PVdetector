@@ -60,42 +60,44 @@ Key flags:
 
 ### CLI parameter reference
 
-| Parameter | Example usage | Accepted values / notes |
-|-----------|---------------|-------------------------|
-| `--counts` | `--counts SampleA_CD3_raw_counts.csv --counts SampleB_CD4_raw_counts.csv` | Path(s) to individual counts CSV files; repeat per file. |
-| `--expression-file` | `--expression-file expression_matrix_combined.csv` | Combined expression matrix for dataset mode; use with `--metadata-file`. |
-| `--metadata-file` | `--metadata-file cell_metadata_combined.csv` | Metadata CSV that pairs with `--expression-file`. |
-| `--marker` | `--marker CD3` | Comma-separated or repeatable marker list; use `--marker all`/`*` for every marker. |
-| `--sample` | `--sample SampleA,SampleB` | Comma-separated or repeatable sample list; use `--sample all`/`*` for every sample. |
-| `--batch` | `--batch B1 --batch none` | Comma-separated or repeatable batch filters; `none`/`null` selects missing batches. |
-| `--output-dir` | `--output-dir results_batch` | Destination folder; created if absent. |
-| `--header-row` | `--header-row -1` | Header row index for raw counts (`-1` = no header). |
-| `--skip-rows` | `--skip-rows 2` | Number of initial lines to ignore in counts CSVs. |
-| `--apply-arcsinh` / `--skip-arcsinh` | `--skip-arcsinh` | Toggle arcsinh preprocessing; default is to apply it. |
-| `--arcsinh-a` | `--arcsinh-a 1.5` | Positive scaling parameter `a` for arcsinh transform. |
-| `--arcsinh-b` | `--arcsinh-b 0.2` | Scaling parameter `b`; provide a decimal float. |
-| `--arcsinh-c` | `--arcsinh-c -1.0` | Offset parameter `c`; may be negative. |
-| `--n-peaks` | `--n-peaks 2` | Fixed peak count or `auto`/`gpt` for automatic selection. |
-| `--max-peaks` | `--max-peaks 4` | Upper bound on peaks considered during automatic runs. |
-| `--bandwidth` | `--bandwidth 0.6` | KDE bandwidth value, preset (`scott`, `silverman`), or `auto`/`gpt`. |
-| `--prominence` | `--prominence 0.08` | Minimum prominence (`auto`/`gpt` allowed). |
-| `--min-width` | `--min-width 30` | Minimum sample count per detected peak. |
-| `--curvature` | `--curvature 0.0005` | Curvature threshold for peak detection. |
-| `--turning-points` | `--turning-points` | Flag to treat concave-down turning points as peaks. |
-| `--min-separation` | `--min-separation 0.5` | Minimum distance between peaks in marker units. |
-| `--grid-size` | `--grid-size 40000` | Number of KDE evaluation points (minimum 4000). |
-| `--valley-drop` | `--valley-drop 12.5` | Percent drop required between peaks. |
-| `--first-valley` | `--first-valley drop` | Strategy for the first valley: `slope` or `drop`. |
-| `--apply-consistency-match` / `--skip-consistency-match` | `--apply-consistency-match` | Toggle cross-sample marker consistency; disabled by default. |
-| `--consistency-tol` | `--consistency-tol 0.3` | Allowed variation when consistency matching is enabled. |
-| `--align` | `--align` | Enable landmark alignment and normalisation. |
-| `--alignment-mode` | `--alignment-mode negPeak_valley` | Alignment template: `negPeak`, `negPeak_valley`, `negPeak_valley_posPeak`, or `valley`. |
-| `--alignment-target` | `--alignment-target -1.5,0.0,1.5` | Comma-separated landmark targets; defaults to cohort medians. |
-| `--workers` | `--workers 4` | Number of parallel worker threads. |
-| `--override-file` | `--override-file overrides.json` | JSON overrides for global/marker/sample/stem settings. |
-| `--gpt-model` | `--gpt-model gpt-4o-mini` | Override GPT model name when using automatic suggestions. |
-| `--api-key` | `--api-key sk-...` | OpenAI API key; overrides the `OPENAI_API_KEY` environment variable. |
-| `--export-plots` | `--export-plots` | Emit per-sample ridge PNGs inside a `plots/` folder. |
+| Parameter | Required? | Default | Example usage | Accepted values / notes |
+|-----------|-----------|---------|---------------|-------------------------|
+| `--counts` | Optional¹ | _None_ | `--counts SampleA_CD3_raw_counts.csv --counts SampleB_CD4_raw_counts.csv` | Path(s) to individual counts CSV files; repeat per file. |
+| `--expression-file` | Optional¹ | _None_ | `--expression-file expression_matrix_combined.csv` | Combined expression matrix for dataset mode; must be paired with `--metadata-file`. |
+| `--metadata-file` | Optional¹ | _None_ | `--metadata-file cell_metadata_combined.csv` | Metadata CSV for dataset mode; required when `--expression-file` is supplied. |
+| `--marker` | Optional | All markers | `--marker CD3` | Comma-separated or repeatable marker list; use `--marker all`/`*` for every marker. |
+| `--sample` | Optional | All samples | `--sample SampleA,SampleB` | Comma-separated or repeatable sample list; use `--sample all`/`*` for every sample. |
+| `--batch` | Optional | No batch filter | `--batch B1 --batch none` | Comma-separated or repeatable batch filters; `none`/`null` selects missing batches. |
+| `--output-dir` | **Required** | — | `--output-dir results_batch` | Destination folder; created if absent. |
+| `--header-row` | Optional | `-1` | `--header-row -1` | Header row index for raw counts (`-1` = no header). |
+| `--skip-rows` | Optional | `0` | `--skip-rows 2` | Number of initial lines to ignore in counts CSVs. |
+| `--apply-arcsinh` / `--skip-arcsinh` | Optional | Apply arcsinh | `--skip-arcsinh` | Toggle arcsinh preprocessing; default is to apply it. |
+| `--arcsinh-a` | Optional | `1.0` | `--arcsinh-a 1.5` | Positive scaling parameter `a` for arcsinh transform. |
+| `--arcsinh-b` | Optional | `0.2` | `--arcsinh-b 0.2` | Scaling parameter `b`; provide a decimal float. |
+| `--arcsinh-c` | Optional | `0.0` | `--arcsinh-c -1.0` | Offset parameter `c`; may be negative. |
+| `--n-peaks` | Optional | Auto | `--n-peaks 2` | Fixed peak count or `auto`/`gpt` for automatic selection. |
+| `--max-peaks` | Optional | `3` | `--max-peaks 4` | Upper bound on peaks considered during automatic runs. |
+| `--bandwidth` | Optional | `scott` | `--bandwidth 0.6` | KDE bandwidth value, preset (`scott`, `silverman`), or `auto`/`gpt`. |
+| `--prominence` | Optional | `0.05` | `--prominence 0.08` | Minimum prominence (`auto`/`gpt` allowed). |
+| `--min-width` | Optional | `0` | `--min-width 30` | Minimum sample count per detected peak. |
+| `--curvature` | Optional | `0.0001` | `--curvature 0.0005` | Curvature threshold for peak detection. |
+| `--turning-points` | Optional | Off | `--turning-points` | Flag to treat concave-down turning points as peaks. |
+| `--min-separation` | Optional | `0.7` | `--min-separation 0.5` | Minimum distance between peaks in marker units. |
+| `--grid-size` | Optional | `20000` | `--grid-size 40000` | Number of KDE evaluation points (minimum 4000). |
+| `--valley-drop` | Optional | `10.0` | `--valley-drop 12.5` | Percent drop required between peaks. |
+| `--first-valley` | Optional | `slope` | `--first-valley drop` | Strategy for the first valley: `slope` or `drop`. |
+| `--apply-consistency-match` / `--skip-consistency-match` | Optional | Skip consistency | `--apply-consistency-match` | Toggle cross-sample marker consistency; disabled by default. |
+| `--consistency-tol` | Optional | `0.5` | `--consistency-tol 0.3` | Allowed variation when consistency matching is enabled. |
+| `--align` | Optional | Off | `--align` | Enable landmark alignment and normalisation. |
+| `--alignment-mode` | Optional | `negPeak_valley_posPeak` | `--alignment-mode negPeak_valley` | Alignment template: `negPeak`, `negPeak_valley`, `negPeak_valley_posPeak`, or `valley`. |
+| `--alignment-target` | Optional | Cohort medians | `--alignment-target -1.5,0.0,1.5` | Comma-separated landmark targets; defaults to cohort medians. |
+| `--workers` | Optional | `1` | `--workers 4` | Number of parallel worker threads. |
+| `--override-file` | Optional | _None_ | `--override-file overrides.json` | JSON overrides for global/marker/sample/stem settings. |
+| `--gpt-model` | Optional | Auto (`gpt-4o-mini`) | `--gpt-model gpt-4o-mini` | Override GPT model name when using automatic suggestions. |
+| `--api-key` | Optional | Environment variable | `--api-key sk-...` | OpenAI API key; overrides the `OPENAI_API_KEY` environment variable. |
+| `--export-plots` | Optional | Off | `--export-plots` | Emit per-sample ridge PNGs inside a `plots/` folder. |
+
+¹ Provide at least one `--counts` file or the `--expression-file`/`--metadata-file` pair.
 
 By default, outputs in `--output-dir` comprise `summary.csv`, `results.json`,
 and the `before_after_alignment.zip` bundle that mirrors the Streamlit

@@ -258,7 +258,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-width", type=int, default=0)
     parser.add_argument("--curvature", type=float, default=0.0001)
     parser.add_argument("--turning-points", action="store_true", help="Count concave-down turning points as peaks.")
-    parser.add_argument("--min-separation", type=float, default=0.7)
+    parser.add_argument(
+        "--min-separation",
+        type=float,
+        default=6.0,
+        help="Minimum distance between detected peaks.",
+    )
     parser.add_argument("--grid-size", type=int, default=20_000)
     parser.add_argument("--valley-drop", type=float, default=10.0, help="Valley drop threshold in percent.")
     parser.add_argument(

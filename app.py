@@ -79,6 +79,12 @@ for key, default in {
     "combined_meta_sources": [],
     "combined_expr_name": None,
     "combined_meta_name": None,
+    "cli_summary_df": None,
+    "cli_summary_name": None,
+    "cli_summary_selection": [],
+    "cli_import_status": None,
+    "cli_filter_text": "",
+    "mode_selector": "Counts CSV files",
     # incremental‑run machinery
     "pending":     [],         # list[io.BytesIO] still to process
     "total_todo":  0,
@@ -396,7 +402,7 @@ def _render_override_controls(
         default_sep = (
             sep_prev
             if sep_prev is not None
-            else float(run_defaults.get("min_separation", 0.7))
+            else float(run_defaults.get("min_separation", 6.0))
         )
         sep_val = col_sep.slider(
             "Min peak separation",
@@ -1163,6 +1169,267 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         st.session_state.generated_meta[stem] = entry
 
 
+# ─────────────────────────── CLI import helpers ──────────────────────────────
+
+def _clear_cli_import() -> None:
+    """Remove CLI import state without touching current results."""
+
+    for key in ("cli_summary_df", "cli_summary_name", "cli_import_status"):
+        st.session_state[key] = None
+    st.session_state["cli_summary_selection"] = []
+    st.session_state["cli_filter_text"] = ""
+
+
+def _load_cli_import(
+    summary_df: pd.DataFrame,
+    expr_df: pd.DataFrame,
+    meta_df: pd.DataFrame,
+    *,
+    summary_name: str,
+    expr_name: str,
+    meta_name: str,
+) -> None:
+    """Store imported CLI outputs in session state and prime selectors."""
+
+    st.session_state.expr_df = expr_df
+    st.session_state.meta_df = meta_df
+    st.session_state.expr_name = expr_name
+    st.session_state.meta_name = meta_name
+
+    st.session_state.cli_summary_df = summary_df
+    st.session_state.cli_summary_name = summary_name
+    st.session_state.cli_import_status = (
+        f"Loaded {len(summary_df)} entries from {summary_name}"
+    )
+
+    stems = [str(s) for s in summary_df.get("stem", []) if isinstance(s, str) and s]
+    valid_stems = set(stems)
+    st.session_state.cli_summary_selection = stems.copy()
+
+    st.session_state.generated_csvs.clear()
+    st.session_state.generated_meta = {}
+
+    st.session_state.pre_overrides = {
+        stem: values
+        for stem, values in st.session_state.get("pre_overrides", {}).items()
+        if stem in valid_stems
+    }
+    st.session_state.group_assignments = {stem: "Default" for stem in valid_stems}
+
+    n_peaks_series = summary_df.get("n_peaks")
+    if n_peaks_series is not None:
+        for stem, n_val in zip(summary_df.get("stem", []), n_peaks_series):
+            if not isinstance(stem, str) or not stem:
+                continue
+            if pd.isna(n_val):
+                continue
+            st.session_state.pre_overrides.setdefault(stem, {})["n_peaks"] = int(n_val)
+
+    samples = [str(s) for s in summary_df.get("sample", []) if isinstance(s, str)]
+    markers = [str(m) for m in summary_df.get("marker", []) if isinstance(m, str)]
+    batches_raw = summary_df.get("batch")
+    if batches_raw is not None:
+        batches = []
+        for b in batches_raw:
+            batches.append(None if pd.isna(b) else b)
+        st.session_state.sel_batches = sorted({b for b in batches})
+    else:
+        st.session_state.sel_batches = []
+
+    st.session_state.sel_samples = sorted(set(samples))
+    st.session_state.sel_markers = sorted(set(markers))
+
+    keep = valid_stems
+    for bucket in (
+        "results",
+        "fig_pngs",
+        "params",
+        "dirty",
+        "dirty_reason",
+        "results_raw",
+        "results_raw_meta",
+        "aligned_results",
+        "aligned_fig_pngs",
+    ):
+        data = st.session_state.get(bucket)
+        if isinstance(data, dict):
+            if bucket == "fig_pngs":
+                st.session_state[bucket] = {
+                    fn: png for fn, png in data.items() if fn.split(".")[0] in keep
+                }
+            elif bucket == "aligned_fig_pngs":
+                st.session_state[bucket] = {
+                    fn: png for fn, png in data.items() if fn.rsplit("_aligned", 1)[0] in keep
+                }
+            else:
+                st.session_state[bucket] = {k: v for k, v in data.items() if k in keep}
+
+    for key in list(st.session_state.keys()):
+        if key.endswith("__pk_list") or key.endswith("__vl_list"):
+            stem = key.split("__", 1)[0]
+            if stem not in keep:
+                st.session_state.pop(key, None)
+
+    st.session_state.mode_selector = "Whole dataset"
+
+
+def _queue_cli_samples(stems: list[str]) -> None:
+    """Queue selected CLI samples for processing."""
+
+    summary_df = st.session_state.get("cli_summary_df")
+    expr_df = st.session_state.get("expr_df")
+    meta_df = st.session_state.get("meta_df")
+
+    if summary_df is None or expr_df is None or meta_df is None:
+        st.error("Load expression, metadata, and summary files before queuing samples.")
+        return
+
+    if not stems:
+        st.warning("Select at least one sample to load.")
+        return
+
+    subset = summary_df[summary_df["stem"].astype(str).isin(stems)]
+    if subset.empty:
+        st.warning("No matching rows were found in the imported summary.")
+        return
+
+    markers = sorted({str(m) for m in subset.get("marker", []) if isinstance(m, str)})
+    samples = sorted({str(s) for s in subset.get("sample", []) if isinstance(s, str)})
+    if "batch" in subset:
+        raw_batches = subset["batch"].tolist()
+        batches = sorted({None if pd.isna(b) else b for b in raw_batches})
+    else:
+        batches = []
+
+    st.session_state.sel_markers = markers
+    st.session_state.sel_samples = samples
+    st.session_state.sel_batches = batches
+
+    _sync_generated_counts(markers, samples, expr_df, meta_df, batches)
+
+    chosen = set(stems)
+    files: list[io.BytesIO] = []
+    for stem, bio in st.session_state.generated_csvs:
+        if stem in chosen:
+            bio.seek(0)
+            files.append(bio)
+
+    if not files:
+        st.warning("Unable to locate generated counts for the selected samples.")
+        return
+
+    st.session_state.pending = files
+    st.session_state.total_todo = len(files)
+    st.session_state.run_active = True
+    st.session_state.paused = False
+    st.session_state.raw_ridge_png = None
+    st.session_state.mode_selector = "Whole dataset"
+    st.session_state.cli_summary_selection = stems
+    st.rerun()
+
+
+def _render_cli_import_section() -> None:
+    """UI for importing CLI batch outputs and queueing samples."""
+
+    st.markdown("---\n### Import CLI batch outputs")
+    st.caption(
+        "Upload the `summary.csv`, `expression_matrix_combined.csv`, and "
+        "`cell_metadata_combined.csv` files generated by the CLI to review "
+        "results and re-run specific samples."
+    )
+
+    col_summary, col_expr, col_meta = st.columns(3)
+    summary_file = col_summary.file_uploader(
+        "summary.csv", type=["csv"], key="cli_summary_upload"
+    )
+    expr_file = col_expr.file_uploader(
+        "expression_matrix_combined.csv",
+        type=["csv"],
+        key="cli_expr_upload",
+    )
+    meta_file = col_meta.file_uploader(
+        "cell_metadata_combined.csv",
+        type=["csv"],
+        key="cli_meta_upload",
+    )
+
+    load_col, clear_col = st.columns([3, 1])
+    with load_col:
+        if st.button("Load files", disabled=not (summary_file and expr_file and meta_file)):
+            try:
+                summary_df = pd.read_csv(summary_file)
+                expr_df = pd.read_csv(expr_file, low_memory=False)
+                meta_df = pd.read_csv(meta_file, low_memory=False)
+            except Exception as exc:
+                st.error(f"Failed to read uploaded files: {exc}")
+            else:
+                _load_cli_import(
+                    summary_df,
+                    expr_df,
+                    meta_df,
+                    summary_name=summary_file.name,
+                    expr_name=expr_file.name,
+                    meta_name=meta_file.name,
+                )
+                st.rerun()
+
+    with clear_col:
+        if st.button("Clear import", disabled=st.session_state.cli_summary_df is None):
+            _clear_cli_import()
+            st.rerun()
+
+    summary_df = st.session_state.get("cli_summary_df")
+    if summary_df is None:
+        return
+
+    status = st.session_state.get("cli_import_status")
+    if status:
+        st.success(status)
+
+    filter_text = st.text_input(
+        "Filter imported rows",
+        value=st.session_state.get("cli_filter_text", ""),
+        key="cli_filter_input",
+        placeholder="Search by stem, sample, or marker",
+    )
+    st.session_state.cli_filter_text = filter_text
+
+    view_df = summary_df.copy()
+    if filter_text:
+        def _match(col: str) -> pd.Series:
+            if col not in view_df.columns:
+                return pd.Series(False, index=view_df.index)
+            return view_df[col].astype(str).str.contains(filter_text, case=False, na=False)
+
+        mask = (
+            view_df["stem"].astype(str).str.contains(filter_text, case=False, na=False)
+            | _match("sample")
+            | _match("marker")
+        )
+        view_df = view_df[mask]
+
+    display_cols = [
+        c
+        for c in ["stem", "sample", "marker", "batch", "n_peaks", "peaks", "valleys", "quality"]
+        if c in view_df.columns
+    ]
+    if display_cols:
+        st.dataframe(view_df[display_cols], use_container_width=True, height=240)
+
+    options = view_df["stem"].astype(str).tolist()
+    defaults = [s for s in st.session_state.get("cli_summary_selection", []) if s in options]
+    selection = st.multiselect(
+        "Samples to queue",
+        options,
+        default=defaults,
+        key="cli_summary_select",
+        help="Choose the samples to re-run in the Streamlit editor.",
+    )
+
+    st.session_state.cli_summary_selection = selection
+
+    if st.button("Load selected samples into detector", disabled=not selection):
+        _queue_cli_samples(selection)
 # ───────────────────────── helper: (re)plot a dataset ───────────────────────
 
 def _plot_png_fixed(stem, xs, ys, peaks, valleys,
@@ -1899,8 +2166,10 @@ def render_results(container):
 # ─────────────────────────────── SIDEBAR ─────────────────────────────────────
 with st.sidebar:
     mode = st.radio(
-        "Choose mode", ["Counts CSV files", "Whole dataset"],
-        help="Work with individual counts files or an entire dataset."
+        "Choose mode",
+        ["Counts CSV files", "Whole dataset"],
+        help="Work with individual counts files or an entire dataset.",
+        key="mode_selector",
     )
 
     # 1 Counts-CSV workflow
@@ -2301,7 +2570,7 @@ with st.sidebar:
         help="Count concave-down turning points as valid peaks."
     )
     min_sep   = st.slider(
-        "Min peak separation", 0.0, 10.0, 0.7, 0.1,
+        "Min peak separation", 0.0, 10.0, 6.0, 0.1,
         help="Minimum distance required between peaks."
     )
     grid_sz  = st.slider(
@@ -2659,6 +2928,9 @@ with st.sidebar:
         help="Key for accessing the OpenAI API."
     )
 
+
+
+_render_cli_import_section()
 
 # ───────────────── main buttons & global progress bar ────────────────────────
 run_col, clear_col, pause_col = st.columns(3)

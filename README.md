@@ -26,6 +26,11 @@ PVdetector is a Streamlit application for detecting density peaks and valleys in
 3. **OpenAI API key (optional)**
    - Required for GPT-assisted parameter suggestions. Set the `OPENAI_API_KEY` environment variable or enter the key in the app.
 
+### Optional: CUDA acceleration
+- Install a CuPy build that matches your CUDA driver, e.g. `pip install cupy-cuda11x`.
+- Set `PV_USE_CUDA=1` (or leave it unset to auto-detect). The app displays the active backend on startup.
+- When unavailable, the code automatically falls back to the standard CPU/NumPy implementation.
+
 ## Running the app
 1. Start the Streamlit server from the project root:
     ```bash

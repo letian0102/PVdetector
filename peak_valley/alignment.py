@@ -186,6 +186,20 @@ def build_warp_function(
     order = np.argsort(ls)
     ls, lt = ls[order], lt[order]
 
+    # eliminate near-duplicate source landmarks (degrades to shift)
+    if ls.size > 1:
+        uniq_ls: List[float] = [float(ls[0])]
+        uniq_lt: List[float] = [float(lt[0])]
+        for x, y in zip(ls[1:], lt[1:]):
+            if np.isclose(x, uniq_ls[-1], rtol=1e-6, atol=1e-6):
+                # merge duplicates by averaging the target position
+                uniq_lt[-1] = (uniq_lt[-1] + float(y)) / 2.0
+            else:
+                uniq_ls.append(float(x))
+                uniq_lt.append(float(y))
+        ls = np.asarray(uniq_ls, float)
+        lt = np.asarray(uniq_lt, float)
+
     # —— single-landmark → constant shift ————————————————
     if ls.size == 1:
         delta = float(lt[0] - ls[0])    

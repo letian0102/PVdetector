@@ -8,11 +8,45 @@ __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
 
 
 # ----------------------------------------------------------------------
-# peak_valley/kde_detector.py
-import numpy as np
-
-# peak_valley/kde_detector.py  (only the helper changed)
+# Numerical stability guards
 # ----------------------------------------------------------------------
+
+# Require valleys to remain a safe fraction away from their neighbouring peaks.
+#
+# The previous implementation only ensured that the valley lay strictly between
+# the peaks.  When the KDE is very flat the numerical maximisation sometimes
+# returned a valley coordinate almost identical to a peak.  Downstream alignment
+# then attempted to stretch this near-zero interval to match the cohort average
+# which resulted in huge warp slopes (x-ranges exploding past 10^4 as reported
+# by users).  By enforcing a minimum spacing we keep the geometry well behaved.
+_VALLEY_GAP_FRACTION = 0.08
+
+
+def _enforce_min_valley_gap(
+    xs: np.ndarray,
+    left_idx: int,
+    valley_x: float,
+    right_idx: int | None,
+    gap_fraction: float = _VALLEY_GAP_FRACTION,
+) -> float:
+    """Clamp *valley_x* to stay a safe distance from neighbouring peaks."""
+
+    left_x = float(xs[left_idx])
+    if right_idx is None:
+        right_x = float(xs[-1])
+    else:
+        right_x = float(xs[right_idx])
+
+    span = max(right_x - left_x, np.finfo(float).eps)
+    min_gap = gap_fraction * span
+    valley_x = max(valley_x, left_x + min_gap)
+
+    if right_idx is not None:
+        valley_x = min(valley_x, right_x - min_gap)
+
+    return float(valley_x)
+
+
 def _merge_close_peaks(xs: np.ndarray,
                        ys: np.ndarray,
                        p_idx: np.ndarray,
@@ -53,6 +87,43 @@ def _merge_close_peaks(xs: np.ndarray,
 
         keep.append(winner)
         i = j
+
+    return np.asarray(sorted(keep), dtype=int)
+
+
+def _enforce_peak_spacing(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    p_idx: np.ndarray,
+    min_x_sep: float | None,
+) -> np.ndarray:
+    """Drop peaks that violate the absolute separation constraint.
+
+    ``find_peaks`` already accepts a ``distance`` argument, but subsequent
+    processing (turning-point detection, GMM fallbacks, manual injections)
+    can reintroduce peaks that sit almost on top of each other.  That, in turn,
+    yields near-zero warp intervals and the alignment explodes its x-range when
+    trying to reconcile them.  The routine below performs a final non-maximum
+    suppression pass that keeps the tallest peak inside every ``min_x_sep``
+    window and guarantees the returned coordinates obey the requested spacing.
+    """
+
+    if min_x_sep is None or p_idx.size < 2:
+        return np.asarray(sorted(set(map(int, p_idx))), dtype=int)
+
+    order = np.argsort(ys[p_idx])[::-1]     # tallest first
+    keep: list[int] = []
+    for idx in p_idx[order]:
+        if not keep:
+            keep.append(int(idx))
+            continue
+
+        sep = np.abs(xs[idx] - xs[np.asarray(keep)])
+        if np.all(sep >= min_x_sep):
+            keep.append(int(idx))
+
+    if not keep:                                 # numerical edge-case fallback
+        keep = [int(p_idx[np.argmax(ys[p_idx])])]
 
     return np.asarray(sorted(keep), dtype=int)
 
@@ -216,7 +287,8 @@ def _first_valley_slope(xs: np.ndarray,
         if idx > min_idx:
             idx = min_idx
 
-    return float(xs[idx])
+    valley_x = float(xs[idx])
+    return _enforce_min_valley_gap(xs, p_left, valley_x, p_right)
 
 
 def _first_valley_drop(xs: np.ndarray,
@@ -242,7 +314,9 @@ def _first_valley_drop(xs: np.ndarray,
         idx_val = seg[turn[0]]
     else:
         idx_val = seg[np.argmin(ys[seg])]
-    return float(xs[idx_val])
+
+    valley_x = float(xs[idx_val])
+    return _enforce_min_valley_gap(xs, p_left, valley_x, None)
 
 
 def _valley_between(xs: np.ndarray,
@@ -261,11 +335,11 @@ def _valley_between(xs: np.ndarray,
     2. *Turning-point rule* from previous version (first slope –→+ bend).
     3. *Steep-slope rule* (NEW):
        • if right-hand peak is HIGHER   →  pick the grid point where the
-         **up-slope**  (first derivative) is most positive;  
+         **up-slope**  (first derivative) is most positive;
        • if right-hand peak is LOWER    →  pick the grid point where the
          **down-slope** (first derivative) is most negative.
-    A small safety shift (`grid_half`) is applied at the end so the
-    valley is at least ~½ % of the interval away from either peak.
+    A safety shift is applied at the end so the valley stays roughly
+    8 % of the interval away from either peak.
     """
     seg = np.arange(p_left + 1, p_right)           # interior points
     if seg.size == 0:                              # adjacent peaks
@@ -307,14 +381,8 @@ def _valley_between(xs: np.ndarray,
             rel = np.argmin(dy_seg)                         # steepest ↓ slope
         valley_idx = cand_left + rel
 
-        # ── 4. safety-shift so valley ≠ peak ──────────────────────────
-    min_sep   = 0.05 * (xs[p_right] - xs[p_left])      # 10 % of peak gap
-    if (xs[valley_idx] - xs[p_left]  < min_sep or
-        xs[p_right]  - xs[valley_idx] < min_sep):
-
-        valley_idx = (p_left + p_right) // 2           # exact mid-point
-
-    return float(xs[valley_idx])
+    valley_x = float(xs[valley_idx])
+    return _enforce_min_valley_gap(xs, p_left, valley_x, p_right)
 
 
 
@@ -403,25 +471,20 @@ def kde_peaks_valleys(
 
     # keep tallest as before
     if n_peaks is None or locs.size >= n_peaks:
-        peaks_idx = np.sort(locs) if n_peaks is None else \
-                    np.sort(locs[np.argsort(ys[locs])[-n_peaks:]])
+        if n_peaks is None:
+            peaks_idx = np.sort(locs)
+        else:
+            take = np.argsort(ys[locs])[-n_peaks:]
+            peaks_idx = np.sort(locs[take])
     else:
         peaks_idx = np.sort(locs)
-    
-    peaks_x = xs[peaks_idx].tolist()
 
-    if (min_x_sep is not None) and (len(peaks_x) > 1):   # 2 safe now
-        peaks_x.sort()
-        keep = [peaks_x[0]]
-        for px in peaks_x[1:]:
-            if px - keep[-1] >= min_x_sep:
-                keep.append(px)
-        peaks_x = keep
-
-    peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+    peaks_idx = np.asarray(peaks_idx, dtype=int)
+    peaks_idx = _enforce_peak_spacing(xs, ys, peaks_idx, min_x_sep)
 
     # ---------- GMM fallback (unchanged) ----------
-    if n_peaks is not None and len(peaks_x) < n_peaks:
+    if n_peaks is not None and peaks_idx.size < n_peaks:
+        peaks_x = xs[peaks_idx].tolist()
         from .gmm_fallback import gmm_component_means
         gmm_means = gmm_component_means(x, n_peaks)
 
@@ -434,10 +497,19 @@ def kde_peaks_valleys(
             if uniq(m, peaks_x):
                 peaks_x.append(m)
 
-        peaks_x = sorted(peaks_x)[:n_peaks]
+        candidate = np.asarray(
+            [int(np.argmin(np.abs(xs - px))) for px in sorted(peaks_x)],
+            dtype=int,
+        )
+        candidate = _enforce_peak_spacing(xs, ys, candidate, min_x_sep)
 
-    # ---------- *re-derive* indices for every peak we now have ----------
-    peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+        if candidate.size > n_peaks:
+            order = np.argsort(ys[candidate])[::-1][:n_peaks]
+            candidate = np.sort(candidate[order])
+
+        peaks_idx = candidate
+
+    peaks_x = xs[peaks_idx].tolist()
 
     # ---------- valleys ----------
     valleys_x: list[float] = []

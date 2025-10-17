@@ -85,12 +85,28 @@ def stain_quality(counts, peaks, valleys):
 
     else:                                    # ≥3 peaks
         mean_diff = abs(peaks[-1] - peaks[0])
+        # ensure we have enough valleys to separate peak segments
+        required = len(peaks) - 1
+        valleys_sorted = sorted(valleys)
+        while len(valleys_sorted) < required:
+            idx = len(valleys_sorted)
+            next_idx = min(idx, len(peaks) - 2)
+            midpoint = 0.5 * (peaks[next_idx] + peaks[next_idx + 1])
+            valleys_sorted.append(midpoint)
+        valleys_sorted = valleys_sorted[:required]
+
         # assign every point to the nearest peak segment
         seg_var = 0.0
-        borders = [counts.min()] + valleys + [counts.max()]
+        borders = [float(counts.min())] + valleys_sorted + [float(counts.max())]
         for i, pk in enumerate(peaks):
-            in_seg = (counts >= borders[i]) & (counts < borders[i+1])
+            upper = borders[i + 1]
+            if i == len(peaks) - 1:
+                in_seg = counts >= borders[i]
+            else:
+                in_seg = (counts >= borders[i]) & (counts < upper)
+            if not np.any(in_seg):
+                continue
             seg_var += ((counts[in_seg] - pk)**2).sum()
         within_sd = np.sqrt(seg_var / counts.size)
-        deep_scal = _deep_scaler(counts, peaks, valleys, k)
+        deep_scal = _deep_scaler(counts, peaks, valleys_sorted, k)
         return (mean_diff * deep_scal) / within_sd

@@ -3,6 +3,7 @@
 from __future__ import annotations
 import io, zipfile, re
 from pathlib import Path
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -21,6 +22,12 @@ from peak_valley.gpt_adapter import (
     ask_gpt_peak_count, ask_gpt_prominence, ask_gpt_bandwidth,
 )
 from peak_valley.alignment import align_distributions, fill_landmark_matrix
+
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module="sklearn.cluster._kmeans",
+)
 
 # ────────────────────────── Streamlit page & state ──────────────────────────
 st.set_page_config("Peak & Valley Detector", None, layout="wide")
@@ -503,9 +510,7 @@ def _ridge_plot_for_stems(
 ) -> bytes | None:
     """Return a stacked ridge plot PNG for the provided stems."""
 
-    valid_stems: list[str] = []
-    xs_all: list[np.ndarray] = []
-    ys_all: list[np.ndarray] = []
+    curve_info: list[tuple[str, np.ndarray, np.ndarray, list[float], list[float], float]] = []
 
     for stem in stems:
         info = results_map.get(stem)
@@ -517,15 +522,16 @@ def _ridge_plot_for_stems(
         if xs.size == 0 or ys.size == 0:
             continue
 
-        valid_stems.append(stem)
-        xs_all.append(xs)
-        ys_all.append(ys)
+        peaks = list(info.get("peaks", []))
+        valleys = list(info.get("valleys", []))
+        height = max(float(np.nanmax(ys)), 1e-6)
+        curve_info.append((stem, xs, ys, peaks, valleys, height))
 
-    if not valid_stems:
+    if not curve_info:
         return None
 
-    x_min = min(float(xs.min()) for xs in xs_all)
-    x_max = max(float(xs.max()) for xs in xs_all)
+    x_min = min(float(xs.min()) for _, xs, _, _, _, _ in curve_info)
+    x_max = max(float(xs.max()) for _, xs, _, _, _, _ in curve_info)
     if not np.isfinite(x_min) or not np.isfinite(x_max):
         return None
 
@@ -535,46 +541,40 @@ def _ridge_plot_for_stems(
     else:
         pad = 0.05 * (x_max - x_min)
 
-    y_max = max(float(ys.max()) for ys in ys_all)
-    if not np.isfinite(y_max) or y_max <= 0:
-        y_max = 1.0
-    gap = 1.2 * y_max
+    offsets: list[float] = []
+    current_offset = 0.0
+    for _, _, _, _, _, height in curve_info:
+        offsets.append(current_offset)
+        current_offset += max(height, 1e-6) * 1.2
 
     fig, ax = plt.subplots(
-        figsize=(6, 0.8 * max(len(valid_stems), 1)),
+        figsize=(6, 0.8 * max(len(curve_info), 1)),
         dpi=150,
         sharex=True,
     )
 
-    for idx, stem in enumerate(valid_stems):
-        info = results_map.get(stem, {})
-        xs = np.asarray(info.get("xs", []), float)
-        ys = np.asarray(info.get("ys", []), float)
-        if xs.size == 0 or ys.size == 0:
-            continue
-
-        offset = idx * gap
+    for offset, (stem, xs, ys, peaks, valleys, height) in zip(offsets, curve_info):
         ax.plot(xs, ys + offset, color="black", lw=1)
         ax.fill_between(xs, offset, ys + offset, color="#FFA50088", lw=0)
 
-        ymax = max(float(ys.max()), 1e-6)
+        ymax = max(height, 1e-6)
 
-        for p in info.get("peaks", []):
+        for peak_val in peaks:
             try:
-                peak_val = float(p)
+                peak_float = float(peak_val)
             except (TypeError, ValueError):
                 continue
-            if np.isfinite(peak_val):
-                ax.vlines(peak_val, offset, offset + ymax, color="black", lw=0.8)
+            if np.isfinite(peak_float):
+                ax.vlines(peak_float, offset, offset + ymax, color="black", lw=0.8)
 
-        for v in info.get("valleys", []):
+        for valley_val in valleys:
             try:
-                valley_val = float(v)
+                valley_float = float(valley_val)
             except (TypeError, ValueError):
                 continue
-            if np.isfinite(valley_val):
+            if np.isfinite(valley_float):
                 ax.vlines(
-                    valley_val,
+                    valley_float,
                     offset,
                     offset + ymax,
                     color="grey",
@@ -584,7 +584,7 @@ def _ridge_plot_for_stems(
 
         ax.text(
             x_min,
-            offset + 0.5 * y_max,
+            offset + 0.5 * ymax,
             stem,
             ha="right",
             va="center",

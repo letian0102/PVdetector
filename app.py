@@ -2,6 +2,7 @@
 #           live incremental results + per-sample overrides
 from __future__ import annotations
 import io, zipfile, re, math
+from collections.abc import Iterable
 from pathlib import Path
 import warnings
 
@@ -105,7 +106,9 @@ for key, default in {
     "cli_filter_text": "",
     "cli_counts_native": False,
     "cli_summary_lookup": {},
+    "cli_positions_cache": {},
     "cli_positions_pending": [],
+    "cli_positions_fixed": set(),
     "mode_selector": "Counts CSV files",
     "mode_selector_target": None,
     # incremental‑run machinery
@@ -208,6 +211,76 @@ def _clean_cli_positions(values) -> list[float]:
     return cleaned
 
 
+def _release_cli_positions(stem: str) -> None:
+    """Allow ``stem`` to diverge from its imported CLI positions."""
+
+    fixed_raw = st.session_state.get("cli_positions_fixed")
+    if not fixed_raw:
+        return
+
+    fixed = set(fixed_raw) if not isinstance(fixed_raw, set) else set(fixed_raw)
+    if stem in fixed:
+        fixed.discard(stem)
+        st.session_state.cli_positions_fixed = fixed
+
+
+def _restore_cli_positions(stems: Iterable[str] | None = None) -> None:
+    """Reapply imported CLI landmark positions for ``stems``."""
+
+    if not st.session_state.get("cli_counts_native"):
+        return
+
+    fixed_raw = st.session_state.get("cli_positions_fixed")
+    if not fixed_raw:
+        return
+
+    if stems is None:
+        if isinstance(fixed_raw, (set, list, tuple)):
+            stems_iter = list(fixed_raw)
+        else:
+            stems_iter = []
+    else:
+        stems_iter = list(stems)
+
+    if not stems_iter:
+        return
+
+    cache = st.session_state.get("cli_positions_cache")
+    if not isinstance(cache, dict) or not cache:
+        cache = st.session_state.get("cli_summary_lookup") or {}
+
+    for stem in stems_iter:
+        entry = cache.get(stem)
+        if not isinstance(entry, dict):
+            continue
+
+        peaks = _clean_cli_positions(entry.get("peaks"))
+        valleys = _clean_cli_positions(entry.get("valleys"))
+        if not peaks and not valleys:
+            continue
+
+        info = st.session_state.results.get(stem)
+        if not isinstance(info, dict):
+            continue
+
+        if peaks:
+            info["peaks"] = peaks.copy()
+        if valleys:
+            info["valleys"] = valleys.copy()
+
+        counts = st.session_state.results_raw.get(stem)
+        if counts is not None:
+            info["quality"] = float(stain_quality(counts, info["peaks"], info["valleys"]))
+
+        params = st.session_state.params.get(stem)
+        if isinstance(params, dict) and info.get("peaks"):
+            params["n_peaks"] = len(info["peaks"])
+
+        pk_key, vl_key = f"{stem}__pk_list", f"{stem}__vl_list"
+        st.session_state[pk_key] = info["peaks"].copy()
+        st.session_state[vl_key] = info["valleys"].copy()
+
+
 def _apply_cli_positions(
     stem: str,
     peaks: list[float],
@@ -251,6 +324,28 @@ def _apply_cli_positions(
         valleys = new_valleys
         applied = True
 
+    if applied:
+        cache = st.session_state.get("cli_positions_cache")
+        if isinstance(cache, dict):
+            updated = dict(cache)
+        else:
+            updated = {}
+        updated[stem] = {
+            "peaks": tuple(peaks),
+            "valleys": tuple(valleys),
+        }
+        st.session_state.cli_positions_cache = updated
+
+        fixed_raw = st.session_state.get("cli_positions_fixed")
+        if isinstance(fixed_raw, set):
+            fixed = set(fixed_raw)
+        elif isinstance(fixed_raw, (list, tuple)):
+            fixed = set(fixed_raw)
+        else:
+            fixed = set()
+        fixed.add(stem)
+        st.session_state.cli_positions_fixed = fixed
+
     return peaks, valleys, applied
 
 
@@ -259,6 +354,8 @@ def _mark_sample_dirty(stem: str, reason: str) -> None:
 
     if stem not in st.session_state.results:
         return
+
+    _release_cli_positions(stem)
 
     st.session_state.dirty[stem] = True
     current = set(st.session_state.dirty_reason.get(stem, set()))
@@ -1282,7 +1379,9 @@ def _clear_cli_import() -> None:
     st.session_state["cli_filter_text"] = ""
     st.session_state["cli_counts_native"] = False
     st.session_state["cli_summary_lookup"] = {}
+    st.session_state["cli_positions_cache"] = {}
     st.session_state["cli_positions_pending"] = []
+    st.session_state["cli_positions_fixed"] = set()
 
 
 def _load_cli_import(
@@ -1328,6 +1427,7 @@ def _load_cli_import(
         baseline_sep = DEFAULT_MIN_SEPARATION
 
     summary_lookup: dict[str, dict[str, object]] = {}
+    positions_cache: dict[str, dict[str, object]] = {}
     updated_overrides: dict[str, dict[str, object]] = {}
     for row in summary_df.itertuples(index=False):
         stem = getattr(row, "stem", None)
@@ -1342,6 +1442,7 @@ def _load_cli_import(
             "peaks": tuple(row_peaks),
             "valleys": tuple(row_valleys),
         }
+        positions_cache[stem] = summary_lookup[stem]
 
         n_val = getattr(row, "n_peaks", None)
         n_int = _coerce_int(n_val)
@@ -1373,7 +1474,9 @@ def _load_cli_import(
 
     st.session_state.pre_overrides = updated_overrides
     st.session_state.cli_summary_lookup = summary_lookup
+    st.session_state.cli_positions_cache = positions_cache
     st.session_state.cli_positions_pending = list(summary_lookup)
+    st.session_state.cli_positions_fixed = set(summary_lookup)
 
     samples = [str(s) for s in summary_df.get("sample", []) if isinstance(s, str)]
     markers = [str(m) for m in summary_df.get("marker", []) if isinstance(m, str)]
@@ -1708,6 +1811,7 @@ def _manual_editor(stem: str):
 
     apply_key = f"{stem}_apply_edits"
     if st.button("Apply changes", key=apply_key):
+        _release_cli_positions(stem)
         st.session_state.results[stem]["peaks"]   = pk_list.copy()
         st.session_state.results[stem]["valleys"] = vl_list.copy()
         _mark_raw_ridge_stale()                    # ← rebuild lazily
@@ -3431,6 +3535,7 @@ if st.session_state.run_active and st.session_state.pending:
     if not st.session_state.pending:
         if st.session_state.get("apply_consistency", True):
             enforce_marker_consistency(st.session_state.results)
+            _restore_cli_positions()
             for stem2, info2 in st.session_state.results.items():
                 xs2 = np.asarray(info2.get("xs", []), float)
                 ys2 = np.asarray(info2.get("ys", []), float)

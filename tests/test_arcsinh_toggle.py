@@ -25,6 +25,8 @@ def setup_state():
     st.session_state.aligned_counts = None
     st.session_state.aligned_landmarks = None
     st.session_state.aligned_ridge_png = None
+    st.session_state.cli_counts_native = False
+    st.session_state.cli_summary_df = None
 
 
 def read_bio(bio: io.BytesIO) -> np.ndarray:
@@ -88,4 +90,28 @@ def test_batches_produce_unique_stems():
             assert np.allclose(arr, np.array([1.0, 2.0]))
         else:
             assert np.allclose(arr, np.array([3.0, 4.0]))
+
+
+def test_cli_import_skips_retransforming_counts():
+    setup_state()
+    st.session_state.apply_arcsinh = True
+    st.session_state.cli_counts_native = True
+    st.session_state.cli_summary_df = pd.DataFrame(
+        {
+            "stem": ["s1_CD3_raw_counts"],
+            "sample": ["s1"],
+            "marker": ["CD3"],
+        }
+    )
+
+    expr_df = pd.DataFrame({"CD3": [0.15, 0.32]})
+    meta_df = pd.DataFrame({"sample": ["s1", "s1"]})
+
+    _sync_generated_counts(["CD3"], ["s1"], expr_df, meta_df)
+
+    assert len(st.session_state.generated_csvs) == 1
+    _stem, bio = st.session_state.generated_csvs[0]
+    arr = read_bio(bio)
+    assert np.allclose(arr, np.array([0.15, 0.32]))
+    assert getattr(bio, "arcsinh")
 

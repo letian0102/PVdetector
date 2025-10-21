@@ -103,6 +103,7 @@ for key, default in {
     "cli_summary_selection": [],
     "cli_import_status": None,
     "cli_filter_text": "",
+    "cli_counts_native": False,
     "mode_selector": "Counts CSV files",
     "mode_selector_target": None,
     # incremental‑run machinery
@@ -1170,7 +1171,12 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
             indices = _cached_indices(s, b)
         vals = expr_df.loc[indices, m]
         entry["cell_indices"] = vals.index.tolist()
-        if st.session_state.get("apply_arcsinh", True):
+
+        cli_native = bool(st.session_state.get("cli_counts_native"))
+        if cli_native:
+            counts = vals.to_numpy(dtype=float, copy=True)
+            arcsinh_applied = True
+        elif st.session_state.get("apply_arcsinh", True):
             counts = arcsinh_transform(
                 vals,
                 a=st.session_state.get("arcsinh_a", 1.0),
@@ -1203,6 +1209,7 @@ def _clear_cli_import() -> None:
         st.session_state[key] = None
     st.session_state["cli_summary_selection"] = []
     st.session_state["cli_filter_text"] = ""
+    st.session_state["cli_counts_native"] = False
 
 
 def _load_cli_import(
@@ -1226,6 +1233,7 @@ def _load_cli_import(
     st.session_state.cli_import_status = (
         f"Loaded {len(summary_df)} entries from {summary_name}"
     )
+    st.session_state.cli_counts_native = True
 
     stems = [str(s) for s in summary_df.get("stem", []) if isinstance(s, str) and s]
     valid_stems = set(stems)
@@ -2310,6 +2318,7 @@ with st.sidebar:
                     "meta_name",
                 ):
                     st.session_state[k] = None
+                st.session_state.cli_counts_native = False
                 st.rerun()
 
         with st.expander("Optional: Combine dataset CSV parts"):
@@ -2421,6 +2430,7 @@ with st.sidebar:
                         st.session_state.get("combined_meta_name")
                         or "cell_metadata_combined.csv"
                     )
+                    st.session_state.cli_counts_native = False
                     st.rerun()
                 if col_clear.button(
                     "Clear combined dataset files",
@@ -2453,6 +2463,7 @@ with st.sidebar:
                     st.session_state.expr_name, st.session_state.meta_name = (
                         expr_file.name, meta_file.name
                     )
+                    st.session_state.cli_counts_native = False
 
         expr_df, meta_df = st.session_state.expr_df, st.session_state.meta_df
         if expr_df is not None and meta_df is not None:

@@ -1,7 +1,7 @@
 # app.py  – GPT-assisted bandwidth detector with
 #           live incremental results + per-sample overrides
 from __future__ import annotations
-import io, zipfile, re
+import io, zipfile, re, math
 from pathlib import Path
 import warnings
 
@@ -18,6 +18,10 @@ from peak_valley import (
     kde_peaks_valleys, quick_peak_estimate,
     fig_to_png, enforce_marker_consistency,
 )
+from peak_valley.cli_import import (
+    derive_min_separation,
+    parse_peak_positions,
+)
 from peak_valley.gpt_adapter import (
     ask_gpt_peak_count, ask_gpt_prominence, ask_gpt_bandwidth,
 )
@@ -31,6 +35,8 @@ warnings.filterwarnings(
 
 # ────────────────────────── Streamlit page & state ──────────────────────────
 st.set_page_config("Peak & Valley Detector", None, layout="wide")
+
+DEFAULT_MIN_SEPARATION = 6.0
 st.title("Peak & Valley Detector — CSV *or* full dataset")
 st.warning(
     "**Heads-up:** if you refresh or close this page, all of your uploaded data and results will be lost."
@@ -1215,21 +1221,57 @@ def _load_cli_import(
     st.session_state.generated_csvs.clear()
     st.session_state.generated_meta = {}
 
-    st.session_state.pre_overrides = {
-        stem: values
+    existing_overrides = {
+        stem: dict(values)
         for stem, values in st.session_state.get("pre_overrides", {}).items()
-        if stem in valid_stems
+        if stem in valid_stems and isinstance(values, dict)
     }
     st.session_state.group_assignments = {stem: "Default" for stem in valid_stems}
 
-    n_peaks_series = summary_df.get("n_peaks")
-    if n_peaks_series is not None:
-        for stem, n_val in zip(summary_df.get("stem", []), n_peaks_series):
-            if not isinstance(stem, str) or not stem:
-                continue
-            if pd.isna(n_val):
-                continue
-            st.session_state.pre_overrides.setdefault(stem, {})["n_peaks"] = int(n_val)
+    try:
+        baseline_sep = float(st.session_state.get("Min peak separation", DEFAULT_MIN_SEPARATION))
+    except Exception:
+        baseline_sep = DEFAULT_MIN_SEPARATION
+
+    updated_overrides: dict[str, dict[str, object]] = {}
+    for row in summary_df.itertuples(index=False):
+        stem = getattr(row, "stem", None)
+        if not isinstance(stem, str) or not stem:
+            continue
+
+        overrides = dict(existing_overrides.get(stem, {}))
+
+        n_val = getattr(row, "n_peaks", None)
+        n_int = _coerce_int(n_val)
+        if n_int is not None:
+            overrides["n_peaks"] = n_int
+
+        bw_val = _coerce_float(getattr(row, "bandwidth", None))
+        if bw_val is not None and math.isfinite(bw_val):
+            overrides["bw"] = float(bw_val)
+
+        prom_val = _coerce_float(getattr(row, "prominence", None))
+        if prom_val is not None and math.isfinite(prom_val):
+            overrides["prom"] = float(prom_val)
+
+        sep_val = _coerce_float(getattr(row, "min_separation", None))
+        if sep_val is None:
+            peaks_raw = getattr(row, "peaks", None)
+            peak_values = parse_peak_positions(peaks_raw)
+            sep_val = derive_min_separation(peak_values, baseline_sep)
+        if sep_val is not None:
+            sep_clean = max(0.0, float(sep_val))
+            if abs(sep_clean - baseline_sep) <= 1e-6:
+                overrides.pop("min_separation", None)
+            else:
+                overrides["min_separation"] = sep_clean
+
+        if overrides:
+            updated_overrides[stem] = overrides
+        elif stem in existing_overrides:
+            updated_overrides[stem] = {}
+
+    st.session_state.pre_overrides = updated_overrides
 
     samples = [str(s) for s in summary_df.get("sample", []) if isinstance(s, str)]
     markers = [str(m) for m in summary_df.get("marker", []) if isinstance(m, str)]
@@ -2576,7 +2618,7 @@ with st.sidebar:
         help="Count concave-down turning points as valid peaks."
     )
     min_sep   = st.slider(
-        "Min peak separation", 0.0, 10.0, 6.0, 0.1,
+        "Min peak separation", 0.0, 10.0, DEFAULT_MIN_SEPARATION, 0.1,
         help="Minimum distance required between peaks."
     )
     grid_sz  = st.slider(

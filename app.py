@@ -85,6 +85,7 @@ for key, default in {
     "cli_import_status": None,
     "cli_filter_text": "",
     "mode_selector": "Counts CSV files",
+    "mode_selector_target": None,
     # incremental‑run machinery
     "pending":     [],         # list[io.BytesIO] still to process
     "total_todo":  0,
@@ -99,6 +100,11 @@ for key, default in {
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+
+pending_mode_selector = st.session_state.pop("mode_selector_target", None)
+if pending_mode_selector is not None:
+    st.session_state["mode_selector"] = pending_mode_selector
 
 
 def _keyify(label: str) -> str:
@@ -1270,7 +1276,7 @@ def _load_cli_import(
             if stem not in keep:
                 st.session_state.pop(key, None)
 
-    st.session_state.mode_selector = "Whole dataset"
+    st.session_state.mode_selector_target = "Whole dataset"
 
 
 def _queue_cli_samples(stems: list[str]) -> None:
@@ -1323,7 +1329,7 @@ def _queue_cli_samples(stems: list[str]) -> None:
     st.session_state.run_active = True
     st.session_state.paused = False
     st.session_state.raw_ridge_png = None
-    st.session_state.mode_selector = "Whole dataset"
+    st.session_state.mode_selector_target = "Whole dataset"
     st.session_state.cli_summary_selection = stems
     st.rerun()
 

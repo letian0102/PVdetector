@@ -13,6 +13,11 @@ def test_parse_peak_positions_skips_bad_entries():
     assert peaks == [1.0, 4.2]
 
 
+def test_parse_peak_positions_accepts_scalar_numbers():
+    assert parse_peak_positions(3.14) == [3.14]
+    assert parse_peak_positions(float("nan")) == []
+
+
 def test_derive_min_separation_returns_margin_when_smaller_than_baseline():
     derived = derive_min_separation([0.0, 2.0, 5.0], baseline=6.0)
     assert 0.0 < derived < 2.0

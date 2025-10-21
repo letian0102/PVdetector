@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import numbers
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -25,6 +27,11 @@ def parse_peak_positions(values: Any) -> list[float]:
         parts = list(values)
     elif isinstance(values, Iterable):
         parts = list(values)
+    elif isinstance(values, numbers.Real) and not isinstance(values, bool):
+        value = float(values)
+        if math.isfinite(value):
+            return [value]
+        return []
     else:
         return []
 

@@ -104,6 +104,8 @@ for key, default in {
     "cli_import_status": None,
     "cli_filter_text": "",
     "cli_counts_native": False,
+    "cli_summary_lookup": {},
+    "cli_positions_pending": [],
     "mode_selector": "Counts CSV files",
     "mode_selector_target": None,
     # incremental‑run machinery
@@ -181,6 +183,75 @@ def _summarize_overrides(overrides: dict[str, object]) -> list[str]:
         summary.append(f"first valley: {val}")
 
     return summary
+
+
+def _clean_cli_positions(values) -> list[float]:
+    """Return finite float values extracted from a CLI summary entry."""
+
+    cleaned: list[float] = []
+    if not values:
+        return cleaned
+
+    try:
+        iterator = list(values)
+    except TypeError:
+        return cleaned
+
+    for value in iterator:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(num):
+            cleaned.append(num)
+
+    return cleaned
+
+
+def _apply_cli_positions(
+    stem: str,
+    peaks: list[float],
+    valleys: list[float],
+) -> tuple[list[float], list[float], bool]:
+    """Replace detected peak/valley positions with CLI imports when available."""
+
+    if not st.session_state.get("cli_counts_native"):
+        return peaks, valleys, False
+
+    pending_raw = st.session_state.get("cli_positions_pending")
+    if not pending_raw:
+        return peaks, valleys, False
+
+    if isinstance(pending_raw, (set, tuple)):
+        pending_iter = list(pending_raw)
+    else:
+        pending_iter = list(pending_raw)
+
+    if stem not in pending_iter:
+        return peaks, valleys, False
+
+    lookup = st.session_state.get("cli_summary_lookup")
+    st.session_state.cli_positions_pending = [s for s in pending_iter if s != stem]
+
+    if not isinstance(lookup, dict):
+        return peaks, valleys, False
+
+    entry = lookup.get(stem)
+    if not isinstance(entry, dict):
+        return peaks, valleys, False
+
+    new_peaks = _clean_cli_positions(entry.get("peaks"))
+    new_valleys = _clean_cli_positions(entry.get("valleys"))
+
+    applied = False
+    if new_peaks:
+        peaks = new_peaks
+        applied = True
+    if new_valleys:
+        valleys = new_valleys
+        applied = True
+
+    return peaks, valleys, applied
 
 
 def _mark_sample_dirty(stem: str, reason: str) -> None:
@@ -1210,6 +1281,8 @@ def _clear_cli_import() -> None:
     st.session_state["cli_summary_selection"] = []
     st.session_state["cli_filter_text"] = ""
     st.session_state["cli_counts_native"] = False
+    st.session_state["cli_summary_lookup"] = {}
+    st.session_state["cli_positions_pending"] = []
 
 
 def _load_cli_import(
@@ -1254,6 +1327,7 @@ def _load_cli_import(
     except Exception:
         baseline_sep = DEFAULT_MIN_SEPARATION
 
+    summary_lookup: dict[str, dict[str, object]] = {}
     updated_overrides: dict[str, dict[str, object]] = {}
     for row in summary_df.itertuples(index=False):
         stem = getattr(row, "stem", None)
@@ -1261,6 +1335,13 @@ def _load_cli_import(
             continue
 
         overrides = dict(existing_overrides.get(stem, {}))
+
+        row_peaks = parse_peak_positions(getattr(row, "peaks", None))
+        row_valleys = parse_peak_positions(getattr(row, "valleys", None))
+        summary_lookup[stem] = {
+            "peaks": tuple(row_peaks),
+            "valleys": tuple(row_valleys),
+        }
 
         n_val = getattr(row, "n_peaks", None)
         n_int = _coerce_int(n_val)
@@ -1277,9 +1358,7 @@ def _load_cli_import(
 
         sep_val = _coerce_float(getattr(row, "min_separation", None))
         if sep_val is None:
-            peaks_raw = getattr(row, "peaks", None)
-            peak_values = parse_peak_positions(peaks_raw)
-            sep_val = derive_min_separation(peak_values, baseline_sep)
+            sep_val = derive_min_separation(row_peaks, baseline_sep)
         if sep_val is not None:
             sep_clean = max(0.0, float(sep_val))
             if abs(sep_clean - baseline_sep) <= 1e-6:
@@ -1293,6 +1372,8 @@ def _load_cli_import(
             updated_overrides[stem] = {}
 
     st.session_state.pre_overrides = updated_overrides
+    st.session_state.cli_summary_lookup = summary_lookup
+    st.session_state.cli_positions_pending = list(summary_lookup)
 
     samples = [str(s) for s in summary_df.get("sample", []) if isinstance(s, str)]
     markers = [str(m) for m in summary_df.get("marker", []) if isinstance(m, str)]
@@ -1373,6 +1454,17 @@ def _queue_cli_samples(stems: list[str]) -> None:
     st.session_state.sel_markers = markers
     st.session_state.sel_samples = samples
     st.session_state.sel_batches = batches
+
+    if st.session_state.get("cli_counts_native"):
+        pending_raw = st.session_state.get("cli_positions_pending") or []
+        if isinstance(pending_raw, list):
+            pending_list = pending_raw.copy()
+        else:
+            pending_list = list(pending_raw)
+        for stem in stems:
+            if stem not in pending_list:
+                pending_list.append(stem)
+        st.session_state.cli_positions_pending = pending_list
 
     _sync_generated_counts(markers, samples, expr_df, meta_df, batches)
 
@@ -3292,6 +3384,8 @@ if st.session_state.run_active and st.session_state.pending:
         if drop.size:
             valleys = [float(xs[p_idx + drop[0]])]
 
+    peaks, valleys, cli_applied = _apply_cli_positions(stem, peaks, valleys)
+
     # quality
     qual = stain_quality(cnts, peaks, valleys)
 
@@ -3323,6 +3417,8 @@ if st.session_state.run_active and st.session_state.pending:
         "prom": prom_use,
         "n_peaks": n_use,
     }
+    if cli_applied:
+        st.session_state.params[stem]["n_peaks"] = len(peaks)
     st.session_state.dirty[stem] = False
     st.session_state.dirty_reason.pop(stem, None)
 

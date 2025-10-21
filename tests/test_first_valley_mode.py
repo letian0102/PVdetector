@@ -39,3 +39,13 @@ def test_slope_valley_before_deeper_minimum():
     ys = np.array([5, 4, 3, 2, 2.2, 5, 0, 5, 6, 7], dtype=float)
     valley = _first_valley_slope(xs, ys, 0)
     assert valley == xs[3]
+
+
+def test_first_valley_respects_minimum_separation():
+    xs = np.linspace(0, 2, 201)
+    ys = np.exp(-((xs - 1.0) / 0.08) ** 2) + 0.8 * np.exp(-((xs - 1.65) / 0.08) ** 2)
+    p_left = int(np.argmax(ys[:120]))
+    p_right = 120 + int(np.argmax(ys[120:]))
+
+    valley = _first_valley_slope(xs, ys, p_left, p_right, min_sep=0.3)
+    assert valley - xs[p_left] >= 0.3

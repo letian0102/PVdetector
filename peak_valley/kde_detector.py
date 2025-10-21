@@ -165,16 +165,22 @@ def _evaluate_kde(
     return _fft_gaussian_kde(x, xs, bandwidth)
 
 
-def _first_valley_slope(xs: np.ndarray,
-                        ys: np.ndarray,
-                        p_left: int,
-                        p_right: int | None = None) -> float | None:
+def _first_valley_slope(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    p_left: int,
+    p_right: int | None = None,
+    *,
+    min_sep: float | None = None,
+    drop_frac: float = 0.10,
+) -> float | None:
     """Pick first valley via maximum increase in slope.
 
     The valley is constrained to lie at or before the local minimum
     between the first peak and the next peak (if given).  If the point of
     maximum slope change occurs after the local minimum, the minimum is
-    chosen instead.
+    chosen instead.  A minimum separation from the first peak can be
+    enforced via ``min_sep``.
 
     Parameters
     ----------
@@ -185,6 +191,13 @@ def _first_valley_slope(xs: np.ndarray,
     p_right : int | None, optional
         Index of the next peak.  If ``None`` the search extends to the
         end of the grid.
+    min_sep : float | None, optional
+        Minimum distance allowed between the peak at ``p_left`` and the
+        returned valley.  When ``None`` a small fraction of the
+        peak-to-peak distance is used.
+    drop_frac : float, optional
+        Drop-fraction passed to :func:`_valley_between` for fallback
+        valley selection.
 
     Returns
     -------
@@ -192,7 +205,7 @@ def _first_valley_slope(xs: np.ndarray,
         X‑coordinate of the valley or ``None`` if the slope never
         increases.
     """
-    d2y = np.diff(ys, n=2)
+
     if p_right is None:
         right = len(xs) - 1
     else:
@@ -200,23 +213,70 @@ def _first_valley_slope(xs: np.ndarray,
             return None
         right = p_right
 
-    seg = d2y[p_left:right - 1]
-    if seg.size == 0:
+    if right <= p_left + 1:
         return None
-    rel = np.argmax(seg)
-    if seg[rel] <= 0:
-        return None
-    idx = p_left + 1 + rel
 
-    # do not go past the first local minimum between the peaks
-    dy = np.diff(ys[p_left + 1:right + 1])
+    span = xs[right] - xs[p_left]
+    if not np.isfinite(span) or span <= 0:
+        span = float(xs[1] - xs[0]) if xs.size > 1 else 0.0
+
+    if min_sep is not None and min_sep > 0:
+        min_sep_abs = float(min_sep)
+    else:
+        min_sep_abs = 0.05 * span
+
+    if xs.size > 1:
+        min_sep_abs = max(min_sep_abs, float(xs[1] - xs[0]))
+
+    start_idx = p_left + 1
+    while start_idx < right and xs[start_idx] - xs[p_left] < min_sep_abs:
+        start_idx += 1
+
+    d2y = np.diff(ys, n=2)
+    candidate_idx: int | None = None
+    if start_idx < right:
+        seg = d2y[start_idx - 1 : right - 1]
+        if seg.size:
+            rel = int(np.argmax(seg))
+            if seg[rel] > 0:
+                candidate_idx = start_idx + rel
+
+    dy = np.diff(ys[p_left + 1 : right + 1])
     turn = np.where((dy[:-1] < 0) & (dy[1:] >= 0))[0]
-    if turn.size:
-        min_idx = p_left + 2 + turn[0]
-        if idx > min_idx:
-            idx = min_idx
+    min_idx = p_left + 2 + int(turn[0]) if turn.size else None
 
-    return float(xs[idx])
+    if candidate_idx is None:
+        if min_idx is not None and xs[min_idx] - xs[p_left] >= min_sep_abs:
+            candidate_idx = min_idx
+        elif p_right is not None:
+            return _valley_between(xs, ys, p_left, p_right, drop_frac)
+        else:
+            seg = ys[start_idx : right + 1]
+            if seg.size:
+                candidate_idx = start_idx + int(np.argmin(seg))
+            else:
+                candidate_idx = max(p_left + 1, min(right, start_idx))
+
+    if min_idx is not None and candidate_idx > min_idx:
+        candidate_idx = min_idx
+
+    if p_right is not None:
+        candidate_idx = max(p_left + 1, min(candidate_idx, right - 1))
+    else:
+        candidate_idx = max(p_left + 1, min(candidate_idx, right))
+
+    if xs[candidate_idx] - xs[p_left] < min_sep_abs:
+        if min_idx is not None and xs[min_idx] - xs[p_left] >= min_sep_abs:
+            candidate_idx = min_idx
+        elif p_right is not None:
+            return _valley_between(xs, ys, p_left, p_right, drop_frac)
+        else:
+            seg = ys[start_idx : right + 1]
+            if seg.size:
+                rel = int(np.argmin(seg))
+                candidate_idx = start_idx + rel
+
+    return float(xs[candidate_idx])
 
 
 def _first_valley_drop(xs: np.ndarray,
@@ -446,7 +506,9 @@ def kde_peaks_valleys(
         if first_valley == "drop":
             val = _valley_between(xs, ys, p0, p1, drop_frac)
         else:
-            val = _first_valley_slope(xs, ys, p0, p1)
+            val = _first_valley_slope(
+                xs, ys, p0, p1, min_sep=min_x_sep, drop_frac=drop_frac
+            )
             if val is None:
                 val = _valley_between(xs, ys, p0, p1, drop_frac)
         valleys_x.append(val)
@@ -461,7 +523,9 @@ def kde_peaks_valleys(
         if first_valley == "drop":
             val = _first_valley_drop(xs, ys, p0, drop_frac)
         else:
-            val = _first_valley_slope(xs, ys, p0)
+            val = _first_valley_slope(
+                xs, ys, p0, None, min_sep=min_x_sep, drop_frac=drop_frac
+            )
         if val is not None:
             valleys_x.append(val)
 

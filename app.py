@@ -1,7 +1,8 @@
 # app.py  – GPT-assisted bandwidth detector with
 #           live incremental results + per-sample overrides
 from __future__ import annotations
-import io, zipfile, re
+import io, zipfile, re, math
+from collections.abc import Iterable
 from pathlib import Path
 import warnings
 
@@ -11,12 +12,29 @@ import matplotlib.pyplot as plt
 import streamlit as st
 from openai import OpenAI, AuthenticationError
 
+try:  # NumPy 2.1+
+    from numpy import get_array_backend as _np_get_array_backend  # type: ignore[attr-defined]
+except (ImportError, AttributeError):
+    _np_get_array_backend = None
+
+
+def get_array_backend(*arrays, **kwargs):
+    """Return the array backend associated with ``arrays`` (NumPy fallback)."""
+
+    if _np_get_array_backend is None:
+        return np
+    return _np_get_array_backend(*arrays, **kwargs)
+
 from peak_valley.quality import stain_quality
 
 from peak_valley import (
     arcsinh_transform, read_counts, load_combined_csv,
     kde_peaks_valleys, quick_peak_estimate,
     fig_to_png, enforce_marker_consistency,
+)
+from peak_valley.cli_import import (
+    derive_min_separation,
+    parse_peak_positions,
 )
 from peak_valley.gpt_adapter import (
     ask_gpt_peak_count, ask_gpt_prominence, ask_gpt_bandwidth,
@@ -31,6 +49,8 @@ warnings.filterwarnings(
 
 # ────────────────────────── Streamlit page & state ──────────────────────────
 st.set_page_config("Peak & Valley Detector", None, layout="wide")
+
+DEFAULT_MIN_SEPARATION = 6.0
 st.title("Peak & Valley Detector — CSV *or* full dataset")
 st.warning(
     "**Heads-up:** if you refresh or close this page, all of your uploaded data and results will be lost."
@@ -79,6 +99,18 @@ for key, default in {
     "combined_meta_sources": [],
     "combined_expr_name": None,
     "combined_meta_name": None,
+    "cli_summary_df": None,
+    "cli_summary_name": None,
+    "cli_summary_selection": [],
+    "cli_import_status": None,
+    "cli_filter_text": "",
+    "cli_counts_native": False,
+    "cli_summary_lookup": {},
+    "cli_positions_cache": {},
+    "cli_positions_pending": [],
+    "cli_positions_fixed": set(),
+    "mode_selector": "Counts CSV files",
+    "mode_selector_target": None,
     # incremental‑run machinery
     "pending":     [],         # list[io.BytesIO] still to process
     "total_todo":  0,
@@ -93,6 +125,11 @@ for key, default in {
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+
+pending_mode_selector = st.session_state.pop("mode_selector_target", None)
+if pending_mode_selector is not None:
+    st.session_state["mode_selector"] = pending_mode_selector
 
 
 def _keyify(label: str) -> str:
@@ -151,11 +188,174 @@ def _summarize_overrides(overrides: dict[str, object]) -> list[str]:
     return summary
 
 
+def _clean_cli_positions(values) -> list[float]:
+    """Return finite float values extracted from a CLI summary entry."""
+
+    cleaned: list[float] = []
+    if not values:
+        return cleaned
+
+    try:
+        iterator = list(values)
+    except TypeError:
+        return cleaned
+
+    for value in iterator:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(num):
+            cleaned.append(num)
+
+    return cleaned
+
+
+def _release_cli_positions(stem: str) -> None:
+    """Allow ``stem`` to diverge from its imported CLI positions."""
+
+    fixed_raw = st.session_state.get("cli_positions_fixed")
+    if not fixed_raw:
+        return
+
+    fixed = set(fixed_raw) if not isinstance(fixed_raw, set) else set(fixed_raw)
+    if stem in fixed:
+        fixed.discard(stem)
+        st.session_state.cli_positions_fixed = fixed
+
+
+def _restore_cli_positions(stems: Iterable[str] | None = None) -> None:
+    """Reapply imported CLI landmark positions for ``stems``."""
+
+    if not st.session_state.get("cli_counts_native"):
+        return
+
+    fixed_raw = st.session_state.get("cli_positions_fixed")
+    if not fixed_raw:
+        return
+
+    if stems is None:
+        if isinstance(fixed_raw, (set, list, tuple)):
+            stems_iter = list(fixed_raw)
+        else:
+            stems_iter = []
+    else:
+        stems_iter = list(stems)
+
+    if not stems_iter:
+        return
+
+    cache = st.session_state.get("cli_positions_cache")
+    if not isinstance(cache, dict) or not cache:
+        cache = st.session_state.get("cli_summary_lookup") or {}
+
+    for stem in stems_iter:
+        entry = cache.get(stem)
+        if not isinstance(entry, dict):
+            continue
+
+        peaks = _clean_cli_positions(entry.get("peaks"))
+        valleys = _clean_cli_positions(entry.get("valleys"))
+        if not peaks and not valleys:
+            continue
+
+        info = st.session_state.results.get(stem)
+        if not isinstance(info, dict):
+            continue
+
+        if peaks:
+            info["peaks"] = peaks.copy()
+        if valleys:
+            info["valleys"] = valleys.copy()
+
+        counts = st.session_state.results_raw.get(stem)
+        if counts is not None:
+            info["quality"] = float(stain_quality(counts, info["peaks"], info["valleys"]))
+
+        params = st.session_state.params.get(stem)
+        if isinstance(params, dict) and info.get("peaks"):
+            params["n_peaks"] = len(info["peaks"])
+
+        pk_key, vl_key = f"{stem}__pk_list", f"{stem}__vl_list"
+        st.session_state[pk_key] = info["peaks"].copy()
+        st.session_state[vl_key] = info["valleys"].copy()
+
+
+def _apply_cli_positions(
+    stem: str,
+    peaks: list[float],
+    valleys: list[float],
+) -> tuple[list[float], list[float], bool]:
+    """Replace detected peak/valley positions with CLI imports when available."""
+
+    if not st.session_state.get("cli_counts_native"):
+        return peaks, valleys, False
+
+    pending_raw = st.session_state.get("cli_positions_pending")
+    if not pending_raw:
+        return peaks, valleys, False
+
+    if isinstance(pending_raw, (set, tuple)):
+        pending_iter = list(pending_raw)
+    else:
+        pending_iter = list(pending_raw)
+
+    if stem not in pending_iter:
+        return peaks, valleys, False
+
+    lookup = st.session_state.get("cli_summary_lookup")
+    st.session_state.cli_positions_pending = [s for s in pending_iter if s != stem]
+
+    if not isinstance(lookup, dict):
+        return peaks, valleys, False
+
+    entry = lookup.get(stem)
+    if not isinstance(entry, dict):
+        return peaks, valleys, False
+
+    new_peaks = _clean_cli_positions(entry.get("peaks"))
+    new_valleys = _clean_cli_positions(entry.get("valleys"))
+
+    applied = False
+    if new_peaks:
+        peaks = new_peaks
+        applied = True
+    if new_valleys:
+        valleys = new_valleys
+        applied = True
+
+    if applied:
+        cache = st.session_state.get("cli_positions_cache")
+        if isinstance(cache, dict):
+            updated = dict(cache)
+        else:
+            updated = {}
+        updated[stem] = {
+            "peaks": tuple(peaks),
+            "valleys": tuple(valleys),
+        }
+        st.session_state.cli_positions_cache = updated
+
+        fixed_raw = st.session_state.get("cli_positions_fixed")
+        if isinstance(fixed_raw, set):
+            fixed = set(fixed_raw)
+        elif isinstance(fixed_raw, (list, tuple)):
+            fixed = set(fixed_raw)
+        else:
+            fixed = set()
+        fixed.add(stem)
+        st.session_state.cli_positions_fixed = fixed
+
+    return peaks, valleys, applied
+
+
 def _mark_sample_dirty(stem: str, reason: str) -> None:
     """Mark ``stem`` as needing a rerun and record the triggering reason."""
 
     if stem not in st.session_state.results:
         return
+
+    _release_cli_positions(stem)
 
     st.session_state.dirty[stem] = True
     current = set(st.session_state.dirty_reason.get(stem, set()))
@@ -396,7 +596,7 @@ def _render_override_controls(
         default_sep = (
             sep_prev
             if sep_prev is not None
-            else float(run_defaults.get("min_separation", 0.7))
+            else float(run_defaults.get("min_separation", 6.0))
         )
         sep_val = col_sep.slider(
             "Min peak separation",
@@ -1139,7 +1339,12 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
             indices = _cached_indices(s, b)
         vals = expr_df.loc[indices, m]
         entry["cell_indices"] = vals.index.tolist()
-        if st.session_state.get("apply_arcsinh", True):
+
+        cli_native = bool(st.session_state.get("cli_counts_native"))
+        if cli_native:
+            counts = vals.to_numpy(dtype=float, copy=True)
+            arcsinh_applied = True
+        elif st.session_state.get("apply_arcsinh", True):
             counts = arcsinh_transform(
                 vals,
                 a=st.session_state.get("arcsinh_a", 1.0),
@@ -1163,6 +1368,333 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         st.session_state.generated_meta[stem] = entry
 
 
+# ─────────────────────────── CLI import helpers ──────────────────────────────
+
+def _clear_cli_import() -> None:
+    """Remove CLI import state without touching current results."""
+
+    for key in ("cli_summary_df", "cli_summary_name", "cli_import_status"):
+        st.session_state[key] = None
+    st.session_state["cli_summary_selection"] = []
+    st.session_state["cli_filter_text"] = ""
+    st.session_state["cli_counts_native"] = False
+    st.session_state["cli_summary_lookup"] = {}
+    st.session_state["cli_positions_cache"] = {}
+    st.session_state["cli_positions_pending"] = []
+    st.session_state["cli_positions_fixed"] = set()
+
+
+def _load_cli_import(
+    summary_df: pd.DataFrame,
+    expr_df: pd.DataFrame,
+    meta_df: pd.DataFrame,
+    *,
+    summary_name: str,
+    expr_name: str,
+    meta_name: str,
+) -> None:
+    """Store imported CLI outputs in session state and prime selectors."""
+
+    st.session_state.expr_df = expr_df
+    st.session_state.meta_df = meta_df
+    st.session_state.expr_name = expr_name
+    st.session_state.meta_name = meta_name
+
+    st.session_state.cli_summary_df = summary_df
+    st.session_state.cli_summary_name = summary_name
+    st.session_state.cli_import_status = (
+        f"Loaded {len(summary_df)} entries from {summary_name}"
+    )
+    st.session_state.cli_counts_native = True
+
+    stems = [str(s) for s in summary_df.get("stem", []) if isinstance(s, str) and s]
+    valid_stems = set(stems)
+    st.session_state.cli_summary_selection = stems.copy()
+
+    st.session_state.generated_csvs.clear()
+    st.session_state.generated_meta = {}
+
+    existing_overrides = {
+        stem: dict(values)
+        for stem, values in st.session_state.get("pre_overrides", {}).items()
+        if stem in valid_stems and isinstance(values, dict)
+    }
+    st.session_state.group_assignments = {stem: "Default" for stem in valid_stems}
+
+    try:
+        baseline_sep = float(st.session_state.get("Min peak separation", DEFAULT_MIN_SEPARATION))
+    except Exception:
+        baseline_sep = DEFAULT_MIN_SEPARATION
+
+    summary_lookup: dict[str, dict[str, object]] = {}
+    positions_cache: dict[str, dict[str, object]] = {}
+    updated_overrides: dict[str, dict[str, object]] = {}
+    for row in summary_df.itertuples(index=False):
+        stem = getattr(row, "stem", None)
+        if not isinstance(stem, str) or not stem:
+            continue
+
+        overrides = dict(existing_overrides.get(stem, {}))
+
+        row_peaks = parse_peak_positions(getattr(row, "peaks", None))
+        row_valleys = parse_peak_positions(getattr(row, "valleys", None))
+        summary_lookup[stem] = {
+            "peaks": tuple(row_peaks),
+            "valleys": tuple(row_valleys),
+        }
+        positions_cache[stem] = summary_lookup[stem]
+
+        n_val = getattr(row, "n_peaks", None)
+        n_int = _coerce_int(n_val)
+        if n_int is not None:
+            overrides["n_peaks"] = n_int
+
+        bw_val = _coerce_float(getattr(row, "bandwidth", None))
+        if bw_val is not None and math.isfinite(bw_val):
+            overrides["bw"] = float(bw_val)
+
+        prom_val = _coerce_float(getattr(row, "prominence", None))
+        if prom_val is not None and math.isfinite(prom_val):
+            overrides["prom"] = float(prom_val)
+
+        sep_val = _coerce_float(getattr(row, "min_separation", None))
+        if sep_val is None:
+            sep_val = derive_min_separation(row_peaks, baseline_sep)
+        if sep_val is not None:
+            sep_clean = max(0.0, float(sep_val))
+            if abs(sep_clean - baseline_sep) <= 1e-6:
+                overrides.pop("min_separation", None)
+            else:
+                overrides["min_separation"] = sep_clean
+
+        if overrides:
+            updated_overrides[stem] = overrides
+        elif stem in existing_overrides:
+            updated_overrides[stem] = {}
+
+    st.session_state.pre_overrides = updated_overrides
+    st.session_state.cli_summary_lookup = summary_lookup
+    st.session_state.cli_positions_cache = positions_cache
+    st.session_state.cli_positions_pending = list(summary_lookup)
+    st.session_state.cli_positions_fixed = set(summary_lookup)
+
+    samples = [str(s) for s in summary_df.get("sample", []) if isinstance(s, str)]
+    markers = [str(m) for m in summary_df.get("marker", []) if isinstance(m, str)]
+    batches_raw = summary_df.get("batch")
+    if batches_raw is not None:
+        batches = []
+        for b in batches_raw:
+            batches.append(None if pd.isna(b) else b)
+        st.session_state.sel_batches = sorted({b for b in batches})
+    else:
+        st.session_state.sel_batches = []
+
+    st.session_state.sel_samples = sorted(set(samples))
+    st.session_state.sel_markers = sorted(set(markers))
+
+    keep = valid_stems
+    for bucket in (
+        "results",
+        "fig_pngs",
+        "params",
+        "dirty",
+        "dirty_reason",
+        "results_raw",
+        "results_raw_meta",
+        "aligned_results",
+        "aligned_fig_pngs",
+    ):
+        data = st.session_state.get(bucket)
+        if isinstance(data, dict):
+            if bucket == "fig_pngs":
+                st.session_state[bucket] = {
+                    fn: png for fn, png in data.items() if fn.split(".")[0] in keep
+                }
+            elif bucket == "aligned_fig_pngs":
+                st.session_state[bucket] = {
+                    fn: png for fn, png in data.items() if fn.rsplit("_aligned", 1)[0] in keep
+                }
+            else:
+                st.session_state[bucket] = {k: v for k, v in data.items() if k in keep}
+
+    for key in list(st.session_state.keys()):
+        if key.endswith("__pk_list") or key.endswith("__vl_list"):
+            stem = key.split("__", 1)[0]
+            if stem not in keep:
+                st.session_state.pop(key, None)
+
+    st.session_state.mode_selector_target = "Whole dataset"
+
+
+def _queue_cli_samples(stems: list[str]) -> None:
+    """Queue selected CLI samples for processing."""
+
+    summary_df = st.session_state.get("cli_summary_df")
+    expr_df = st.session_state.get("expr_df")
+    meta_df = st.session_state.get("meta_df")
+
+    if summary_df is None or expr_df is None or meta_df is None:
+        st.error("Load expression, metadata, and summary files before queuing samples.")
+        return
+
+    if not stems:
+        st.warning("Select at least one sample to load.")
+        return
+
+    subset = summary_df[summary_df["stem"].astype(str).isin(stems)]
+    if subset.empty:
+        st.warning("No matching rows were found in the imported summary.")
+        return
+
+    markers = sorted({str(m) for m in subset.get("marker", []) if isinstance(m, str)})
+    samples = sorted({str(s) for s in subset.get("sample", []) if isinstance(s, str)})
+    if "batch" in subset:
+        raw_batches = subset["batch"].tolist()
+        batches = sorted({None if pd.isna(b) else b for b in raw_batches})
+    else:
+        batches = []
+
+    st.session_state.sel_markers = markers
+    st.session_state.sel_samples = samples
+    st.session_state.sel_batches = batches
+
+    if st.session_state.get("cli_counts_native"):
+        pending_raw = st.session_state.get("cli_positions_pending") or []
+        if isinstance(pending_raw, list):
+            pending_list = pending_raw.copy()
+        else:
+            pending_list = list(pending_raw)
+        for stem in stems:
+            if stem not in pending_list:
+                pending_list.append(stem)
+        st.session_state.cli_positions_pending = pending_list
+
+    _sync_generated_counts(markers, samples, expr_df, meta_df, batches)
+
+    chosen = set(stems)
+    files: list[io.BytesIO] = []
+    for stem, bio in st.session_state.generated_csvs:
+        if stem in chosen:
+            bio.seek(0)
+            files.append(bio)
+
+    if not files:
+        st.warning("Unable to locate generated counts for the selected samples.")
+        return
+
+    st.session_state.pending = files
+    st.session_state.total_todo = len(files)
+    st.session_state.run_active = True
+    st.session_state.paused = False
+    st.session_state.raw_ridge_png = None
+    st.session_state.mode_selector_target = "Whole dataset"
+    st.session_state.cli_summary_selection = stems
+    st.rerun()
+
+
+def _render_cli_import_section() -> None:
+    """UI for importing CLI batch outputs and queueing samples."""
+
+    st.markdown("---")
+    with st.expander("Import CLI batch outputs", expanded=False):
+        st.caption(
+            "Upload the `summary.csv`, `expression_matrix_combined.csv`, and "
+            "`cell_metadata_combined.csv` files generated by the CLI to review "
+            "results and re-run specific samples."
+        )
+
+        col_summary, col_expr, col_meta = st.columns(3)
+        summary_file = col_summary.file_uploader(
+            "summary.csv", type=["csv"], key="cli_summary_upload"
+        )
+        expr_file = col_expr.file_uploader(
+            "expression_matrix_combined.csv",
+            type=["csv"],
+            key="cli_expr_upload",
+        )
+        meta_file = col_meta.file_uploader(
+            "cell_metadata_combined.csv",
+            type=["csv"],
+            key="cli_meta_upload",
+        )
+
+        load_col, clear_col = st.columns([3, 1])
+        with load_col:
+            if st.button("Load files", disabled=not (summary_file and expr_file and meta_file)):
+                try:
+                    summary_df = pd.read_csv(summary_file)
+                    expr_df = pd.read_csv(expr_file, low_memory=False)
+                    meta_df = pd.read_csv(meta_file, low_memory=False)
+                except Exception as exc:
+                    st.error(f"Failed to read uploaded files: {exc}")
+                else:
+                    _load_cli_import(
+                        summary_df,
+                        expr_df,
+                        meta_df,
+                        summary_name=summary_file.name,
+                        expr_name=expr_file.name,
+                        meta_name=meta_file.name,
+                    )
+                    st.rerun()
+
+        with clear_col:
+            if st.button("Clear import", disabled=st.session_state.cli_summary_df is None):
+                _clear_cli_import()
+                st.rerun()
+
+        summary_df = st.session_state.get("cli_summary_df")
+        if summary_df is None:
+            return
+
+        status = st.session_state.get("cli_import_status")
+        if status:
+            st.success(status)
+
+        filter_text = st.text_input(
+            "Filter imported rows",
+            value=st.session_state.get("cli_filter_text", ""),
+            key="cli_filter_input",
+            placeholder="Search by stem, sample, or marker",
+        )
+        st.session_state.cli_filter_text = filter_text
+
+        view_df = summary_df.copy()
+        if filter_text:
+            def _match(col: str) -> pd.Series:
+                if col not in view_df.columns:
+                    return pd.Series(False, index=view_df.index)
+                return view_df[col].astype(str).str.contains(filter_text, case=False, na=False)
+
+            mask = (
+                view_df["stem"].astype(str).str.contains(filter_text, case=False, na=False)
+                | _match("sample")
+                | _match("marker")
+            )
+            view_df = view_df[mask]
+
+        display_cols = [
+            c
+            for c in ["stem", "sample", "marker", "batch", "n_peaks", "peaks", "valleys", "quality"]
+            if c in view_df.columns
+        ]
+        if display_cols:
+            st.dataframe(view_df[display_cols], use_container_width=True, height=240)
+
+        options = view_df["stem"].astype(str).tolist()
+        defaults = [s for s in st.session_state.get("cli_summary_selection", []) if s in options]
+        selection = st.multiselect(
+            "Samples to queue",
+            options,
+            default=defaults,
+            key="cli_summary_select",
+            help="Choose the samples to re-run in the Streamlit editor.",
+        )
+
+        st.session_state.cli_summary_selection = selection
+
+        if st.button("Load selected samples into detector", disabled=not selection):
+            _queue_cli_samples(selection)
 # ───────────────────────── helper: (re)plot a dataset ───────────────────────
 
 def _plot_png_fixed(stem, xs, ys, peaks, valleys,
@@ -1280,6 +1812,7 @@ def _manual_editor(stem: str):
 
     apply_key = f"{stem}_apply_edits"
     if st.button("Apply changes", key=apply_key):
+        _release_cli_positions(stem)
         st.session_state.results[stem]["peaks"]   = pk_list.copy()
         st.session_state.results[stem]["valleys"] = vl_list.copy()
         _mark_raw_ridge_stale()                    # ← rebuild lazily
@@ -1899,8 +2432,10 @@ def render_results(container):
 # ─────────────────────────────── SIDEBAR ─────────────────────────────────────
 with st.sidebar:
     mode = st.radio(
-        "Choose mode", ["Counts CSV files", "Whole dataset"],
-        help="Work with individual counts files or an entire dataset."
+        "Choose mode",
+        ["Counts CSV files", "Whole dataset"],
+        help="Work with individual counts files or an entire dataset.",
+        key="mode_selector",
     )
 
     # 1 Counts-CSV workflow
@@ -1980,6 +2515,7 @@ with st.sidebar:
                     "meta_name",
                 ):
                     st.session_state[k] = None
+                st.session_state.cli_counts_native = False
                 st.rerun()
 
         with st.expander("Optional: Combine dataset CSV parts"):
@@ -2091,6 +2627,7 @@ with st.sidebar:
                         st.session_state.get("combined_meta_name")
                         or "cell_metadata_combined.csv"
                     )
+                    st.session_state.cli_counts_native = False
                     st.rerun()
                 if col_clear.button(
                     "Clear combined dataset files",
@@ -2123,6 +2660,7 @@ with st.sidebar:
                     st.session_state.expr_name, st.session_state.meta_name = (
                         expr_file.name, meta_file.name
                     )
+                    st.session_state.cli_counts_native = False
 
         expr_df, meta_df = st.session_state.expr_df, st.session_state.meta_df
         if expr_df is not None and meta_df is not None:
@@ -2301,7 +2839,7 @@ with st.sidebar:
         help="Count concave-down turning points as valid peaks."
     )
     min_sep   = st.slider(
-        "Min peak separation", 0.0, 10.0, 0.7, 0.1,
+        "Min peak separation", 0.0, 10.0, DEFAULT_MIN_SEPARATION, 0.1,
         help="Minimum distance required between peaks."
     )
     grid_sz  = st.slider(
@@ -2660,6 +3198,9 @@ with st.sidebar:
     )
 
 
+
+_render_cli_import_section()
+
 # ───────────────── main buttons & global progress bar ────────────────────────
 run_col, clear_col, pause_col = st.columns(3)
 if clear_col.button("Clear results"):
@@ -2948,6 +3489,8 @@ if st.session_state.run_active and st.session_state.pending:
         if drop.size:
             valleys = [float(xs[p_idx + drop[0]])]
 
+    peaks, valleys, cli_applied = _apply_cli_positions(stem, peaks, valleys)
+
     # quality
     qual = stain_quality(cnts, peaks, valleys)
 
@@ -2979,6 +3522,8 @@ if st.session_state.run_active and st.session_state.pending:
         "prom": prom_use,
         "n_peaks": n_use,
     }
+    if cli_applied:
+        st.session_state.params[stem]["n_peaks"] = len(peaks)
     st.session_state.dirty[stem] = False
     st.session_state.dirty_reason.pop(stem, None)
 
@@ -2991,6 +3536,7 @@ if st.session_state.run_active and st.session_state.pending:
     if not st.session_state.pending:
         if st.session_state.get("apply_consistency", True):
             enforce_marker_consistency(st.session_state.results)
+            _restore_cli_positions()
             for stem2, info2 in st.session_state.results.items():
                 xs2 = np.asarray(info2.get("xs", []), float)
                 ys2 = np.asarray(info2.get("ys", []), float)

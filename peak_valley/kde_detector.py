@@ -1,7 +1,7 @@
 from __future__ import annotations
 import numpy as np
 from scipy.stats  import gaussian_kde
-from scipy.signal import find_peaks, fftconvolve
+from scipy.signal import find_peaks, fftconvolve, peak_prominences
 from .consistency import _enforce_valley_rule
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
@@ -392,6 +392,7 @@ def kde_peaks_valleys(
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,
     first_valley   : str = "slope",
+    relative_prominence: float | None = 0.12,
 ):
     x = np.asarray(data, float)
     x = x[np.isfinite(x)]
@@ -425,6 +426,15 @@ def kde_peaks_valleys(
         kw["width"] = min_width
     locs, _ = find_peaks(ys, **kw, distance=distance)
 
+    if locs.size and relative_prominence and relative_prominence > 0:
+        prominences, _, _ = peak_prominences(ys, locs)
+        max_prom = float(np.max(prominences)) if prominences.size else 0.0
+        if max_prom > 0:
+            keep = prominences >= (relative_prominence * max_prom)
+            if not np.any(keep):
+                keep = prominences == max_prom
+            locs = locs[keep]
+
     if turning_peak and curvature_thresh and curvature_thresh > 0:
         dy  = np.gradient(ys, xs)                 # 1st derivative
         d2y = np.gradient(dy,  xs)                # 2nd derivative
@@ -447,6 +457,15 @@ def kde_peaks_valleys(
 
     locs = _merge_close_peaks(xs, ys, locs,
             min_x_sep=min_x_sep, min_valley_drop=min_valley_drop)
+
+    if locs.size and relative_prominence and relative_prominence > 0:
+        prominences, _, _ = peak_prominences(ys, locs)
+        max_prom = float(np.max(prominences)) if prominences.size else 0.0
+        if max_prom > 0:
+            keep = prominences >= (relative_prominence * max_prom)
+            if not np.any(keep):
+                keep = prominences == max_prom
+            locs = locs[keep]
 
     # relax prominence if too few
     if n_peaks is not None and locs.size < n_peaks:
@@ -479,6 +498,20 @@ def kde_peaks_valleys(
         peaks_x = keep
 
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+
+    if peaks_idx and relative_prominence and relative_prominence > 0:
+        idx_array = np.asarray(peaks_idx, dtype=int)
+        prominences, _, _ = peak_prominences(ys, idx_array)
+        max_prom = float(np.max(prominences)) if prominences.size else 0.0
+        if max_prom > 0:
+            keep_mask = prominences >= (relative_prominence * max_prom)
+            if not np.any(keep_mask):
+                keep_mask = prominences == max_prom
+            idx_array = idx_array[keep_mask]
+            if idx_array.size == 0:
+                idx_array = np.asarray([peaks_idx[int(np.argmax(prominences))]])
+            peaks_idx = idx_array.tolist()
+            peaks_x = xs[idx_array].tolist()
 
     # ---------- GMM fallback (unchanged) ----------
     if n_peaks is not None and len(peaks_x) < n_peaks:

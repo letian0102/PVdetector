@@ -1819,6 +1819,180 @@ def _manual_editor(stem: str):
         st.rerun()
 
 
+def _render_group_controls(
+    stems: list[str], *,
+    bw_label: str,
+    prom_mode: str,
+    prom_default: float | None,
+    run_defaults: dict[str, object],
+) -> None:
+    """Render the group-assignment UI for the given stems."""
+
+    stems_unique = [stem for stem in dict.fromkeys(stems) if stem]
+
+    # Drop any lingering assignments for stems no longer in scope.
+    for stem in list(st.session_state.group_assignments):
+        if stem not in stems_unique:
+            st.session_state.group_assignments.pop(stem, None)
+
+    if not stems_unique:
+        return
+
+    previous_assignments = dict(st.session_state.group_assignments)
+    st.session_state.group_overrides.setdefault("Default", {})
+
+    st.markdown("---\n### Sample groups (optional)")
+
+    col_name, col_add = st.columns([3, 1])
+
+    if st.session_state.get("group_new_name_reset", False):
+        st.session_state.group_new_name = ""
+        st.session_state.group_new_name_reset = False
+
+    new_group_name = col_name.text_input(
+        "Create new group",
+        key="group_new_name",
+        placeholder="e.g. Treatment A",
+        help="Groups let you tune detector settings once and apply them to multiple samples.",
+    )
+    if col_add.button("Add group", key="group_add_btn"):
+        clean = new_group_name.strip()
+        if clean:
+            if clean not in st.session_state.group_overrides:
+                st.session_state.group_overrides[clean] = {}
+            st.session_state.group_new_name_reset = True
+        st.rerun()
+
+    group_names = sorted(st.session_state.group_overrides)
+    valid_groups = set(group_names)
+
+    current_assignments: dict[str, str] = {}
+    for stem in stems_unique:
+        group = st.session_state.group_assignments.get(stem, "Default")
+        if group not in valid_groups:
+            group = "Default"
+        current_assignments[stem] = group
+
+    if len(group_names) > 1:
+        st.caption(
+            "Select the samples that belong to each group. Samples left unselected stay in the Default group."
+        )
+
+    group_selections: dict[str, list[str]] = {}
+    for group_name in group_names:
+        if group_name == "Default":
+            continue
+        selection_key = f"group_samples__{_keyify(group_name)}"
+        default_selection = [
+            stem for stem, grp in current_assignments.items() if grp == group_name
+        ]
+        existing_selection = st.session_state.get(selection_key)
+        if isinstance(existing_selection, list):
+            sanitized_existing = [stem for stem in existing_selection if stem in stems_unique]
+            if sanitized_existing != existing_selection:
+                st.session_state[selection_key] = sanitized_existing
+            default_values = sanitized_existing
+        else:
+            default_values = default_selection
+
+        selection = st.multiselect(
+            f"Samples in {group_name}",
+            options=stems_unique,
+            default=default_values,
+            key=selection_key,
+            help="Choose the samples that should inherit this group's overrides.",
+        )
+        group_selections[group_name] = selection
+
+    new_assignments = {stem: "Default" for stem in stems_unique}
+    duplicate_samples: dict[str, list[str]] = {}
+
+    for group_name in group_names:
+        if group_name == "Default":
+            continue
+        for stem in group_selections.get(group_name, []):
+            if stem not in new_assignments:
+                continue
+            previous_group = new_assignments.get(stem, "Default")
+            if previous_group != "Default" and previous_group != group_name:
+                duplicate_samples.setdefault(stem, [previous_group]).append(group_name)
+            new_assignments[stem] = group_name
+
+    changed_assignments = [
+        stem
+        for stem, group in new_assignments.items()
+        if previous_assignments.get(stem, "Default") != group
+    ]
+
+    st.session_state.group_assignments = new_assignments
+    for stem in changed_assignments:
+        _mark_sample_dirty(stem, "group")
+
+    if duplicate_samples:
+        dup_messages = [
+            f"{sample}: {', '.join(groups)}" for sample, groups in duplicate_samples.items()
+        ]
+        st.warning(
+            "Some samples were assigned to multiple groups. The last group in the list above will be used for each sample: "
+            + "; ".join(dup_messages)
+        )
+
+    default_samples = [stem for stem, group in new_assignments.items() if group == "Default"]
+    if default_samples and len(group_names) > 1:
+        st.caption(
+            "Samples currently using the Default group: " + ", ".join(default_samples)
+        )
+    elif len(group_names) == 1:
+        st.caption(
+            "All samples currently use the Default group. Create a group above to assign samples."
+        )
+
+    if any(g != "Default" for g in group_names):
+        st.caption("Group-level overrides apply before per-sample overrides.")
+
+    for group_name in group_names:
+        if group_name == "Default":
+            continue
+
+        with st.expander(f"Group: {group_name}", expanded=False):
+            if st.button("Remove group", key=f"group_remove__{group_name}"):
+                affected = [
+                    stem
+                    for stem, grp in st.session_state.group_assignments.items()
+                    if grp == group_name
+                ]
+                st.session_state.group_overrides.pop(group_name, None)
+                for stem in affected:
+                    st.session_state.group_assignments[stem] = "Default"
+                    _mark_sample_dirty(stem, "group")
+                group_selection_key = f"group_samples__{_keyify(group_name)}"
+                if group_selection_key in st.session_state:
+                    st.session_state.pop(group_selection_key)
+                st.rerun()
+
+            prev_group = dict(st.session_state.group_overrides.get(group_name, {}))
+            group_overrides = _render_override_controls(
+                f"group_{group_name}",
+                prev=prev_group,
+                bw_label=bw_label,
+                prom_mode=prom_mode,
+                prom_default=prom_default,
+                run_defaults=run_defaults,
+            )
+            st.session_state.group_overrides[group_name] = group_overrides
+
+            if group_overrides != prev_group:
+                for stem, grp in st.session_state.group_assignments.items():
+                    if grp == group_name:
+                        _mark_sample_dirty(stem, "group")
+
+            summary = _summarize_overrides(group_overrides)
+            if summary:
+                st.caption("Overrides: " + ", ".join(summary))
+            else:
+                st.caption("Using run setting for this group.")
+
+
 def _render_pre_run_overrides(
     stems: list[str], *,
     bw_label: str,
@@ -2895,177 +3069,15 @@ with st.sidebar:
             if stem not in seen and stem not in st.session_state.results:
                 st.session_state.pre_overrides.pop(stem, None)
 
-        for stem in list(st.session_state.group_assignments):
-            if stem not in seen:
-                st.session_state.group_assignments.pop(stem, None)
-
-        previous_assignments = dict(st.session_state.group_assignments)
-        st.session_state.group_overrides.setdefault("Default", {})
+        _render_group_controls(
+            stems_for_override,
+            bw_label=bw_label,
+            prom_mode=prom_mode,
+            prom_default=prom_val,
+            run_defaults=run_defaults,
+        )
 
         if stems_for_override:
-            st.markdown("---\n### Sample groups (optional)")
-
-            col_name, col_add = st.columns([3, 1])
-
-            if st.session_state.get("group_new_name_reset", False):
-                st.session_state.group_new_name = ""
-                st.session_state.group_new_name_reset = False
-
-            new_group_name = col_name.text_input(
-                "Create new group",
-                key="group_new_name",
-                placeholder="e.g. Treatment A",
-                help="Groups let you tune detector settings once and apply them to multiple samples.",
-            )
-            if col_add.button("Add group", key="group_add_btn"):
-                clean = new_group_name.strip()
-                if clean:
-                    if clean not in st.session_state.group_overrides:
-                        st.session_state.group_overrides[clean] = {}
-                    st.session_state.group_new_name_reset = True
-                st.rerun()
-
-            group_names = sorted(st.session_state.group_overrides)
-
-            valid_groups = set(group_names)
-            current_assignments: dict[str, str] = {}
-            for stem in stems_for_override:
-                group = st.session_state.group_assignments.get(stem, "Default")
-                if group not in valid_groups:
-                    group = "Default"
-                current_assignments[stem] = group
-
-            if len(group_names) > 1:
-                st.caption(
-                    "Select the samples that belong to each group. Samples left unselected stay in the Default group."
-                )
-
-            group_selections: dict[str, list[str]] = {}
-            for group_name in group_names:
-                if group_name == "Default":
-                    continue
-
-                selection_key = f"group_samples__{_keyify(group_name)}"
-
-                default_selection = [
-                    stem
-                    for stem in stems_for_override
-                    if current_assignments.get(stem, "Default") == group_name
-                ]
-
-                existing_selection = st.session_state.get(selection_key)
-                if isinstance(existing_selection, list):
-                    sanitized_existing = [
-                        stem for stem in existing_selection if stem in stems_for_override
-                    ]
-                    if sanitized_existing != existing_selection:
-                        st.session_state[selection_key] = sanitized_existing
-                    default_values = sanitized_existing
-                else:
-                    default_values = default_selection
-
-                selection = st.multiselect(
-                    f"Samples in {group_name}",
-                    options=stems_for_override,
-                    default=default_values,
-                    key=selection_key,
-                    help="Choose the samples that should inherit this group's overrides.",
-                )
-                group_selections[group_name] = selection
-
-            new_assignments: dict[str, str] = {
-                stem: "Default" for stem in stems_for_override
-            }
-            duplicate_samples: dict[str, list[str]] = {}
-
-            for group_name in group_names:
-                if group_name == "Default":
-                    continue
-                for stem in group_selections.get(group_name, []):
-                    if stem not in stems_for_override:
-                        continue
-                    previous_group = new_assignments.get(stem, "Default")
-                    if previous_group != "Default" and previous_group != group_name:
-                        duplicate_samples.setdefault(stem, [previous_group]).append(group_name)
-                    new_assignments[stem] = group_name
-
-            changed_assignments = [
-                stem
-                for stem, group in new_assignments.items()
-                if previous_assignments.get(stem, "Default") != group
-            ]
-            st.session_state.group_assignments = new_assignments
-            for stem in changed_assignments:
-                _mark_sample_dirty(stem, "group")
-
-            if duplicate_samples:
-                dup_messages = [
-                    f"{sample}: {', '.join(groups)}" for sample, groups in duplicate_samples.items()
-                ]
-                st.warning(
-                    "Some samples were assigned to multiple groups. The last group in the list above will be used for each sample: "
-                    + "; ".join(dup_messages)
-                )
-
-            default_samples = [
-                stem for stem, group in new_assignments.items() if group == "Default"
-            ]
-            if default_samples and len(group_names) > 1:
-                st.caption(
-                    "Samples currently using the Default group: " + ", ".join(default_samples)
-                )
-            elif len(group_names) == 1:
-                st.caption(
-                    "All samples currently use the Default group. Create a group above to assign samples."
-                )
-
-            if any(g != "Default" for g in group_names):
-                st.caption(
-                    "Group-level overrides apply before per-sample overrides."
-                )
-
-            for group_name in group_names:
-                if group_name == "Default":
-                    continue
-
-                with st.expander(f"Group: {group_name}", expanded=False):
-                    if st.button("Remove group", key=f"group_remove__{group_name}"):
-                        affected = [
-                            stem
-                            for stem, grp in st.session_state.group_assignments.items()
-                            if grp == group_name
-                        ]
-                        st.session_state.group_overrides.pop(group_name, None)
-                        for stem in affected:
-                            st.session_state.group_assignments[stem] = "Default"
-                            _mark_sample_dirty(stem, "group")
-                        group_selection_key = f"group_samples__{_keyify(group_name)}"
-                        if group_selection_key in st.session_state:
-                            st.session_state.pop(group_selection_key)
-                        st.rerun()
-
-                    prev_group = dict(st.session_state.group_overrides.get(group_name, {}))
-                    group_overrides = _render_override_controls(
-                        f"group_{group_name}",
-                        prev=prev_group,
-                        bw_label=bw_label,
-                        prom_mode=prom_mode,
-                        prom_default=prom_val,
-                        run_defaults=run_defaults,
-                    )
-                    st.session_state.group_overrides[group_name] = group_overrides
-
-                    if group_overrides != prev_group:
-                        for stem, grp in st.session_state.group_assignments.items():
-                            if grp == group_name:
-                                _mark_sample_dirty(stem, "group")
-
-                    summary = _summarize_overrides(group_overrides)
-                    if summary:
-                        st.caption("Overrides: " + ", ".join(summary))
-                    else:
-                        st.caption("Using run setting for this group.")
-
             _render_pre_run_overrides(
                 stems_for_override,
                 bw_label=bw_label,
@@ -3117,6 +3129,15 @@ with st.sidebar:
                 and stem not in st.session_state.results
             ):
                 st.session_state.pre_overrides.pop(stem, None)
+
+        stems_for_override = [combo["stem"] for combo in combos]
+        _render_group_controls(
+            stems_for_override,
+            bw_label=bw_label,
+            prom_mode=prom_mode,
+            prom_default=prom_val,
+            run_defaults=run_defaults,
+        )
 
         if combos:
             _render_dataset_overrides(

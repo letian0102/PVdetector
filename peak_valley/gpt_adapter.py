@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import re
 import textwrap
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import numpy as np
 from openai import AuthenticationError, OpenAI
 from scipy.signal import find_peaks, peak_prominences, peak_widths
+from scipy.stats import gaussian_kde
 from sklearn.mixture import GaussianMixture
 
 from .kde_detector import quick_peak_estimate
@@ -409,13 +410,7 @@ def _apply_peak_caps(
     requested_max: int,
 ) -> tuple[int, dict[str, Any]]:
     safe_max = max(1, int(requested_max))
-    heuristics: dict[str, Any] = {}
-
-    heuristics["requested_max"] = safe_max
-
-    tri_modal_markers = {"CD4", "CD45RA", "CD45RO"}
-    tri_modal = bool(marker_name and marker_name.upper() in tri_modal_markers)
-    heuristics["tri_modal_marker"] = tri_modal
+    heuristics: dict[str, Any] = {"requested_max": safe_max}
 
     has_two, two_hits, min_weight, separation_info = _strong_two_peak_signal(feature_payload)
     heuristics["evidence_for_two"] = has_two
@@ -423,21 +418,10 @@ def _apply_peak_caps(
     heuristics["min_component_weight_k2"] = min_weight
     heuristics["peak_separation"] = separation_info
 
-    if safe_max >= 3 and not tri_modal:
-        safe_max = 2
-        heuristics["non_tri_modal_cap"] = 2
-
-    if safe_max >= 2 and not has_two:
-        safe_max = 1
-        heuristics["forced_peak_cap"] = 1
-
     if safe_max >= 3:
         has_three, three_hits = _strong_three_peak_signal(feature_payload)
         heuristics["evidence_for_three"] = has_three
         heuristics["support_three_signals"] = three_hits
-        if not has_three:
-            safe_max = 2
-            heuristics["forced_peak_cap"] = heuristics.get("forced_peak_cap", 2)
     else:
         heuristics["evidence_for_three"] = False
         heuristics["support_three_signals"] = []
@@ -447,22 +431,130 @@ def _apply_peak_caps(
 
 
 def _default_priors(marker_name: Optional[str]) -> dict[str, Any]:
-    tri_modal = {"CD4", "CD45RA", "CD45RO"}
     priors = {
         "typical_peaks": {
             "CD4": [1, 3],
             "CD45RA": [1, 3],
             "CD45RO": [1, 3],
-        },
-        "others_max": 2,
+        }
     }
-    if marker_name and marker_name.upper() not in tri_modal:
-        priors["marker_max"] = 2
     return priors
+
+
+def _round_series(values: Sequence[float], decimals: int = 4) -> list[float]:
+    """Return a JSON-friendly rounded list."""
+
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        return []
+    return [float(np.round(v, decimals)) for v in arr.tolist()]
+
+
+def _summarize_kde(
+    values: np.ndarray,
+    lo: float,
+    hi: float,
+    bandwidth: Optional[float | str],
+    *,
+    grid_points: int = 48,
+) -> dict[str, Any]:
+    """Create a compact KDE summary aligned with the plotting bandwidth."""
+
+    if bandwidth in (None, "", "none"):
+        return {}
+
+    bw_param: Any
+    if isinstance(bandwidth, str):
+        bw_param = bandwidth
+    elif np.isscalar(bandwidth):
+        bw_param = float(bandwidth)
+        if not np.isfinite(bw_param):
+            return {}
+    else:
+        bw_param = None
+
+    x = np.asarray(values, dtype=float)
+    if x.size == 0:
+        return {}
+
+    # Match KDE heuristics used in the main detector: limit extremely large
+    # samples to a manageable size for the expensive covariance step.
+    if x.size > 10_000:
+        x = np.random.choice(x, 10_000, replace=False)
+
+    try:
+        kde = gaussian_kde(x, bw_method=bandwidth)
+    except Exception:
+        # Report the requested bandwidth so GPT knows what we intended, even
+        # if KDE fitting failed (e.g., degenerate sample).
+        return {
+            "bandwidth_param": bw_param if bw_param is not None else str(bandwidth),
+            "bandwidth_value": None,
+        }
+
+    std = float(np.std(x, ddof=1)) if x.size > 1 else 0.0
+    bw_value = float(kde.factor * std)
+
+    span = float(hi - lo)
+    if not np.isfinite(span) or span <= 0:
+        lo = float(np.min(x))
+        hi = float(np.max(x)) if x.size else lo + 1.0
+        if not np.isfinite(hi) or hi <= lo:
+            hi = lo + 1.0
+        span = float(hi - lo)
+
+    margin = 0.05 * span if span > 0 else 1.0
+    grid_lo = lo - margin
+    grid_hi = hi + margin
+    if not np.isfinite(grid_lo) or not np.isfinite(grid_hi) or grid_hi <= grid_lo:
+        grid_lo = lo
+        grid_hi = hi if hi > lo else lo + 1.0
+
+    xs = np.linspace(grid_lo, grid_hi, int(max(16, grid_points)))
+    ys = np.asarray(kde(xs), dtype=float)
+    ys[~np.isfinite(ys)] = 0.0
+
+    peaks_info: list[dict[str, Any]] = []
+    if ys.size and np.max(ys) > 0:
+        prom_thresh = 0.05 * float(np.max(ys))
+        idx, _ = find_peaks(ys, prominence=prom_thresh, width=1)
+        if idx.size:
+            prominences, left_bases, right_bases = peak_prominences(ys, idx)
+            widths_samples = peak_widths(ys, idx, rel_height=0.5)[0]
+            step = float(xs[1] - xs[0]) if xs.size > 1 else 1.0
+            order = np.argsort(ys[idx])[::-1]
+            for pos in order[:3]:
+                j = idx[pos]
+                left = int(max(0, np.floor(left_bases[pos])))
+                right = int(min(len(ys) - 1, np.ceil(right_bases[pos])))
+                seg = ys[left : right + 1]
+                valley_depth = float(seg.min()) if seg.size else None
+                width_val = float(widths_samples[pos] * step)
+                peaks_info.append(
+                    {
+                        "x": float(xs[j]),
+                        "height": float(ys[j]),
+                        "prominence": float(prominences[pos]),
+                        "width": width_val,
+                        "valley_depth": valley_depth,
+                    }
+                )
+
+    return {
+        "bandwidth_param": bw_param if bw_param is not None else str(bandwidth),
+        "bandwidth_value": float(bw_value) if np.isfinite(bw_value) else None,
+        "grid": {
+            "x": _round_series(xs, decimals=4),
+            "density": _round_series(ys, decimals=6),
+        },
+        "peaks": peaks_info,
+    }
 
 
 def _build_feature_payload(
     counts_full: Optional[np.ndarray],
+    *,
+    kde_bandwidth: Optional[float | str] = None,
 ) -> dict[str, Any]:
     """Construct histogram + analytic features for GPT."""
 
@@ -514,6 +606,11 @@ def _build_feature_payload(
         "silverman_k1_vs_k2_p": None,
         "gmm": gmm_stats,
     }
+
+    if kde_bandwidth is not None:
+        kde_summary = _summarize_kde(values, lo, hi, kde_bandwidth)
+        if kde_summary:
+            payload["kde"] = kde_summary
 
     return payload
 
@@ -644,6 +741,7 @@ def ask_gpt_peak_count(
     batch_id: str | None = None,
     features: Optional[dict[str, Any]] = None,
     priors: Optional[dict[str, Any]] = None,
+    kde_bandwidth: Optional[float | str] = None,
 ) -> int | None:
     """Query GPT for the number of visible density peaks using structured output."""
 
@@ -679,7 +777,7 @@ def ask_gpt_peak_count(
     if features is not None:
         feature_payload = dict(features)
     else:
-        feature_payload = _build_feature_payload(counts_full)
+        feature_payload = _build_feature_payload(counts_full, kde_bandwidth=kde_bandwidth)
 
     safe_max, heuristic_info = _apply_peak_caps(feature_payload, marker_name, requested_max)
     payload["meta"]["allowed_peaks_max"] = safe_max
@@ -692,9 +790,8 @@ def ask_gpt_peak_count(
     system = (
         "You are a cytometry/ADT gating assistant. Infer the number of visible density peaks "
         "(modes) using only the provided features. Prefer fewer peaks unless strong evidence "
-        "suggests more. For CD4 and sometimes CD45RA/RO, allow 3 peaks; otherwise treat 1–2 as typical. "
-        "Tiny shoulders are not peaks unless prominence and width thresholds are met. Output only the JSON "
-        "object described by the schema."
+        "suggests more, but never exceed the allowed peak cap. Tiny shoulders are not peaks unless "
+        "prominence and width thresholds are met. Output only the JSON object described by the schema."
     )
 
     response_format = {

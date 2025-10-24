@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import re
 import textwrap
+import warnings
 from typing import Any, Optional
 
 import numpy as np
 from openai import AuthenticationError, OpenAI
 from scipy.signal import find_peaks, peak_prominences, peak_widths
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.mixture import GaussianMixture
 
 from .kde_detector import quick_peak_estimate
@@ -152,22 +154,33 @@ def _gmm_statistics(x: np.ndarray, max_components: int = 3) -> dict[str, Any]:
         return stats
 
     data = x.reshape(-1, 1)
+    unique_vals = np.unique(x)
+    unique_count = int(unique_vals.size)
+
     gmms: dict[int, GaussianMixture] = {}
     for k in range(1, max_components + 1):
+        if unique_count == 0:
+            stats["bic"][f"k{k}"] = None
+            continue
+        if k > unique_count:
+            stats["bic"][f"k{k}"] = None
+            continue
         try:
-            gm = GaussianMixture(
-                n_components=k,
-                covariance_type="full",
-                random_state=0,
-                # ``n_init='auto'`` is only available on recent scikit-learn
-                # releases.  Older versions (such as the one bundled with the
-                # Streamlit app) expect an integer, so fall back to a small
-                # explicit count to preserve compatibility across
-                # environments.
-                n_init=3,
-                reg_covar=1e-6,
-            )
-            gm.fit(data)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ConvergenceWarning)
+                gm = GaussianMixture(
+                    n_components=k,
+                    covariance_type="full",
+                    random_state=0,
+                    # ``n_init='auto'`` is only available on recent scikit-learn
+                    # releases.  Older versions (such as the one bundled with the
+                    # Streamlit app) expect an integer, so fall back to a small
+                    # explicit count to preserve compatibility across
+                    # environments.
+                    n_init=3,
+                    reg_covar=1e-6,
+                )
+                gm.fit(data)
             gmms[k] = gm
             bic_val = gm.bic(data)
             stats["bic"][f"k{k}"] = float(bic_val) if np.isfinite(bic_val) else None

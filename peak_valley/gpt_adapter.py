@@ -710,6 +710,35 @@ def _aggregate_votes(
     if "recommended_peak_count" not in result and "robust_peak_count" in result:
         result["recommended_peak_count"] = int(result["robust_peak_count"])
 
+    vote_sources = [
+        entry
+        for entry in sources
+        if isinstance(entry.get("count"), int)
+    ]
+    if vote_sources:
+        result["vote_sources"] = [entry.get("source") for entry in vote_sources]
+
+    recommended = result.get("recommended_peak_count")
+    if isinstance(recommended, int) and vote_sources:
+        agreeing = [
+            entry.get("source")
+            for entry in vote_sources
+            if int(entry.get("count", -1)) == recommended
+        ]
+        disagreeing = [
+            entry.get("source")
+            for entry in vote_sources
+            if int(entry.get("count", -1)) != recommended
+        ]
+        total_votes = len(vote_sources)
+        agreement_fraction = len(agreeing) / max(total_votes, 1)
+        result["agreement"] = {
+            "agreeing_sources": agreeing,
+            "disagreeing_sources": disagreeing,
+            "fraction": float(np.round(agreement_fraction, 3)),
+            "total_sources": total_votes,
+        }
+
     return result
 
 
@@ -1050,6 +1079,145 @@ def _multiscale_peak_profile(
     return profile
 
 
+def _auto_peak_decision(
+    analysis: Optional[dict[str, Any]],
+    allowed_max: int,
+) -> tuple[Optional[int], dict[str, Any]]:
+    """Decide whether detector consensus is strong enough to skip GPT."""
+
+    info: dict[str, Any] = {"triggered": False}
+
+    if not isinstance(analysis, dict) or not analysis:
+        info["reason"] = "no_analysis"
+        return None, info
+
+    recommended = analysis.get("recommended_peak_count")
+    info["recommended"] = recommended
+    if not isinstance(recommended, int) or recommended <= 0:
+        info["reason"] = "no_recommendation"
+        return None, info
+
+    if recommended > max(1, int(allowed_max)):
+        info["reason"] = "over_cap"
+        return None, info
+
+    sources = analysis.get("sources") or []
+    vote_sources = [s for s in sources if isinstance(s.get("count"), int)]
+    agree_sources = [
+        s.get("source")
+        for s in vote_sources
+        if int(s.get("count", -1)) == recommended
+    ]
+    disagree_sources = [
+        s.get("source")
+        for s in vote_sources
+        if int(s.get("count", -1)) != recommended
+    ]
+    agreement_fraction = len(agree_sources) / max(len(vote_sources), 1)
+
+    info["agreeing_sources"] = agree_sources
+    info["disagreeing_sources"] = disagree_sources
+    info["agreement_fraction"] = float(np.round(agreement_fraction, 3))
+    info["vote_source_count"] = len(vote_sources)
+
+    consensus = analysis.get("consensus") or {}
+    support = consensus.get("support_fraction")
+    vote_tally = consensus.get("vote_tally") or []
+    votes_for = 0
+    total_votes = 0
+    for entry in vote_tally:
+        try:
+            count_val = int(entry.get("count"))
+            votes_val = int(entry.get("votes"))
+        except (TypeError, ValueError):
+            continue
+        total_votes += max(votes_val, 0)
+        if count_val == recommended:
+            votes_for += max(votes_val, 0)
+
+    info["consensus_support"] = support
+    info["consensus_votes_for"] = votes_for
+    info["consensus_votes_total"] = total_votes
+
+    quick_votes = [s for s in sources if s.get("source") == "quick_estimate"]
+    quick_total = len(quick_votes)
+    quick_match = sum(1 for s in quick_votes if s.get("count") == recommended)
+    quick_stable = sum(
+        1 for s in quick_votes if s.get("count") == recommended and s.get("stable")
+    )
+    info["quick_votes_total"] = quick_total
+    info["quick_votes_match"] = quick_match
+    info["quick_votes_stable"] = quick_stable
+
+    detector_vote = next(
+        (s for s in sources if s.get("source") == "detector_bandwidth"),
+        None,
+    )
+    histogram_vote = next(
+        (s for s in sources if s.get("source") == "histogram_smooth"),
+        None,
+    )
+    detector_agrees = bool(
+        detector_vote and detector_vote.get("count") == recommended
+    )
+    histogram_agrees = bool(
+        histogram_vote and histogram_vote.get("count") == recommended
+    )
+    info["detector_agrees"] = detector_agrees
+    info["histogram_agrees"] = histogram_agrees
+
+    robust_count = analysis.get("robust_peak_count")
+    info["robust_peak_count"] = robust_count
+
+    multiscale = analysis.get("multiscale") or {}
+    ms_stable = multiscale.get("stable_peak_count")
+    info["multiscale_stable_peak_count"] = ms_stable
+
+    strong_consensus = support is not None and support >= 0.72
+    overwhelming_consensus = support is not None and support >= 0.85
+    robust_match = isinstance(robust_count, int) and robust_count == recommended and robust_count > 0
+    multiscale_match = isinstance(ms_stable, int) and ms_stable == recommended and ms_stable > 0
+    quick_confident = quick_stable >= 2 or (quick_total >= 2 and quick_match == quick_total)
+    broad_agreement = agreement_fraction >= 0.8 and len(agree_sources) >= max(2, len(vote_sources) - 1)
+    detector_histogram_pair = detector_agrees and histogram_agrees
+
+    signals: list[str] = []
+    if strong_consensus:
+        signals.append("consensus_strong")
+    if overwhelming_consensus:
+        signals.append("consensus_overwhelming")
+    if robust_match:
+        signals.append("robust_match")
+    if multiscale_match:
+        signals.append("multiscale_match")
+    if quick_confident:
+        signals.append("quick_confident")
+    if broad_agreement:
+        signals.append("broad_agreement")
+    if detector_histogram_pair:
+        signals.append("detector_histogram_agree")
+
+    info["signals"] = signals
+
+    trigger = False
+
+    if robust_match and (strong_consensus or multiscale_match or quick_confident):
+        trigger = True
+    elif multiscale_match and strong_consensus and agreement_fraction >= 0.7:
+        trigger = True
+    elif overwhelming_consensus and broad_agreement and (quick_confident or detector_histogram_pair):
+        trigger = True
+    elif recommended == 1 and agreement_fraction >= 0.9 and (support is None or support >= 0.75):
+        if quick_match >= max(1, quick_total - 1) or detector_histogram_pair:
+            trigger = True
+
+    if trigger:
+        info["triggered"] = True
+        info["decision"] = int(recommended)
+        return int(recommended), info
+
+    info["reason"] = "insufficient_evidence"
+    return None, info
 def _build_feature_payload(
     counts_full: Optional[np.ndarray],
     *,
@@ -1323,12 +1491,21 @@ def ask_gpt_peak_count(
 
     safe_max, heuristic_info = _apply_peak_caps(feature_payload, marker_name, requested_max)
 
+    analysis_payload = feature_payload.get("analysis")
+    auto_count, auto_info = _auto_peak_decision(analysis_payload, safe_max)
+    if isinstance(analysis_payload, dict):
+        analysis_payload["auto_decision"] = auto_info
+    heuristic_info["auto_peak_decision"] = auto_info
+
     payload["meta"]["allowed_peaks_max"] = safe_max
 
     payload.update(feature_payload)
 
     payload["priors"] = (priors.copy() if isinstance(priors, dict) else _default_priors(marker_name))
     payload["heuristics"] = heuristic_info
+
+    if auto_count is not None:
+        return int(min(safe_max, max(1, auto_count)))
 
     system = (
         "You are a cytometry/ADT gating assistant. Infer the number of visible density peaks "

@@ -405,6 +405,91 @@ def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]
     return bool(hits), hits
 
 
+def _auto_peak_decision(
+    feature_payload: dict[str, Any],
+    safe_max: int,
+) -> tuple[Optional[int], dict[str, Any]]:
+    """Return a deterministic peak decision if consensus is decisive."""
+
+    analysis = feature_payload.get("analysis") if isinstance(feature_payload, dict) else None
+    if not isinstance(analysis, dict):
+        return None, {}
+
+    auto_meta: dict[str, Any] = {}
+
+    def _clamp_count(value: Optional[int]) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            count_int = int(value)
+        except (TypeError, ValueError):
+            return None
+        count_int = max(1, count_int)
+        count_int = min(safe_max, count_int)
+        return count_int
+
+    robust = analysis.get("robust_peak_count")
+    if robust is not None:
+        count = _clamp_count(robust)
+        if count is not None:
+            auto_meta.update(
+                {
+                    "count": count,
+                    "confidence": 0.95,
+                    "reason": "robust peaks persisted across bandwidth scales",
+                    "source": "multiscale",
+                    "support_fraction": 1.0,
+                }
+            )
+            return count, auto_meta
+
+    consensus = analysis.get("consensus") if isinstance(analysis, dict) else None
+    if isinstance(consensus, dict):
+        tally = consensus.get("vote_tally") or []
+        try:
+            ordered = sorted(
+                (
+                    (int(entry.get("count")), int(entry.get("votes")))
+                    for entry in tally
+                    if isinstance(entry, dict)
+                ),
+                key=lambda kv: (-kv[1], kv[0]),
+            )
+        except Exception:
+            ordered = []
+
+        support_fraction = float(consensus.get("support_fraction")) if "support_fraction" in consensus else None
+        total_votes = sum(v for _, v in ordered)
+
+        if ordered:
+            top_count, top_votes = ordered[0]
+            second_votes = ordered[1][1] if len(ordered) > 1 else 0
+            support = float(np.round(top_votes / total_votes, 3)) if total_votes > 0 else None
+            chosen = _clamp_count(top_count)
+
+            if chosen is not None and total_votes >= 3:
+                support_val = support_fraction if support_fraction is not None else support
+                if support_val is None and support is not None:
+                    support_val = support
+
+                if support_val is not None:
+                    dominance = (top_votes - second_votes) / max(total_votes, 1)
+                    if support_val >= 0.72 and dominance >= 0.2:
+                        auto_meta.update(
+                            {
+                                "count": chosen,
+                                "confidence": float(np.clip(support_val, 0.0, 1.0)),
+                                "reason": "consensus votes strongly favour this peak count",
+                                "source": "consensus",
+                                "support_fraction": float(np.clip(support_val, 0.0, 1.0)),
+                                "vote_tally": [{"count": int(c), "votes": int(v)} for c, v in ordered],
+                            }
+                        )
+                        return chosen, auto_meta
+
+    return None, auto_meta
+
+
 def _apply_peak_caps(
     feature_payload: dict[str, Any],
     marker_name: Optional[str],
@@ -1322,6 +1407,14 @@ def ask_gpt_peak_count(
         feature_payload = _build_feature_payload(counts_full, kde_bandwidth=kde_bandwidth)
 
     safe_max, heuristic_info = _apply_peak_caps(feature_payload, marker_name, requested_max)
+
+    auto_count, auto_meta = _auto_peak_decision(feature_payload, safe_max)
+    if auto_meta:
+        auto_meta = dict(auto_meta)
+        auto_meta.setdefault("selected", auto_count is not None)
+        heuristic_info["auto_peak_decision"] = auto_meta
+    if auto_count is not None:
+        return auto_count
     payload["meta"]["allowed_peaks_max"] = safe_max
 
     payload.update(feature_payload)

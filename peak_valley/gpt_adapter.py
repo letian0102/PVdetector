@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import textwrap
+from collections import Counter
 from typing import Any, Optional, Sequence
 
 import numpy as np
@@ -11,7 +12,7 @@ from scipy.signal import find_peaks, peak_prominences, peak_widths
 from scipy.stats import gaussian_kde
 from sklearn.mixture import GaussianMixture
 
-from .kde_detector import quick_peak_estimate
+from .kde_detector import kde_peaks_valleys, quick_peak_estimate
 from .signature import shape_signature
 
 __all__ = ["ask_gpt_peak_count", "ask_gpt_prominence", "ask_gpt_bandwidth"]
@@ -450,13 +451,230 @@ def _round_series(values: Sequence[float], decimals: int = 4) -> list[float]:
     return [float(np.round(v, decimals)) for v in arr.tolist()]
 
 
+def _normalise_bandwidth(bandwidth: Optional[float | str]) -> float | str:
+    """Return a usable bandwidth value for downstream heuristics."""
+
+    if bandwidth is None:
+        return "scott"
+
+    if isinstance(bandwidth, str):
+        bw = bandwidth.strip().lower()
+        if bw in {"", "none", "auto"}:
+            return "scott"
+        try:
+            return float(bw)
+        except ValueError:
+            return bandwidth
+
+    return float(bandwidth)
+
+
+def _detector_snapshot(
+    values: np.ndarray,
+    bandwidth: float | str,
+    *,
+    prominence: float = 0.05,
+    grid_size: int = 4096,
+) -> dict[str, Any]:
+    """Capture the detector's own view of peaks at the plotting bandwidth."""
+
+    x = np.asarray(values, dtype=float)
+    if x.size == 0:
+        return {}
+
+    try:
+        peaks_x, valleys_x, xs, ys = kde_peaks_valleys(
+            x,
+            n_peaks=None,
+            prominence=prominence,
+            bw=bandwidth,
+            min_width=None,
+            grid_size=grid_size,
+        )
+    except Exception:
+        return {}
+
+    xs_arr = np.asarray(xs, dtype=float)
+    ys_arr = np.asarray(ys, dtype=float)
+    if xs_arr.size == 0 or ys_arr.size == 0:
+        return {}
+
+    peak_indices: list[int] = []
+    peak_heights: list[float] = []
+    for px in peaks_x[:6]:
+        idx = int(np.argmin(np.abs(xs_arr - px)))
+        peak_indices.append(idx)
+        peak_heights.append(float(np.round(ys_arr[idx], 6)))
+
+    prominences: list[float] = []
+    if peak_indices:
+        try:
+            prom_vals, _, _ = peak_prominences(ys_arr, np.asarray(peak_indices, dtype=int))
+            prominences = [float(np.round(v, 6)) for v in prom_vals.tolist()]
+        except Exception:
+            prominences = []
+
+    valley_heights: list[float] = []
+    for vx in valleys_x[:6]:
+        idx = int(np.argmin(np.abs(xs_arr - vx)))
+        valley_heights.append(float(np.round(ys_arr[idx], 6)))
+
+    step = float(np.round(xs_arr[1] - xs_arr[0], 4)) if xs_arr.size > 1 else None
+
+    return {
+        "bandwidth": str(bandwidth),
+        "peak_count": int(len(peaks_x)),
+        "peak_positions": [float(np.round(px, 4)) for px in peaks_x[:6]],
+        "peak_heights": peak_heights,
+        "peak_prominences": prominences,
+        "valley_positions": [float(np.round(vx, 4)) for vx in valleys_x[:6]],
+        "valley_heights": valley_heights,
+        "grid_step": step,
+    }
+
+
+def _quick_estimate_votes(
+    values: np.ndarray,
+    bandwidth: float | str,
+    *,
+    prominences: Sequence[float] = (0.02, 0.04, 0.07),
+    grid_size: int = 4096,
+) -> list[dict[str, Any]]:
+    """Run the lightweight KDE heuristic at several prominences."""
+
+    x = np.asarray(values, dtype=float)
+    if x.size == 0:
+        return []
+
+    votes: list[dict[str, Any]] = []
+    for prom in prominences:
+        try:
+            count, stable = quick_peak_estimate(
+                x,
+                prominence=float(prom),
+                bw=bandwidth,
+                min_width=None,
+                grid_size=grid_size,
+            )
+            count_val: Optional[int] = int(count)
+            stable_val = bool(stable)
+        except Exception:
+            count_val = None
+            stable_val = False
+
+        votes.append(
+            {
+                "source": "quick_estimate",
+                "prominence": float(np.round(prom, 3)),
+                "count": count_val,
+                "stable": stable_val,
+            }
+        )
+
+    return votes
+
+
+def _aggregate_votes(
+    hist_peaks: list[dict[str, Any]],
+    kde_summary: Optional[dict[str, Any]],
+    quick_votes: list[dict[str, Any]],
+    detector_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """Combine independent estimates into a consensus vote."""
+
+    sources: list[dict[str, Any]] = []
+    counts: list[int] = []
+
+    if hist_peaks:
+        entry = {
+            "source": "histogram_smooth",
+            "count": int(len(hist_peaks)),
+            "peak_positions": [float(p["x"]) for p in hist_peaks],
+            "peak_prominences": [
+                float(p["prominence"]) if p.get("prominence") is not None else None
+                for p in hist_peaks
+            ],
+            "peak_widths": [
+                float(p["width"]) if p.get("width") is not None else None
+                for p in hist_peaks
+            ],
+        }
+        sources.append(entry)
+        counts.append(entry["count"])
+
+    if kde_summary and isinstance(kde_summary, dict):
+        peaks = kde_summary.get("peaks") or []
+        if peaks:
+            entry = {
+                "source": "kde_grid",
+                "count": int(len(peaks)),
+                "peak_positions": [float(p.get("x", 0.0)) for p in peaks],
+                "peak_prominences": [
+                    float(p["prominence"]) if p.get("prominence") is not None else None
+                    for p in peaks
+                ],
+                "peak_widths": [
+                    float(p["width"]) if p.get("width") is not None else None
+                    for p in peaks
+                ],
+            }
+            sources.append(entry)
+            counts.append(entry["count"])
+
+    if detector_snapshot:
+        count_val = detector_snapshot.get("peak_count")
+        try:
+            count_int = int(count_val) if count_val is not None else None
+        except (TypeError, ValueError):
+            count_int = None
+
+        entry = {
+            "source": "detector_bandwidth",
+            "count": count_int,
+            "peak_positions": detector_snapshot.get("peak_positions"),
+            "peak_heights": detector_snapshot.get("peak_heights"),
+            "peak_prominences": detector_snapshot.get("peak_prominences"),
+            "valley_positions": detector_snapshot.get("valley_positions"),
+            "valley_heights": detector_snapshot.get("valley_heights"),
+        }
+        sources.append(entry)
+        if count_int is not None:
+            counts.append(count_int)
+
+    for vote in quick_votes:
+        sources.append(vote)
+        if isinstance(vote.get("count"), int):
+            counts.append(int(vote["count"]))
+
+    if not sources:
+        return {}
+
+    result: dict[str, Any] = {"sources": sources}
+
+    tally = Counter(counts)
+    if tally:
+        ordered = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
+        best_count, best_votes = ordered[0]
+        support = best_votes / max(len(counts), 1)
+        result["consensus"] = {
+            "preferred_count": int(best_count),
+            "support_fraction": float(np.round(support, 3)),
+            "vote_tally": [
+                {"count": int(k), "votes": int(v)} for k, v in sorted(tally.items())
+            ],
+        }
+
+    return result
+
+
 def _summarize_kde(
     values: np.ndarray,
     lo: float,
     hi: float,
     bandwidth: Optional[float | str],
     *,
-    grid_points: int = 96,
+    grid_points: int = 144,
+    detector_snapshot: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Create a compact KDE summary aligned with the plotting bandwidth."""
 
@@ -580,7 +798,7 @@ def _summarize_kde(
         }
         density_percentiles = _round_series(np.percentile(ys, [5, 25, 50, 75, 95]), 6)
 
-    return {
+    summary = {
         "bandwidth_param": bw_param if bw_param is not None else str(bandwidth),
         "bandwidth_value": float(bw_value) if np.isfinite(bw_value) else None,
         "grid": {
@@ -595,6 +813,11 @@ def _summarize_kde(
         "valleys": valleys_info,
         "density_stats": density_stats,
     }
+
+    if detector_snapshot:
+        summary["detector_view"] = detector_snapshot
+
+    return summary
 
 
 def _build_feature_payload(
@@ -613,7 +836,7 @@ def _build_feature_payload(
     if hi <= lo:
         hi = lo + 1.0
 
-    bins = 96
+    bins = 128
     clipped = np.clip(values, lo, hi)
     counts, edges = np.histogram(clipped, bins=bins, range=(lo, hi))
     centers = 0.5 * (edges[:-1] + edges[1:])
@@ -655,10 +878,35 @@ def _build_feature_payload(
         "gmm": gmm_stats,
     }
 
-    if kde_bandwidth is not None:
-        kde_summary = _summarize_kde(values, lo, hi, kde_bandwidth)
-        if kde_summary:
-            payload["kde"] = kde_summary
+    normalised_bw = _normalise_bandwidth(kde_bandwidth)
+    detector_snapshot = _detector_snapshot(values, normalised_bw)
+    quick_votes = _quick_estimate_votes(values, normalised_bw)
+
+    kde_summary = _summarize_kde(
+        values,
+        lo,
+        hi,
+        normalised_bw,
+        detector_snapshot=detector_snapshot,
+    )
+    if kde_summary:
+        payload["kde"] = kde_summary
+
+    analysis = _aggregate_votes(peaks_out, kde_summary, quick_votes, detector_snapshot)
+    if analysis:
+        analysis["bandwidth_used"] = (
+            normalised_bw if isinstance(normalised_bw, str) else float(normalised_bw)
+        )
+        if kde_summary and isinstance(kde_summary, dict):
+            bw_val = kde_summary.get("bandwidth_value")
+            if bw_val is not None:
+                analysis["bandwidth_value"] = float(bw_val)
+        if kde_bandwidth is not None:
+            analysis["requested_bandwidth"] = kde_bandwidth
+        if detector_snapshot:
+            analysis.setdefault("detector_snapshot", detector_snapshot)
+        payload["analysis"] = analysis
+
 
     return payload
 

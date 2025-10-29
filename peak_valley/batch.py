@@ -91,7 +91,7 @@ class BatchOptions:
     min_width: int = 0
     curvature: float = 0.0001
     turning_points: bool = False
-    min_separation: float = 6.0
+    min_separation: float = 0.5
     grid_size: int = 20_000
     valley_drop: float = 10.0  # percent of peak height
     first_valley: str = "slope"  # or "drop"

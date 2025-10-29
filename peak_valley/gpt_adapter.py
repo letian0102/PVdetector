@@ -456,7 +456,7 @@ def _summarize_kde(
     hi: float,
     bandwidth: Optional[float | str],
     *,
-    grid_points: int = 48,
+    grid_points: int = 96,
 ) -> dict[str, Any]:
     """Create a compact KDE summary aligned with the plotting bandwidth."""
 
@@ -510,18 +510,23 @@ def _summarize_kde(
         grid_lo = lo
         grid_hi = hi if hi > lo else lo + 1.0
 
-    xs = np.linspace(grid_lo, grid_hi, int(max(16, grid_points)))
+    xs = np.linspace(grid_lo, grid_hi, int(max(32, grid_points)))
     ys = np.asarray(kde(xs), dtype=float)
     ys[~np.isfinite(ys)] = 0.0
 
     peaks_info: list[dict[str, Any]] = []
+    valleys_info: list[dict[str, Any]] = []
+    density_stats: dict[str, Any] = {}
+    density_percentiles: list[float] = []
+
     if ys.size and np.max(ys) > 0:
         prom_thresh = 0.05 * float(np.max(ys))
+        step = float(xs[1] - xs[0]) if xs.size > 1 else 1.0
+
         idx, _ = find_peaks(ys, prominence=prom_thresh, width=1)
         if idx.size:
             prominences, left_bases, right_bases = peak_prominences(ys, idx)
             widths_samples = peak_widths(ys, idx, rel_height=0.5)[0]
-            step = float(xs[1] - xs[0]) if xs.size > 1 else 1.0
             order = np.argsort(ys[idx])[::-1]
             for pos in order[:3]:
                 j = idx[pos]
@@ -532,13 +537,48 @@ def _summarize_kde(
                 width_val = float(widths_samples[pos] * step)
                 peaks_info.append(
                     {
-                        "x": float(xs[j]),
-                        "height": float(ys[j]),
-                        "prominence": float(prominences[pos]),
-                        "width": width_val,
-                        "valley_depth": valley_depth,
+                        "x": float(np.round(xs[j], 4)),
+                        "height": float(np.round(ys[j], 6)),
+                        "prominence": float(np.round(prominences[pos], 6)),
+                        "width": float(np.round(width_val, 4)),
+                        "valley_depth": (
+                            float(np.round(valley_depth, 6)) if valley_depth is not None else None
+                        ),
                     }
                 )
+
+        valley_idx, _ = find_peaks(-ys, prominence=prom_thresh * 0.5, width=1)
+        if valley_idx.size:
+            valley_prom, _, _ = peak_prominences(-ys, valley_idx)
+            widths_samples = None
+            try:
+                widths_samples = peak_widths(-ys, valley_idx, rel_height=0.5)[0]
+            except Exception:
+                widths_samples = None
+            order_v = np.argsort(valley_prom)[::-1]
+            for pos in order_v[:3]:
+                j = valley_idx[pos]
+                width_val = (
+                    float(widths_samples[pos] * step)
+                    if widths_samples is not None
+                    else None
+                )
+                valleys_info.append(
+                    {
+                        "x": float(np.round(xs[j], 4)),
+                        "depth": float(np.round(ys[j], 6)),
+                        "prominence": float(np.round(valley_prom[pos], 6)),
+                        "width": float(np.round(width_val, 4)) if width_val is not None else None,
+                    }
+                )
+
+        density_stats = {
+            "max": float(np.round(np.max(ys), 6)),
+            "mean": float(np.round(np.mean(ys), 6)),
+            "median": float(np.round(np.median(ys), 6)),
+            "integral": float(np.round(np.trapz(ys, xs), 6)),
+        }
+        density_percentiles = _round_series(np.percentile(ys, [5, 25, 50, 75, 95]), 6)
 
     return {
         "bandwidth_param": bw_param if bw_param is not None else str(bandwidth),
@@ -546,8 +586,14 @@ def _summarize_kde(
         "grid": {
             "x": _round_series(xs, decimals=4),
             "density": _round_series(ys, decimals=6),
+            "step": float(np.round(xs[1] - xs[0], 4)) if xs.size > 1 else None,
+            "lo": float(np.round(grid_lo, 4)),
+            "hi": float(np.round(grid_hi, 4)),
+            "percentiles": density_percentiles,
         },
         "peaks": peaks_info,
+        "valleys": valleys_info,
+        "density_stats": density_stats,
     }
 
 
@@ -567,7 +613,7 @@ def _build_feature_payload(
     if hi <= lo:
         hi = lo + 1.0
 
-    bins = 64
+    bins = 96
     clipped = np.clip(values, lo, hi)
     counts, edges = np.histogram(clipped, bins=bins, range=(lo, hi))
     centers = 0.5 * (edges[:-1] + edges[1:])
@@ -589,7 +635,9 @@ def _build_feature_payload(
 
     payload["histogram"] = {
         "bin_edges": [float(e) for e in edges.tolist()],
+        "bin_centers": _round_series(centers, decimals=4),
         "counts": [int(c) for c in counts.tolist()],
+        "smoothed": _round_series(smoothed, decimals=3),
     }
 
     payload["candidates"] = {

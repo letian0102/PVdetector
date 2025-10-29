@@ -50,7 +50,7 @@ warnings.filterwarnings(
 # ────────────────────────── Streamlit page & state ──────────────────────────
 st.set_page_config("Peak & Valley Detector", None, layout="wide")
 
-DEFAULT_MIN_SEPARATION = 6.0
+DEFAULT_MIN_SEPARATION = 0.5
 st.title("Peak & Valley Detector — CSV *or* full dataset")
 st.warning(
     "**Heads-up:** if you refresh or close this page, all of your uploaded data and results will be lost."
@@ -596,7 +596,7 @@ def _render_override_controls(
         default_sep = (
             sep_prev
             if sep_prev is not None
-            else float(run_defaults.get("min_separation", 6.0))
+            else float(run_defaults.get("min_separation", DEFAULT_MIN_SEPARATION))
         )
         sep_val = col_sep.slider(
             "Min peak separation",

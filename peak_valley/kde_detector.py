@@ -246,16 +246,27 @@ def _first_valley_slope(
     min_idx = p_left + 2 + int(turn[0]) if turn.size else None
 
     if candidate_idx is None:
-        if min_idx is not None and xs[min_idx] - xs[p_left] >= min_sep_abs:
-            candidate_idx = min_idx
-        elif p_right is not None:
-            return _valley_between(xs, ys, p_left, p_right, drop_frac)
-        else:
-            seg = ys[start_idx : right + 1]
-            if seg.size:
-                candidate_idx = start_idx + int(np.argmin(seg))
+        # Try the point where the down-slope begins to relax (largest
+        # increase in the first derivative).  ``start_idx`` skips the
+        # exclusion zone near the peak, so align the derivative window
+        # accordingly.
+        offset = max(0, start_idx - (p_left + 1))
+        if offset < dy.size:
+            rel = int(np.argmax(dy[offset:]))
+            candidate_idx = start_idx + rel
+
+        if candidate_idx is None or candidate_idx >= right:
+            if min_idx is not None and xs[min_idx] - xs[p_left] >= min_sep_abs:
+                candidate_idx = min_idx
+            elif p_right is not None:
+                return _valley_between(xs, ys, p_left, p_right, drop_frac)
             else:
-                candidate_idx = max(p_left + 1, min(right, start_idx))
+                seg = ys[start_idx : right + 1]
+                if seg.size:
+                    rel = int(np.argmin(seg))
+                    candidate_idx = start_idx + rel
+                else:
+                    candidate_idx = max(p_left + 1, min(right, start_idx))
 
     if min_idx is not None and candidate_idx > min_idx:
         candidate_idx = min_idx

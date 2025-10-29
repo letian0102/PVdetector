@@ -579,6 +579,7 @@ def _aggregate_votes(
     kde_summary: Optional[dict[str, Any]],
     quick_votes: list[dict[str, Any]],
     detector_snapshot: dict[str, Any],
+    multiscale_summary: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Combine independent estimates into a consensus vote."""
 
@@ -641,6 +642,36 @@ def _aggregate_votes(
         if count_int is not None:
             counts.append(count_int)
 
+    if multiscale_summary and isinstance(multiscale_summary, dict):
+        scale_results = multiscale_summary.get("scale_results") or []
+        ms_counts = [
+            int(res["peak_count"])
+            for res in scale_results
+            if isinstance(res.get("peak_count"), int)
+        ]
+        ms_majority: Optional[int] = None
+        if ms_counts:
+            tally_ms = Counter(ms_counts)
+            ordered_ms = sorted(tally_ms.items(), key=lambda kv: (-kv[1], kv[0]))
+            ms_majority = int(ordered_ms[0][0])
+
+        robust_peaks = multiscale_summary.get("robust_peaks") or []
+        robust_count = int(len(robust_peaks)) if robust_peaks else None
+
+        entry_count = robust_count if robust_count is not None else ms_majority
+        entry = {
+            "source": "kde_multiscale",
+            "count": entry_count,
+            "majority_count": ms_majority,
+            "stable_peak_count": robust_count,
+            "scale_results": scale_results,
+            "robust_peaks": robust_peaks,
+            "scales_tested": multiscale_summary.get("scales_tested"),
+        }
+        sources.append(entry)
+        if entry_count is not None:
+            counts.append(int(entry_count))
+
     for vote in quick_votes:
         sources.append(vote)
         if isinstance(vote.get("count"), int):
@@ -650,6 +681,13 @@ def _aggregate_votes(
         return {}
 
     result: dict[str, Any] = {"sources": sources}
+
+    if multiscale_summary and isinstance(multiscale_summary, dict):
+        result["multiscale"] = multiscale_summary
+        robust_peaks = multiscale_summary.get("robust_peaks") or []
+        if robust_peaks:
+            result["robust_peak_count"] = int(len(robust_peaks))
+            result["robust_peaks"] = robust_peaks
 
     tally = Counter(counts)
     if tally:
@@ -663,6 +701,14 @@ def _aggregate_votes(
                 {"count": int(k), "votes": int(v)} for k, v in sorted(tally.items())
             ],
         }
+
+        if "robust_peak_count" in result:
+            result["recommended_peak_count"] = int(result["robust_peak_count"])
+        else:
+            result["recommended_peak_count"] = int(best_count)
+
+    if "recommended_peak_count" not in result and "robust_peak_count" in result:
+        result["recommended_peak_count"] = int(result["robust_peak_count"])
 
     return result
 
@@ -820,6 +866,190 @@ def _summarize_kde(
     return summary
 
 
+def _multiscale_peak_profile(
+    values: np.ndarray,
+    bandwidth: Optional[float | str],
+    lo: float,
+    hi: float,
+    *,
+    scales: Sequence[float] = (0.55, 0.75, 1.0, 1.3, 1.7),
+    grid_points: int = 192,
+    base_summary: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Probe multiple bandwidth scales and retain persistent peaks."""
+
+    x = np.asarray(values, dtype=float)
+    if x.size == 0:
+        return {}
+
+    try:
+        base_kde = gaussian_kde(x, bw_method=bandwidth)
+    except Exception:
+        return {}
+
+    base_factor = float(base_kde.factor)
+    if not np.isfinite(base_factor) or base_factor <= 0:
+        return {}
+
+    std = float(np.std(x, ddof=1)) if x.size > 1 else 0.0
+    span = float(hi - lo)
+    if not np.isfinite(span) or span <= 0:
+        return {}
+
+    margin = 0.05 * span if span > 0 else 1.0
+    grid_lo = float(lo - margin)
+    grid_hi = float(hi + margin)
+    if base_summary and isinstance(base_summary, dict):
+        grid = base_summary.get("grid") or {}
+        grid_lo = float(grid.get("lo", grid_lo))
+        grid_hi = float(grid.get("hi", grid_hi))
+
+    if not (np.isfinite(grid_lo) and np.isfinite(grid_hi)) or grid_hi <= grid_lo:
+        return {}
+
+    xs = np.linspace(grid_lo, grid_hi, int(max(grid_points, 96)))
+    base_step = float(xs[1] - xs[0]) if xs.size > 1 else span / max(grid_points, 1)
+
+    scale_results: list[dict[str, Any]] = []
+    all_peaks: list[dict[str, Any]] = []
+    scales_used: list[float] = []
+
+    for scale in scales:
+        scale_factor = float(base_factor * float(scale))
+        if not np.isfinite(scale_factor) or scale_factor <= 0:
+            continue
+
+        try:
+            kde = gaussian_kde(x, bw_method=scale_factor)
+        except Exception:
+            continue
+
+        ys = np.asarray(kde(xs), dtype=float)
+        if ys.size == 0:
+            continue
+        ys[~np.isfinite(ys)] = 0.0
+        max_density = float(np.max(ys))
+        if max_density <= 0:
+            continue
+
+        prom_thresh = max_density * 0.035
+        idx, _ = find_peaks(ys, prominence=prom_thresh, width=1)
+        prominences: np.ndarray
+        widths_samples: np.ndarray
+        left_bases: np.ndarray
+        right_bases: np.ndarray
+        if idx.size:
+            prominences, left_bases, right_bases = peak_prominences(ys, idx)
+            widths_samples = peak_widths(ys, idx, rel_height=0.5)[0]
+        else:
+            prominences = np.empty(0)
+            left_bases = np.empty(0)
+            right_bases = np.empty(0)
+            widths_samples = np.empty(0)
+
+        peaks_for_scale: list[dict[str, Any]] = []
+        for pos, j in enumerate(idx):
+            left = int(max(0, np.floor(left_bases[pos])))
+            right = int(min(len(ys) - 1, np.ceil(right_bases[pos])))
+            seg = ys[left : right + 1]
+            valley_depth = float(seg.min()) if seg.size else None
+            width_val = float(widths_samples[pos] * base_step)
+            peak_record = {
+                "x": float(np.round(xs[j], 4)),
+                "height": float(np.round(ys[j], 6)),
+                "prominence": float(np.round(prominences[pos], 6)),
+                "width": float(np.round(width_val, 4)),
+                "valley_depth": float(np.round(valley_depth, 6)) if valley_depth is not None else None,
+            }
+            peaks_for_scale.append(peak_record)
+            all_peaks.append(
+                {
+                    "scale": float(scale),
+                    "x": float(xs[j]),
+                    "prominence": float(prominences[pos]),
+                    "width": float(width_val),
+                    "height": float(ys[j]),
+                }
+            )
+
+        scale_results.append(
+            {
+                "scale": float(np.round(scale, 3)),
+                "bandwidth_factor": float(np.round(kde.factor, 6)),
+                "bandwidth_value": float(np.round(kde.factor * std, 6)),
+                "peak_count": int(len(peaks_for_scale)),
+                "peaks": peaks_for_scale,
+                "max_density": float(np.round(max_density, 6)),
+            }
+        )
+        scales_used.append(float(np.round(scale, 3)))
+
+    if not scale_results:
+        return {}
+
+    tolerance = max(0.02 * span, base_step * 4.0)
+    clusters: list[dict[str, Any]] = []
+
+    for peak in sorted(all_peaks, key=lambda item: item["prominence"], reverse=True):
+        inserted = False
+        for cluster in clusters:
+            if abs(peak["x"] - cluster["center"]) <= tolerance:
+                cluster["peaks"].append(peak)
+                xs_cluster = [p["x"] for p in cluster["peaks"]]
+                cluster["center"] = float(np.mean(xs_cluster))
+                cluster["max_prominence"] = float(
+                    max(cluster["max_prominence"], peak["prominence"])
+                )
+                inserted = True
+                break
+        if not inserted:
+            clusters.append(
+                {
+                    "center": float(peak["x"]),
+                    "max_prominence": float(peak["prominence"]),
+                    "peaks": [peak],
+                }
+            )
+
+    robust_peaks: list[dict[str, Any]] = []
+    total_scales = len(scales_used)
+    for cluster in clusters:
+        scales_present = sorted({float(np.round(p["scale"], 3)) for p in cluster["peaks"]})
+        if not scales_present:
+            continue
+        support_fraction = len(scales_present) / max(total_scales, 1)
+        if support_fraction < 0.6:
+            continue
+
+        prominences = [float(p["prominence"]) for p in cluster["peaks"]]
+        widths = [float(p["width"]) for p in cluster["peaks"] if np.isfinite(p["width"])]
+
+        robust_peaks.append(
+            {
+                "x": float(np.round(cluster["center"], 4)),
+                "support_fraction": float(np.round(support_fraction, 3)),
+                "scales": scales_present,
+                "median_prominence": float(np.round(float(np.median(prominences)), 6))
+                if prominences
+                else None,
+                "max_prominence": float(np.round(cluster["max_prominence"], 6)),
+                "median_width": float(np.round(float(np.median(widths)), 4)) if widths else None,
+            }
+        )
+
+    profile = {
+        "scales_tested": scales_used,
+        "scale_results": scale_results,
+        "robust_peaks": robust_peaks,
+        "stable_peak_count": int(len(robust_peaks)),
+    }
+
+    if std > 0 and np.isfinite(std):
+        profile["base_bandwidth_value"] = float(np.round(base_factor * std, 6))
+
+    return profile
+
+
 def _build_feature_payload(
     counts_full: Optional[np.ndarray],
     *,
@@ -892,7 +1122,23 @@ def _build_feature_payload(
     if kde_summary:
         payload["kde"] = kde_summary
 
-    analysis = _aggregate_votes(peaks_out, kde_summary, quick_votes, detector_snapshot)
+    multiscale_summary = _multiscale_peak_profile(
+        values,
+        normalised_bw,
+        lo,
+        hi,
+        base_summary=kde_summary,
+    )
+    if multiscale_summary:
+        payload["kde_multiscale"] = multiscale_summary
+
+    analysis = _aggregate_votes(
+        peaks_out,
+        kde_summary,
+        quick_votes,
+        detector_snapshot,
+        multiscale_summary,
+    )
     if analysis:
         analysis["bandwidth_used"] = (
             normalised_bw if isinstance(normalised_bw, str) else float(normalised_bw)

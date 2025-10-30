@@ -9,7 +9,7 @@ from typing import Any, Optional
 import numpy as np
 from openai import AuthenticationError, OpenAI
 from scipy.signal import find_peaks, peak_prominences, peak_widths
-from scipy.stats import gaussian_kde
+from scipy.stats import gaussian_kde, kurtosis, skew
 from sklearn.mixture import GaussianMixture
 
 from .kde_detector import quick_peak_estimate
@@ -367,6 +367,8 @@ def _extract_peak_candidates(
     for order, (i, prom, width, lb, rb) in enumerate(
         zip(idx, prominences, widths, left_bases, right_bases)
     ):
+        lb_idx = int(np.clip(int(math.floor(lb)), 0, len(centers) - 1)) if len(centers) else 0
+        rb_idx = int(np.clip(int(math.ceil(rb)), 0, len(centers) - 1)) if len(centers) else 0
         seg = smoothed[int(lb) : int(rb) + 1]
         valley_depth = float(seg.min()) if seg.size else None
         peaks.append(
@@ -378,6 +380,12 @@ def _extract_peak_candidates(
                 "valley_depth": float(valley_depth) if valley_depth is not None else None,
                 "index": int(i),
                 "order": order,
+                "left_base_index": int(lb_idx),
+                "right_base_index": int(rb_idx),
+                "left_base_x": float(centers[lb_idx]) if centers.size else None,
+                "right_base_x": float(centers[rb_idx]) if centers.size else None,
+                "left_base_height": float(smoothed[lb_idx]) if smoothed.size else None,
+                "right_base_height": float(smoothed[rb_idx]) if smoothed.size else None,
             }
         )
 
@@ -403,6 +411,66 @@ def _extract_peak_candidates(
                 prominence_ratio = float(sec_prom / main_prom)
 
     return peaks, first_valley_x, valley_depth_ratio, prominence_ratio, valley_depth_abs
+
+
+def _describe_shape(
+    summary_counts: np.ndarray,
+    summary_edges: np.ndarray,
+    peaks: list[dict[str, Any]],
+    valley_depth_ratio: Optional[float],
+    prominence_ratio: Optional[float],
+    lo: float,
+    hi: float,
+) -> str:
+    if summary_counts.size == 0 or summary_edges.size == 0:
+        return ""
+
+    max_count = float(np.max(summary_counts)) if summary_counts.size else 0.0
+    total = float(np.sum(summary_counts)) if summary_counts.size else 0.0
+    span = float(hi - lo)
+    desc: list[str] = []
+    desc.append(
+        f"Range {lo:.2f}–{hi:.2f} (span {span:.2f}); total mass {total:.0f} bins."
+    )
+
+    if peaks:
+        positions = ", ".join(f"{p['x']:.2f}" for p in peaks)
+        desc.append(f"Candidates at {positions}.")
+        if max_count > 0:
+            rels = ", ".join(
+                f"{p.get('relative_height', 0.0) * 100:.0f}%"
+                for p in peaks
+            )
+            desc.append(f"Relative heights {rels} of max.")
+        if any(p.get("width_in_bins") for p in peaks):
+            widths = ", ".join(
+                f"{p['width_in_bins']:.1f}"
+                if isinstance(p.get("width_in_bins"), float)
+                else "?"
+                for p in peaks
+            )
+            desc.append(f"Approx. widths (bins) {widths}.")
+
+    if valley_depth_ratio is not None:
+        desc.append(f"First valley retains {valley_depth_ratio * 100:.0f}% of peak height.")
+    if prominence_ratio is not None:
+        desc.append(f"Second prominence is {prominence_ratio * 100:.0f}% of first.")
+
+    if summary_counts.size >= 3 and max_count > 0:
+        left_rel = float(summary_counts[0] / max_count)
+        right_rel = float(summary_counts[-1] / max_count)
+        desc.append(
+            f"Tails drop to {left_rel * 100:.0f}% (left) and {right_rel * 100:.0f}% (right) of max."
+        )
+
+    mean_center = float(np.mean(0.5 * (summary_edges[:-1] + summary_edges[1:])))
+    if max_count > 0 and summary_counts.size > 0:
+        weighted_mean = float(
+            np.average(0.5 * (summary_edges[:-1] + summary_edges[1:]), weights=summary_counts)
+        )
+        desc.append(f"Mass leans toward {weighted_mean:.2f} (vs. midpoint {mean_center:.2f}).")
+
+    return " ".join(desc)
 
 
 def _gmm_statistics(x: np.ndarray, max_components: int = 3) -> dict[str, Any]:
@@ -831,6 +899,7 @@ def _build_feature_payload(
         bins = BASELINE_BINS
     clipped = np.clip(values, lo, hi)
     counts, edges = np.histogram(clipped, bins=bins, range=(lo, hi))
+    total_counts_all = float(np.sum(counts))
     centers = 0.5 * (edges[:-1] + edges[1:])
     smoothed = _smooth_histogram(counts)
 
@@ -876,6 +945,13 @@ def _build_feature_payload(
             "prominence": float(p["prominence"]),
             "width": float(p["width"]),
             "valley_depth": (float(p["valley_depth"]) if p["valley_depth"] is not None else None),
+            "bin_index": int(p.get("index", 0)),
+            "left_base_index": int(p.get("left_base_index", 0)),
+            "right_base_index": int(p.get("right_base_index", 0)),
+            "left_base_x": float(p.get("left_base_x")) if p.get("left_base_x") is not None else None,
+            "right_base_x": float(p.get("right_base_x")) if p.get("right_base_x") is not None else None,
+            "left_base_height": float(p.get("left_base_height")) if p.get("left_base_height") is not None else None,
+            "right_base_height": float(p.get("right_base_height")) if p.get("right_base_height") is not None else None,
         }
         peaks_out.append(entry)
 
@@ -893,6 +969,28 @@ def _build_feature_payload(
         "range": {"lo": float(lo), "hi": float(hi)},
     }
 
+    if values.size:
+        mean_val = float(np.mean(values))
+        std_val = float(np.std(values))
+        try:
+            skew_val = float(skew(values, bias=False))
+        except Exception:
+            skew_val = float("nan")
+        try:
+            kurt_val = float(kurtosis(values, fisher=True, bias=False))
+        except Exception:
+            kurt_val = float("nan")
+
+        def _safe_metric(val: float) -> Optional[float]:
+            return float(round(val, 6)) if np.isfinite(val) else None
+
+        histogram_payload["moment_summary"] = {
+            "mean": float(round(mean_val, 6)),
+            "std": float(round(std_val, 6)),
+            "skewness": _safe_metric(skew_val),
+            "excess_kurtosis": _safe_metric(kurt_val),
+        }
+
     summary_payload = _downsample_histogram(
         values,
         lo,
@@ -904,6 +1002,25 @@ def _build_feature_payload(
 
     summary_counts = np.asarray(summary_payload.get("counts", []), dtype=float)
     summary_edges = np.asarray(summary_payload.get("bin_edges", []), dtype=float)
+
+    if counts.size:
+        if total_counts_all > 0:
+            histogram_payload["normalized_counts"] = [
+                float(round(c / total_counts_all, 6)) for c in counts.astype(float)
+            ]
+        else:
+            histogram_payload["normalized_counts"] = [0.0 for _ in counts]
+
+    if summary_counts.size:
+        total_summary = float(np.sum(summary_counts))
+        if total_summary > 0:
+            summary_payload["normalized_counts"] = [
+                float(round(c / total_summary, 6)) for c in summary_counts
+            ]
+        else:
+            summary_payload["normalized_counts"] = [0.0 for _ in summary_counts]
+    else:
+        summary_payload.setdefault("normalized_counts", [])
 
     sparkline = _sparkline_from_counts(summary_counts)
     if sparkline:
@@ -932,17 +1049,75 @@ def _build_feature_payload(
     if bandwidth_hint:
         histogram_payload["bandwidth_projection"] = bandwidth_hint
 
+    if peaks_out:
+        max_height = max((p["height"] for p in peaks_out), default=0.0)
+        max_prominence = max((p["prominence"] for p in peaks_out), default=0.0)
+        bin_width = histogram_payload.get("bin_width")
+        for p in peaks_out:
+            if max_height > 0:
+                p["relative_height"] = float(round(p["height"] / max_height, 4))
+            if max_prominence > 0:
+                p["relative_prominence"] = float(round(p["prominence"] / max_prominence, 4))
+            if bin_width:
+                try:
+                    p["width_in_bins"] = float(round(p["width"] / bin_width, 3))
+                except Exception:
+                    p["width_in_bins"] = None
+            lb_idx = p.get("left_base_index")
+            rb_idx = p.get("right_base_index")
+            if (
+                isinstance(lb_idx, int)
+                and isinstance(rb_idx, int)
+                and 0 <= lb_idx <= rb_idx < counts.size
+                and total_counts_all > 0
+            ):
+                area = float(np.sum(counts[lb_idx : rb_idx + 1]))
+                if area > 0:
+                    p["area_fraction"] = float(round(area / total_counts_all, 4))
+
     payload["histogram"] = histogram_payload
 
     if kde_section:
         payload["kde"] = kde_section
 
+    pairwise_separations: list[dict[str, Any]] = []
+    if len(peaks_out) >= 2:
+        bin_width = histogram_payload.get("bin_width")
+        for i in range(len(peaks_out)):
+            for j in range(i + 1, len(peaks_out)):
+                delta = abs(peaks_out[j]["x"] - peaks_out[i]["x"])
+                item = {
+                    "pair": [i, j],
+                    "delta": float(round(delta, 4)),
+                }
+                if bin_width:
+                    try:
+                        item["delta_bins"] = float(round(delta / bin_width, 3))
+                    except Exception:
+                        item["delta_bins"] = None
+                pairwise_separations.append(item)
+
+    shape_description = _describe_shape(
+        summary_counts,
+        summary_edges,
+        peaks_out,
+        valley_depth_ratio,
+        prominence_ratio,
+        lo,
+        hi,
+    )
+
     payload["candidates"] = {
         "peaks": peaks_out,
+        "count": len(peaks_out),
+        "relative_heights": [p.get("relative_height") for p in peaks_out],
+        "relative_prominences": [p.get("relative_prominence") for p in peaks_out],
+        "pairwise_separations": pairwise_separations,
         "right_tail_mass_after_first_valley": _right_tail_mass(values, valley_x),
         "valley_depth_ratio": valley_depth_ratio,
         "valley_depth_abs": valley_depth_abs,
         "prominence_ratio": prominence_ratio,
+        "shape_description": shape_description,
     }
 
     gmm_stats = _gmm_statistics(values)

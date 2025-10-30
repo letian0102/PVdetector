@@ -35,13 +35,18 @@ def test_feature_payload_includes_kde_trace():
     assert hist["run_length_counts"]
     assert hist["smoothed_counts"]
     assert hist["second_derivative_summary"]["max_abs"] >= 0
+    moments = hist["moment_summary"]
+    assert moments["mean"] is not None
+    assert moments["std"] >= 0
     summary_bins = hist["summary_bins"]
     assert summary_bins["bin_count"] == SUMMARY_BINS
     assert len(summary_bins["counts"]) == SUMMARY_BINS
+    assert summary_bins["normalized_counts"]
     assert hist.get("sparkline")
     assert len(hist["sparkline"]) == SUMMARY_BINS
     assert hist.get("profile_points")
     assert len(hist["profile_points"]) == SUMMARY_BINS
+    assert hist.get("normalized_counts")
     runs = hist.get("slope_runs")
     assert isinstance(runs, list)
     assert runs, "slope_runs should capture monotonic segments"
@@ -58,6 +63,16 @@ def test_feature_payload_includes_kde_trace():
 
     # JSON serialization should succeed for downstream GPT usage
     json.dumps(payload)
+
+    candidates = payload["candidates"]
+    assert candidates["count"] == len(candidates["peaks"])
+    assert candidates["shape_description"]
+    if candidates["count"] >= 1:
+        first_peak = candidates["peaks"][0]
+        assert "relative_height" in first_peak
+        assert "bin_index" in first_peak
+    if candidates["count"] >= 2:
+        assert candidates["pairwise_separations"]
 
 
 def test_ask_gpt_peak_count_accepts_missing_kde():

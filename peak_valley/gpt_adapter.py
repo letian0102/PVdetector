@@ -549,19 +549,109 @@ def _strong_two_peak_signal(
     return True, hits, min_weight, separation_info
 
 
+def _three_peak_candidate_support(peaks: list[dict[str, Any]]) -> tuple[bool, list[str]]:
+    """Return whether histogram candidates clearly support three peaks."""
+
+    if len(peaks) < 3:
+        return False, []
+
+    first_three = peaks[:3]
+    xs = [float(p.get("x", 0.0)) for p in first_three]
+    widths = [max(float(p.get("width") or 0.0), 1e-9) for p in first_three]
+    prominences = [max(float(p.get("prominence") or 0.0), 0.0) for p in first_three]
+    heights = [max(float(p.get("height") or 0.0), 0.0) for p in first_three]
+
+    max_prom = max(prominences)
+    max_height = max(heights)
+
+    if max_prom <= 0 or max_height <= 0:
+        return False, []
+
+    hits: list[str] = []
+
+    min_prom_ratio = min(p / max_prom for p in prominences)
+    if min_prom_ratio < 0.18:
+        return False, []
+    hits.append("candidate_prominence")
+
+    min_height_ratio = min(h / max_height for h in heights)
+    if min_height_ratio < 0.20:
+        return False, []
+    hits.append("candidate_height")
+
+    separation_ok = True
+    for i in range(2):
+        separation = abs(xs[i + 1] - xs[i])
+        width_scale = 0.5 * (widths[i] + widths[i + 1])
+        if width_scale <= 0:
+            separation_ok = False
+            break
+        ratio = separation / width_scale
+        if ratio < 1.25:
+            separation_ok = False
+            break
+
+    if not separation_ok:
+        return False, []
+    hits.append("candidate_separation")
+    hits.append("candidate_triplet")
+
+    return True, hits
+
+
 def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]]:
     stats = features.get("statistics") or {}
     gmm = stats.get("gmm") if isinstance(stats, dict) else {}
     delta_bic = gmm.get("delta_bic_32")
-    weights_k3 = gmm.get("weights_k3")
+    weights_k3 = gmm.get("weights_k3") if isinstance(gmm, dict) else None
+
+    candidates = features.get("candidates") or {}
+    peaks = candidates.get("peaks") or []
+
+    geometry_ok, geometry_hits = _three_peak_candidate_support(peaks)
+
+    min_weight = None
+    weight_hits: list[str] = []
+    weight_support = True
+    if weights_k3:
+        min_weight = min(weights_k3)
+        if min_weight >= 0.06:
+            weight_hits.append("weights_k3")
+        else:
+            weight_support = False
 
     hits: list[str] = []
+    support = False
+    weights_added = False
 
-    if delta_bic is not None and delta_bic <= -8.0:
-        if weights_k3 and min(weights_k3) >= 0.08:
+    if geometry_ok and weight_support:
+        if weight_hits:
+            hits.extend(weight_hits)
+            weights_added = True
+        hits.extend(geometry_hits)
+        support = True
+
+    if delta_bic is not None:
+        weight_ok_for_delta = (min_weight is None) or (min_weight >= 0.06)
+        if weight_ok_for_delta and delta_bic <= -7.0:
+            if weight_hits and not weights_added:
+                hits.extend(weight_hits)
+                weights_added = True
             hits.append("delta_bic")
+            support = True
+        elif (
+            geometry_ok
+            and weight_support
+            and weight_ok_for_delta
+            and delta_bic <= -5.0
+        ):
+            if weight_hits and not weights_added:
+                hits.extend(weight_hits)
+                weights_added = True
+            hits.append("delta_bic_geometry")
+            support = True
 
-    return bool(hits), hits
+    return support, hits
 
 
 def _apply_peak_caps(

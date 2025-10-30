@@ -70,3 +70,51 @@ def test_ask_gpt_peak_count_accepts_missing_kde():
     assert captured is not None
     assert "kde" not in captured
     assert "kde_bandwidth" not in captured.get("histogram", {})
+
+
+def test_peak_caps_allow_three_with_clear_triplet():
+    rng = np.random.default_rng(123)
+    counts = np.concatenate(
+        [
+            rng.normal(-3.0, 0.25, size=250),
+            rng.normal(0.0, 0.3, size=260),
+            rng.normal(3.1, 0.28, size=240),
+        ]
+    )
+
+    features = _build_feature_payload(counts)
+
+    captured: dict | None = None
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            nonlocal captured
+            user = next(msg for msg in kwargs["messages"] if msg["role"] == "user")
+            captured = json.loads(user["content"])
+            response = {
+                "peak_count": 3,
+                "confidence": 0.8,
+                "reason": "clear triplet",
+                "peak_indices": [0, 1, 2],
+            }
+            message = SimpleNamespace(content=json.dumps(response))
+            choice = SimpleNamespace(message=message)
+            return SimpleNamespace(choices=[choice])
+
+    client = DummyClient()
+    result = ask_gpt_peak_count(
+        client,
+        model_name="dummy",
+        max_peaks=3,
+        counts_full=counts,
+        features=features,
+    )
+
+    assert result == 3
+    assert captured is not None
+    heuristics = captured.get("heuristics", {}) if captured else {}
+    assert heuristics.get("final_allowed_max") == 3
+    assert heuristics.get("evidence_for_three") is True

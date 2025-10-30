@@ -600,6 +600,11 @@ def kde_peaks_valleys(
     # ---------- *re-derive* indices for every peak we now have ----------
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
 
+    # from here on treat indices as a NumPy array so downstream size/shape
+    # checks work even on legacy environments that expect ``.size``.
+    peaks_idx = np.asarray(peaks_idx, dtype=int)
+    peaks_x = [float(xs[i]) for i in peaks_idx]
+
     # ---------- valleys ----------
     valleys_x: list[float] = []
     if len(peaks_idx) > 1:

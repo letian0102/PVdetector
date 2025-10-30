@@ -261,7 +261,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-separation",
         type=float,
-        default=6.0,
+        default=0.5,
         help="Minimum distance between detected peaks.",
     )
     parser.add_argument("--grid-size", type=int, default=20_000)
@@ -358,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     options.min_width = max(0, args.min_width)
     options.curvature = args.curvature
     options.turning_points = bool(args.turning_points)
-    options.min_separation = args.min_separation
+    options.min_separation = max(0.0, args.min_separation)
     options.grid_size = max(4000, args.grid_size)
     options.valley_drop = args.valley_drop
     options.first_valley = args.first_valley

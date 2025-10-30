@@ -9,6 +9,7 @@ from typing import Any, Optional
 import numpy as np
 from openai import AuthenticationError, OpenAI
 from scipy.signal import find_peaks, peak_prominences, peak_widths
+from scipy.stats import gaussian_kde
 from sklearn.mixture import GaussianMixture
 
 from .kde_detector import quick_peak_estimate
@@ -643,6 +644,37 @@ def _build_feature_payload(
     centers = 0.5 * (edges[:-1] + edges[1:])
     smoothed = _smooth_histogram(counts)
 
+    kde_section: dict[str, Any] | None = None
+    kde_points = 200
+    if values.size >= 2:
+        try:
+            kde = gaussian_kde(values, bw_method="scott")
+            scale = float(kde.factor)
+            sample_std = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+            bandwidth = scale * sample_std if sample_std > 0 else None
+            xs = np.linspace(lo, hi, kde_points)
+            ys = kde(xs)
+            kde_section = {
+                "bandwidth": float(bandwidth) if bandwidth is not None and np.isfinite(bandwidth) else None,
+                "scale": scale if np.isfinite(scale) else None,
+                "x": [float(v) for v in xs.tolist()],
+                "density": [float(v) for v in ys.tolist()],
+            }
+        except Exception:
+            kde_section = {
+                "bandwidth": None,
+                "scale": None,
+                "x": [],
+                "density": [],
+            }
+    else:
+        kde_section = {
+            "bandwidth": None,
+            "scale": None,
+            "x": [],
+            "density": [],
+        }
+
     peaks, valley_x, valley_depth_ratio, prominence_ratio, valley_depth_abs = _extract_peak_candidates(
         centers, smoothed
     )
@@ -661,35 +693,12 @@ def _build_feature_payload(
         "bin_count": int(bins),
         "bin_edges": [float(round(e, 4)) for e in edges.tolist()],
         "counts": [int(c) for c in counts.tolist()],
-        "range": [float(lo), float(hi)],
-        "adaptive": adaptive_info,
+        "kde_bandwidth": kde_section.get("bandwidth") if kde_section else None,
+        "kde_scale": kde_section.get("scale") if kde_section else None,
     }
 
-    prompt_chars = _estimate_prompt_chars({"histogram": histogram_payload})
-    histogram_payload["prompt_chars"] = prompt_chars
-    histogram_payload["prompt_budget"] = HISTOGRAM_PROMPT_CHAR_BUDGET
-    if prompt_chars > HISTOGRAM_PROMPT_CHAR_BUDGET:
-        histogram_payload["counts_rle"] = _run_length_encode(counts)
-        histogram_payload.pop("counts", None)
-        histogram_payload["compression"] = {
-            "applied": True,
-            "method": "run_length",
-            "original_chars": prompt_chars,
-        }
-        histogram_payload["prompt_chars"] = _estimate_prompt_chars({"histogram": histogram_payload})
-    else:
-        histogram_payload["compression"] = {
-            "applied": False,
-            "method": "raw",
-            "original_chars": prompt_chars,
-        }
-
-    histogram_payload["downsampled"] = _downsample_histogram(
-        clipped, lo, hi, min(SUMMARY_BINS, bins)
-    )
-    histogram_payload["second_derivative"] = _second_derivative_summary(smoothed)
-
-    payload["histogram"] = histogram_payload
+    if kde_section:
+        payload["kde"] = kde_section
 
     payload["candidates"] = {
         "peaks": peaks_out,
@@ -884,8 +893,9 @@ def ask_gpt_peak_count(
         "You are a cytometry/ADT gating assistant. Infer the number of visible density peaks "
         "(modes) using only the provided features. Prefer fewer peaks unless strong evidence "
         "suggests more. For CD4 and sometimes CD45RA/RO, allow 3 peaks; otherwise treat 1–2 as typical. "
-        "Tiny shoulders are not peaks unless prominence and width thresholds are met. Output only the JSON "
-        "object described by the schema."
+        "Histogram bins and KDE traces summarise the distribution; prefer the smoother KDE profile and its "
+        "bandwidth hints when judging shoulders versus true peaks. Tiny shoulders are not peaks unless prominence "
+        "and width thresholds are met. Output only the JSON object described by the schema."
     )
 
     response_format = {

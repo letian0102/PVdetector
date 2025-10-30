@@ -775,7 +775,22 @@ def _build_feature_payload(
         "counts": [int(c) for c in counts.tolist()],
         "kde_bandwidth": kde_section.get("bandwidth") if kde_section else None,
         "kde_scale": kde_section.get("scale") if kde_section else None,
+        "bin_width": float(round(edges[1] - edges[0], 5)) if bins > 1 else None,
+        "adaptive": adaptive_info,
+        "run_length_counts": _run_length_encode(counts),
+        "smoothed_counts": [float(round(v, 4)) for v in smoothed.tolist()],
+        "second_derivative_summary": _second_derivative_summary(smoothed),
+        "range": {"lo": float(lo), "hi": float(hi)},
     }
+
+    histogram_payload["summary_bins"] = _downsample_histogram(
+        values,
+        lo,
+        hi,
+        SUMMARY_BINS,
+    )
+
+    payload["histogram"] = histogram_payload
 
     if kde_section:
         payload["kde"] = kde_section

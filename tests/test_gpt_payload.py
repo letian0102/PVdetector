@@ -9,7 +9,12 @@ import numpy as np
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from peak_valley.gpt_adapter import _build_feature_payload, ask_gpt_peak_count
+from peak_valley.gpt_adapter import (
+    SUMMARY_BINS,
+    BASELINE_BINS,
+    _build_feature_payload,
+    ask_gpt_peak_count,
+)
 
 
 def _dummy_counts() -> np.ndarray:
@@ -21,6 +26,18 @@ def _dummy_counts() -> np.ndarray:
 def test_feature_payload_includes_kde_trace():
     counts = _dummy_counts()
     payload = _build_feature_payload(counts)
+
+    assert "histogram" in payload
+    hist = payload["histogram"]
+    assert hist["bin_count"] >= BASELINE_BINS
+    assert hist["bin_edges"]
+    assert hist["counts"]
+    assert hist["run_length_counts"]
+    assert hist["smoothed_counts"]
+    assert hist["second_derivative_summary"]["max_abs"] >= 0
+    summary_bins = hist["summary_bins"]
+    assert summary_bins["bin_count"] == SUMMARY_BINS
+    assert len(summary_bins["counts"]) == SUMMARY_BINS
 
     assert "kde" in payload
     kde = payload["kde"]

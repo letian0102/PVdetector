@@ -384,6 +384,7 @@ def _resolve_parameters(
                     params["max_peaks"],
                     counts_full=counts,
                     marker_name=marker,
+                    kde_bandwidth=bw_use,
                 )
             except Exception as exc:  # pragma: no cover - depends on API
                 debug["gpt_peak_error"] = str(exc)

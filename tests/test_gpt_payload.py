@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from PIL import Image
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -126,6 +127,33 @@ def test_feature_payload_includes_kde_trace():
         assert candidates["pairwise_separations"]
 
 
+def test_feature_payload_respects_numeric_bandwidth_override():
+    counts = _dummy_counts()
+    payload = _build_feature_payload(counts, kde_bandwidth=0.42)
+
+    hist = payload["histogram"]
+    assert hist["kde_bandwidth_source"] == "provided_value"
+    assert hist["kde_bandwidth"] == pytest.approx(0.42)
+    assert "kde_bandwidth_rule" not in hist
+
+    kde = payload["kde"]
+    assert kde["bandwidth"] == pytest.approx(0.42)
+    assert "bandwidth_rule" not in kde
+
+
+def test_feature_payload_records_bandwidth_rule_override():
+    counts = _dummy_counts()
+    payload = _build_feature_payload(counts, kde_bandwidth="silverman")
+
+    hist = payload["histogram"]
+    assert hist["kde_bandwidth_source"] == "provided_rule"
+    assert hist.get("kde_bandwidth_rule") == "silverman"
+
+    kde = payload["kde"]
+    assert kde.get("bandwidth_rule") == "silverman"
+    assert kde["bandwidth"] is None or kde["bandwidth"] > 0
+
+
 def test_ask_gpt_peak_count_accepts_missing_kde():
     counts = _dummy_counts()
     features = _build_feature_payload(counts)
@@ -165,6 +193,39 @@ def test_ask_gpt_peak_count_accepts_missing_kde():
     assert captured.get("kde_multiscale")
     meta = captured.get("meta", {})
     assert meta.get("consensus_peak_count") is not None
+
+
+def test_ask_gpt_peak_count_passes_bandwidth_metadata():
+    counts = _dummy_counts()
+    captured: dict | None = None
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            nonlocal captured
+            user = next(msg for msg in kwargs["messages"] if msg["role"] == "user")
+            captured = json.loads(user["content"])
+            response = {"peak_count": 1, "confidence": 0.5, "reason": "ok", "peak_indices": [0]}
+            message = SimpleNamespace(content=json.dumps(response))
+            choice = SimpleNamespace(message=message)
+            return SimpleNamespace(choices=[choice])
+
+    client = DummyClient()
+    result = ask_gpt_peak_count(
+        client,
+        model_name="dummy",
+        max_peaks=3,
+        counts_full=counts,
+        kde_bandwidth="scott",
+    )
+
+    assert result == 1
+    assert captured is not None
+    hist = captured.get("histogram", {})
+    assert hist.get("kde_bandwidth_source") == "provided_rule"
+    assert hist.get("kde_bandwidth_rule") == "scott"
 
 
 def test_peak_caps_allow_three_with_clear_triplet():

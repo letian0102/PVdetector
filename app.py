@@ -3552,7 +3552,8 @@ if st.session_state.run_active and st.session_state.pending:
                     )
                 n_use = ask_gpt_peak_count(
                     client, gpt_model, max_peaks_use, counts_full=cnts,
-                    marker_name=marker, distribution_image=gpt_image
+                    marker_name=marker, distribution_image=gpt_image,
+                    kde_bandwidth=bw_use,
                 )
             except AuthenticationError:
                 if not st.session_state.invalid_api_key:

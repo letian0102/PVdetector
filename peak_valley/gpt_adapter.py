@@ -359,12 +359,12 @@ def _gmm_statistics(x: np.ndarray, max_components: int = 3) -> dict[str, Any]:
         stats["stds_k3"] = [float(s) for s in stds[order]]
         stats["weights_k3"] = [float(w) for w in gm3.weights_[order]]
 
-    if 1 in stats["bic"] and 2 in stats["bic"]:
+    if "k1" in stats["bic"] and "k2" in stats["bic"]:
         b1 = stats["bic"].get("k1")
         b2 = stats["bic"].get("k2")
         if b1 is not None and b2 is not None:
             stats["delta_bic_21"] = float(b2 - b1)
-    if 2 in stats["bic"] and 3 in stats["bic"]:
+    if "k2" in stats["bic"] and "k3" in stats["bic"]:
         b2 = stats["bic"].get("k2")
         b3 = stats["bic"].get("k3")
         if b2 is not None and b3 is not None:

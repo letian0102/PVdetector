@@ -1,6 +1,7 @@
+import pandas as pd
 import streamlit as st
 
-from app import _apply_cli_positions, _restore_cli_positions
+from app import _apply_cli_positions, _restore_cli_positions, _cli_assign_groups
 
 
 def setup_state():
@@ -97,3 +98,43 @@ def test_restore_cli_positions_reverts_consistency_changes():
     assert restored["peaks"] == [1.0, 2.0]
     assert restored["valleys"] == [1.4]
     assert st.session_state.params["stemA_marker"]["n_peaks"] == 2
+
+
+def test_cli_assign_groups_aligns_by_sample():
+    st.session_state.clear()
+    st.session_state.group_assignments = {}
+    st.session_state.group_overrides = {"Default": {}}
+    st.session_state.results = {}
+
+    subset = pd.DataFrame({
+        "stem": ["sampleA_marker", "sampleB_marker"],
+        "sample": ["SampleA", "SampleB"],
+    })
+
+    applied = _cli_assign_groups(subset, mode="align_sample", new_group=None)
+
+    assert applied
+    assert st.session_state.group_assignments["sampleA_marker"] == "SampleA"
+    assert st.session_state.group_assignments["sampleB_marker"] == "SampleB"
+    assert "SampleA" in st.session_state.group_overrides
+    assert "SampleB" in st.session_state.group_overrides
+
+
+def test_cli_assign_groups_creates_new_group():
+    st.session_state.clear()
+    st.session_state.group_assignments = {}
+    st.session_state.group_overrides = {"Default": {}}
+    st.session_state.results = {}
+
+    subset = pd.DataFrame({
+        "stem": ["sampleC_marker"],
+    })
+
+    blocked = _cli_assign_groups(subset, mode="new_group", new_group="")
+    assert not blocked
+    assert "sampleC_marker" not in st.session_state.group_assignments
+
+    applied = _cli_assign_groups(subset, mode="new_group", new_group="MyGroup")
+    assert applied
+    assert st.session_state.group_assignments["sampleC_marker"] == "MyGroup"
+    assert "MyGroup" in st.session_state.group_overrides

@@ -109,6 +109,8 @@ for key, default in {
     "cli_positions_cache": {},
     "cli_positions_pending": [],
     "cli_positions_fixed": set(),
+    "cli_group_mode": "none",
+    "cli_group_new_name": "",
     "mode_selector": "Counts CSV files",
     "mode_selector_target": None,
     # incremental‑run machinery
@@ -1382,6 +1384,8 @@ def _clear_cli_import() -> None:
     st.session_state["cli_positions_cache"] = {}
     st.session_state["cli_positions_pending"] = []
     st.session_state["cli_positions_fixed"] = set()
+    st.session_state["cli_group_mode"] = "none"
+    st.session_state["cli_group_new_name"] = ""
 
 
 def _load_cli_import(
@@ -1477,6 +1481,8 @@ def _load_cli_import(
     st.session_state.cli_positions_cache = positions_cache
     st.session_state.cli_positions_pending = list(summary_lookup)
     st.session_state.cli_positions_fixed = set(summary_lookup)
+    st.session_state.cli_group_mode = "none"
+    st.session_state.cli_group_new_name = ""
 
     samples = [str(s) for s in summary_df.get("sample", []) if isinstance(s, str)]
     markers = [str(m) for m in summary_df.get("marker", []) if isinstance(m, str)]
@@ -1526,7 +1532,86 @@ def _load_cli_import(
     st.session_state.mode_selector_target = "Whole dataset"
 
 
-def _queue_cli_samples(stems: list[str]) -> None:
+def _cli_assign_groups(
+    subset: pd.DataFrame,
+    *,
+    mode: str,
+    new_group: str | None,
+) -> bool:
+    """Apply grouping rules for imported CLI samples.
+
+    Returns ``True`` when grouping was applied successfully. A ``False`` return
+    indicates that the operation should be aborted (e.g. missing information).
+    """
+
+    if not isinstance(subset, pd.DataFrame) or subset.empty:
+        return True
+
+    assignments = st.session_state.get("group_assignments")
+    if not isinstance(assignments, dict):
+        assignments = {}
+        st.session_state.group_assignments = assignments
+
+    overrides = st.session_state.get("group_overrides")
+    if not isinstance(overrides, dict):
+        overrides = {"Default": {}}
+        st.session_state.group_overrides = overrides
+
+    stems = [str(s) for s in subset.get("stem", []) if isinstance(s, str) and s]
+
+    if mode == "align_sample":
+        if "sample" not in subset.columns:
+            st.warning("The imported summary does not contain a 'sample' column to align by.")
+            return False
+
+        any_grouped = False
+        for stem, sample in zip(stems, subset["sample"].tolist()):
+            if not stem:
+                continue
+            if isinstance(sample, str):
+                group_name = sample.strip()
+            else:
+                group_name = ""
+            if not group_name:
+                continue
+            overrides.setdefault(group_name, {})
+            if assignments.get(stem) != group_name:
+                assignments[stem] = group_name
+                if stem in st.session_state.results:
+                    _mark_sample_dirty(stem, "group")
+            any_grouped = True
+
+        if not any_grouped:
+            st.warning("No sample names were available to build group assignments.")
+            return False
+
+        st.session_state.group_overrides = overrides
+        return True
+
+    if mode == "new_group":
+        clean = (new_group or "").strip()
+        if not clean:
+            st.warning("Enter a group name before grouping the selected samples together.")
+            return False
+
+        overrides.setdefault(clean, {})
+        for stem in stems:
+            if assignments.get(stem) != clean:
+                assignments[stem] = clean
+                if stem in st.session_state.results:
+                    _mark_sample_dirty(stem, "group")
+        st.session_state.group_overrides = overrides
+        return True
+
+    return True
+
+
+def _queue_cli_samples(
+    stems: list[str],
+    *,
+    group_mode: str,
+    new_group: str | None,
+) -> None:
     """Queue selected CLI samples for processing."""
 
     summary_df = st.session_state.get("cli_summary_df")
@@ -1557,6 +1642,9 @@ def _queue_cli_samples(stems: list[str]) -> None:
     st.session_state.sel_markers = markers
     st.session_state.sel_samples = samples
     st.session_state.sel_batches = batches
+
+    if not _cli_assign_groups(subset, mode=group_mode, new_group=new_group):
+        return
 
     if st.session_state.get("cli_counts_native"):
         pending_raw = st.session_state.get("cli_positions_pending") or []
@@ -1660,6 +1748,13 @@ def _render_cli_import_section() -> None:
         st.session_state.cli_filter_text = filter_text
 
         view_df = summary_df.copy()
+        all_options = list(
+            dict.fromkeys(
+                str(stem)
+                for stem in summary_df.get("stem", [])
+                if isinstance(stem, str) and stem
+            )
+        )
         if filter_text:
             def _match(col: str) -> pd.Series:
                 if col not in view_df.columns:
@@ -1693,8 +1788,50 @@ def _render_cli_import_section() -> None:
 
         st.session_state.cli_summary_selection = selection
 
-        if st.button("Load selected samples into detector", disabled=not selection):
-            _queue_cli_samples(selection)
+        group_choices = ["none", "align_sample", "new_group"]
+        group_labels = {
+            "none": "No automatic grouping",
+            "align_sample": "Align using sample column",
+            "new_group": "Group selected together",
+        }
+        default_mode = st.session_state.get("cli_group_mode", "none")
+        try:
+            default_index = group_choices.index(default_mode)
+        except ValueError:
+            default_index = 0
+
+        group_mode = st.radio(
+            "Post-import grouping",
+            group_choices,
+            index=default_index,
+            key="cli_group_mode",
+            format_func=lambda value: group_labels.get(value, value),
+            help="Automatically assign selected samples to groups after loading.",
+        )
+
+        new_group_name = st.text_input(
+            "Group name for selected samples",
+            value=st.session_state.get("cli_group_new_name", ""),
+            key="cli_group_new_name",
+            disabled=group_mode != "new_group",
+            help="Provide the group name used when grouping the selected samples together.",
+        )
+
+        buttons_col1, buttons_col2 = st.columns([1, 1])
+        with buttons_col1:
+            if st.button("Load selected samples", disabled=not selection):
+                _queue_cli_samples(
+                    selection,
+                    group_mode=group_mode,
+                    new_group=new_group_name,
+                )
+        with buttons_col2:
+            if st.button("Load all samples", disabled=view_df.empty):
+                _queue_cli_samples(
+                    all_options,
+                    group_mode=group_mode,
+                    new_group=new_group_name,
+                )
 # ───────────────────────── helper: (re)plot a dataset ───────────────────────
 
 def _plot_png_fixed(stem, xs, ys, peaks, valleys,

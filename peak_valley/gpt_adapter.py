@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import textwrap
 from typing import Any, Optional
@@ -14,6 +15,13 @@ from .kde_detector import quick_peak_estimate
 from .signature import shape_signature
 
 __all__ = ["ask_gpt_peak_count", "ask_gpt_prominence", "ask_gpt_bandwidth"]
+
+HISTOGRAM_PROMPT_CHAR_BUDGET = 4800
+MIN_ADAPTIVE_SAMPLES = 512
+MAX_HISTOGRAM_BINS = 160
+MIN_HISTOGRAM_BINS = 80
+BASELINE_BINS = 64
+SUMMARY_BINS = 48
 
 # keep a simple run-time cache; survives a single Streamlit run
 _cache: dict[tuple, float | int | str] = {}  # (tag, sig[, extra]) → value
@@ -52,6 +60,158 @@ def _robust_limits(x: np.ndarray) -> tuple[float, float]:
         if not np.isfinite(hi) or hi <= lo:
             hi = lo + 1.0
     return float(lo), float(hi)
+
+
+def _adaptive_bin_count(
+    values: np.ndarray,
+    lo: float,
+    hi: float,
+    *,
+    baseline: int = BASELINE_BINS,
+    min_bins: int = MIN_HISTOGRAM_BINS,
+    max_bins: int = MAX_HISTOGRAM_BINS,
+) -> tuple[int, dict[str, Any]]:
+    """Return an adaptive bin count (Freedman–Diaconis/Scott) and metadata."""
+
+    info: dict[str, Any] = {
+        "samples": int(values.size),
+        "method": "baseline",
+        "raw_bins": None,
+        "clipped_bins": None,
+    }
+
+    span = float(hi - lo)
+    if values.size < MIN_ADAPTIVE_SAMPLES or not np.isfinite(span) or span <= 0:
+        return baseline, info
+
+    n = float(values.size)
+
+    iqr = float(np.subtract(*np.percentile(values, [75, 25])))
+    fd_bins = math.inf
+    if iqr > 0:
+        width_fd = 2.0 * iqr / np.cbrt(n)
+        if width_fd > 0:
+            fd_bins = span / width_fd
+
+    std = float(np.std(values))
+    scott_bins = math.inf
+    if std > 0:
+        width_scott = 3.5 * std / np.cbrt(n)
+        if width_scott > 0:
+            scott_bins = span / width_scott
+
+    candidates: list[tuple[str, float]] = []
+    if math.isfinite(fd_bins) and fd_bins > baseline:
+        candidates.append(("freedman_diaconis", fd_bins))
+    if math.isfinite(scott_bins) and scott_bins > baseline:
+        candidates.append(("scott", scott_bins))
+
+    if not candidates:
+        return baseline, info
+
+    method, raw_bins = min(candidates, key=lambda item: item[1])
+    clipped = int(np.clip(round(raw_bins), min_bins, max_bins))
+    if clipped <= baseline:
+        return baseline, info
+
+    info.update({
+        "method": method,
+        "raw_bins": float(raw_bins),
+        "clipped_bins": clipped,
+    })
+    return clipped, info
+
+
+def _run_length_encode(arr: np.ndarray) -> list[list[int]]:
+    """Return simple run-length encoding for prompt-friendly payloads."""
+
+    if arr.size == 0:
+        return []
+
+    encoded: list[list[int]] = []
+    current_val = int(arr[0])
+    run_length = 1
+    for val in arr[1:]:
+        intval = int(val)
+        if intval == current_val:
+            run_length += 1
+        else:
+            encoded.append([current_val, run_length])
+            current_val = intval
+            run_length = 1
+    encoded.append([current_val, run_length])
+    return encoded
+
+
+def _estimate_prompt_chars(data: dict[str, Any]) -> int:
+    """Estimate prompt character count for a JSON serialisation."""
+
+    try:
+        return len(json.dumps(data, separators=(",", ":"), ensure_ascii=False))
+    except TypeError:
+        return 0
+
+
+def _downsample_histogram(
+    values: np.ndarray,
+    lo: float,
+    hi: float,
+    target_bins: int,
+) -> dict[str, Any]:
+    """Generate a compact histogram representation for prompts."""
+
+    if target_bins <= 1 or values.size == 0:
+        return {
+            "bin_count": int(max(target_bins, 0)),
+            "bin_edges": [],
+            "counts": [],
+        }
+
+    counts, edges = np.histogram(values, bins=target_bins, range=(lo, hi))
+    return {
+        "bin_count": int(target_bins),
+        "bin_edges": [float(round(e, 4)) for e in edges.tolist()],
+        "counts": [int(c) for c in counts.tolist()],
+    }
+
+
+def _second_derivative_summary(smoothed: np.ndarray) -> dict[str, Any]:
+    """Summarise curvature structure from a smoothed histogram."""
+
+    metrics = {
+        "zero_crossings": 0,
+        "maxima": 0,
+        "minima": 0,
+        "mean_abs": 0.0,
+        "max_abs": 0.0,
+    }
+
+    if smoothed.size < 5:
+        return metrics
+
+    first = np.diff(smoothed)
+    second = np.diff(first)
+    if second.size == 0:
+        return metrics
+
+    nonzero_mask = second != 0
+    filtered = second[nonzero_mask]
+    if filtered.size > 1:
+        signs = np.sign(filtered)
+        metrics["zero_crossings"] = int(np.sum(signs[1:] != signs[:-1]))
+
+    # Local extrema within the second derivative sequence
+    core = second[1:-1]
+    if core.size > 0:
+        left = second[:-2]
+        right = second[2:]
+        metrics["maxima"] = int(np.sum((core > left) & (core > right)))
+        metrics["minima"] = int(np.sum((core < left) & (core < right)))
+
+    abs_second = np.abs(second)
+    metrics["mean_abs"] = float(abs_second.mean())
+    metrics["max_abs"] = float(abs_second.max())
+    return metrics
 
 
 def _smooth_histogram(counts: np.ndarray) -> np.ndarray:
@@ -475,7 +635,9 @@ def _build_feature_payload(
     if hi <= lo:
         hi = lo + 1.0
 
-    bins = 64
+    bins, adaptive_info = _adaptive_bin_count(values, lo, hi)
+    if bins <= 0:
+        bins = BASELINE_BINS
     clipped = np.clip(values, lo, hi)
     counts, edges = np.histogram(clipped, bins=bins, range=(lo, hi))
     centers = 0.5 * (edges[:-1] + edges[1:])
@@ -495,10 +657,39 @@ def _build_feature_payload(
         }
         peaks_out.append(entry)
 
-    payload["histogram"] = {
-        "bin_edges": [float(e) for e in edges.tolist()],
+    histogram_payload: dict[str, Any] = {
+        "bin_count": int(bins),
+        "bin_edges": [float(round(e, 4)) for e in edges.tolist()],
         "counts": [int(c) for c in counts.tolist()],
+        "range": [float(lo), float(hi)],
+        "adaptive": adaptive_info,
     }
+
+    prompt_chars = _estimate_prompt_chars({"histogram": histogram_payload})
+    histogram_payload["prompt_chars"] = prompt_chars
+    histogram_payload["prompt_budget"] = HISTOGRAM_PROMPT_CHAR_BUDGET
+    if prompt_chars > HISTOGRAM_PROMPT_CHAR_BUDGET:
+        histogram_payload["counts_rle"] = _run_length_encode(counts)
+        histogram_payload.pop("counts", None)
+        histogram_payload["compression"] = {
+            "applied": True,
+            "method": "run_length",
+            "original_chars": prompt_chars,
+        }
+        histogram_payload["prompt_chars"] = _estimate_prompt_chars({"histogram": histogram_payload})
+    else:
+        histogram_payload["compression"] = {
+            "applied": False,
+            "method": "raw",
+            "original_chars": prompt_chars,
+        }
+
+    histogram_payload["downsampled"] = _downsample_histogram(
+        clipped, lo, hi, min(SUMMARY_BINS, bins)
+    )
+    histogram_payload["second_derivative"] = _second_derivative_summary(smoothed)
+
+    payload["histogram"] = histogram_payload
 
     payload["candidates"] = {
         "peaks": peaks_out,

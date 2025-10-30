@@ -785,11 +785,14 @@ def _strong_two_peak_signal(
 def _three_peak_candidate_support(
     peaks: list[dict[str, Any]],
     valleys: list[dict[str, Any]],
-) -> tuple[bool, list[str]]:
+) -> tuple[bool, list[str], list[str]]:
     """Return whether histogram candidates clearly support three peaks."""
 
+    deficits: list[str] = []
+
     if len(peaks) < 3:
-        return False, []
+        deficits.append("insufficient_candidates")
+        return False, [], deficits
 
     first_three = peaks[:3]
     xs = [float(p.get("x", 0.0)) for p in first_three]
@@ -801,18 +804,21 @@ def _three_peak_candidate_support(
     max_height = max(heights)
 
     if max_prom <= 0 or max_height <= 0:
-        return False, []
+        deficits.append("non_positive_geometry")
+        return False, [], deficits
 
     hits: list[str] = []
 
     min_prom_ratio = min(p / max_prom for p in prominences)
-    if min_prom_ratio < 0.13:
-        return False, []
+    if min_prom_ratio < 0.08:
+        deficits.append("weak_prominence")
+        return False, [], deficits
     hits.append("candidate_prominence")
 
     min_height_ratio = min(h / max_height for h in heights)
-    if min_height_ratio < 0.16:
-        return False, []
+    if min_height_ratio < 0.12:
+        deficits.append("weak_height")
+        return False, [], deficits
     hits.append("candidate_height")
 
     separation_ok = True
@@ -821,14 +827,16 @@ def _three_peak_candidate_support(
         width_scale = 0.5 * (widths[i] + widths[i + 1])
         if width_scale <= 0:
             separation_ok = False
+            deficits.append("zero_width_scale")
             break
         ratio = separation / width_scale
-        if ratio < 1.15:
+        if ratio < 0.95:
             separation_ok = False
+            deficits.append("poor_separation")
             break
 
     if not separation_ok:
-        return False, []
+        return False, [], deficits
     hits.append("candidate_separation")
 
     valley_hits = 0
@@ -843,23 +851,22 @@ def _three_peak_candidate_support(
             rel = match.get("relative_height_min")
             if rel is None:
                 continue
-            if rel <= 0.85:
+            if rel <= 0.88:
                 valley_hits += 1
                 hits.append(f"valley_{expected_pair[0]}_{expected_pair[1]}")
-            elif rel <= 0.92:
+            elif rel <= 0.94:
                 hits.append(f"valley_soft_{expected_pair[0]}_{expected_pair[1]}")
         if valley_hits >= 1:
             hits.append("valley_support")
         else:
-            if min_height_ratio < 0.25 and min_prom_ratio < 0.25:
-                return False, []
+            deficits.append("no_valley_support")
 
     hits.append("candidate_triplet")
 
-    return True, hits
+    return True, hits, deficits
 
 
-def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]]:
+def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str], list[str]]:
     stats = features.get("statistics") or {}
     gmm = stats.get("gmm") if isinstance(stats, dict) else {}
     delta_bic = gmm.get("delta_bic_32")
@@ -869,17 +876,21 @@ def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]
     peaks = candidates.get("peaks") or []
     valleys = candidates.get("valleys") or []
 
-    geometry_ok, geometry_hits = _three_peak_candidate_support(peaks, valleys)
+    geometry_ok, geometry_hits, geometry_deficits = _three_peak_candidate_support(peaks, valleys)
 
     min_weight = None
     weight_hits: list[str] = []
     weight_support = True
+    deficits: list[str] = list(geometry_deficits)
     if weights_k3:
         min_weight = min(weights_k3)
-        if min_weight >= 0.045:
+        if min_weight >= 0.03:
             weight_hits.append("weights_k3")
         else:
             weight_support = False
+            deficits.append("light_component")
+    else:
+        deficits.append("missing_weights")
 
     hits: list[str] = []
     support = False
@@ -893,26 +904,30 @@ def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]
         support = True
 
     if delta_bic is not None:
-        weight_ok_for_delta = (min_weight is None) or (min_weight >= 0.045)
-        relaxed_weight_ok = (min_weight is None) or (min_weight >= 0.03)
-        if weight_ok_for_delta and delta_bic <= -7.0:
+        weight_ok_for_delta = (min_weight is None) or (min_weight >= 0.03)
+        relaxed_weight_ok = (min_weight is None) or (min_weight >= 0.02)
+        if weight_ok_for_delta and delta_bic <= -6.2:
             if weight_hits and not weights_added:
                 hits.extend(weight_hits)
                 weights_added = True
             hits.append("delta_bic")
             support = True
         elif (
-            geometry_ok
-            and (weight_support or relaxed_weight_ok)
-            and delta_bic <= -5.2
+            (geometry_ok or relaxed_weight_ok)
+            and delta_bic <= -4.8
         ):
             if weight_hits and not weights_added:
                 hits.extend(weight_hits)
                 weights_added = True
             hits.append("delta_bic_geometry")
             support = True
+        else:
+            deficits.append("weak_delta_bic")
+    else:
+        deficits.append("missing_delta_bic")
 
-    return support, hits
+    deficits = list(dict.fromkeys(deficits))
+    return support, hits, deficits
 
 
 def _apply_peak_caps(
@@ -931,20 +946,29 @@ def _apply_peak_caps(
     heuristics["min_component_weight_k2"] = min_weight
     heuristics["peak_separation"] = separation_info
 
+    forced_cap: Optional[int] = None
+
     if safe_max >= 2 and not has_two:
-        safe_max = 1
-        heuristics["forced_peak_cap"] = 1
+        critical_failures = {"low_component_weight", "insufficient_separation"}
+        if any(reason in critical_failures for reason in two_hits):
+            safe_max = 1
+            forced_cap = 1
 
     if safe_max >= 3:
-        has_three, three_hits = _strong_three_peak_signal(feature_payload)
+        has_three, three_hits, three_deficits = _strong_three_peak_signal(feature_payload)
         heuristics["evidence_for_three"] = has_three
         heuristics["support_three_signals"] = three_hits
-        if not has_three:
+        heuristics["three_support_gaps"] = three_deficits
+        if not has_three and "insufficient_candidates" in three_deficits and safe_max > 2:
             safe_max = 2
-            heuristics["forced_peak_cap"] = heuristics.get("forced_peak_cap", 2)
+            forced_cap = 2 if forced_cap is None else forced_cap
     else:
         heuristics["evidence_for_three"] = False
         heuristics["support_three_signals"] = []
+        heuristics["three_support_gaps"] = []
+
+    if forced_cap is not None:
+        heuristics["forced_peak_cap"] = forced_cap
 
     heuristics["final_allowed_max"] = safe_max
     return safe_max, heuristics
@@ -983,8 +1007,11 @@ def _build_feature_payload(
     clipped = np.clip(values, lo, hi)
     counts, edges = np.histogram(clipped, bins=bins, range=(lo, hi))
     total_counts_all = float(np.sum(counts))
-    centers = 0.5 * (edges[:-1] + edges[1:])
+    bin_centers = 0.5 * (edges[:-1] + edges[1:])
     smoothed = _smooth_histogram(counts)
+    cumulative_counts = np.cumsum(counts.astype(float)) if counts.size else np.array([])
+    smoothed_total = float(np.sum(smoothed)) if smoothed.size else 0.0
+    smoothed_max = float(np.max(smoothed)) if smoothed.size else 0.0
 
     kde_section: dict[str, Any] | None = None
     kde_points = 200
@@ -1024,7 +1051,7 @@ def _build_feature_payload(
         prominence_ratio,
         valley_depth_abs,
         valley_series,
-    ) = _extract_peak_candidates(centers, smoothed, counts)
+    ) = _extract_peak_candidates(bin_centers, smoothed, counts)
 
     if valley_series and total_counts_all > 0:
         for v in valley_series:
@@ -1062,6 +1089,19 @@ def _build_feature_payload(
         "second_derivative_summary": _second_derivative_summary(smoothed),
         "range": {"lo": float(lo), "hi": float(hi)},
     }
+
+    histogram_payload["bin_centers"] = [float(round(c, 4)) for c in bin_centers.tolist()]
+    histogram_payload["cumulative_counts"] = [
+        float(round(v, 4)) for v in cumulative_counts.tolist()
+    ] if cumulative_counts.size else []
+    if total_counts_all > 0 and cumulative_counts.size:
+        histogram_payload["cumulative_normalized"] = [
+            float(round(v / total_counts_all, 6)) for v in cumulative_counts.tolist()
+        ]
+    else:
+        histogram_payload["cumulative_normalized"] = [
+            0.0 for _ in range(len(histogram_payload["cumulative_counts"]))
+        ]
 
     if values.size:
         mean_val = float(np.mean(values))
@@ -1146,7 +1186,7 @@ def _build_feature_payload(
         runs = _summarise_slope_runs(summary_counts, summary_edges)
         histogram_payload["slope_runs"] = runs
 
-        centers = 0.5 * (summary_edges[:-1] + summary_edges[1:])
+        summary_centers = 0.5 * (summary_edges[:-1] + summary_edges[1:])
         max_count = float(np.max(summary_counts)) if summary_counts.size else 0.0
         if max_count > 0:
             histogram_payload["profile_points"] = [
@@ -1154,7 +1194,7 @@ def _build_feature_payload(
                     "x": float(round(cx, 4)),
                     "relative_height": float(round(count / max_count, 4)),
                 }
-                for cx, count in zip(centers, summary_counts)
+                for cx, count in zip(summary_centers, summary_counts)
             ]
 
     bandwidth_hint = _bandwidth_projection(
@@ -1190,6 +1230,32 @@ def _build_feature_payload(
                 area = float(np.sum(counts[lb_idx : rb_idx + 1]))
                 if area > 0:
                     p["area_fraction"] = float(round(area / total_counts_all, 4))
+
+    if counts.size:
+        profile_samples: list[dict[str, Any]] = []
+        for idx, (center, raw, smooth_val) in enumerate(
+            zip(bin_centers, counts.astype(int), smoothed)
+        ):
+            entry: dict[str, Any] = {
+                "x": float(round(float(center), 4)),
+                "count": int(raw),
+                "smoothed": float(round(float(smooth_val), 4)),
+            }
+            if total_counts_all > 0:
+                entry["normalized"] = float(round(raw / total_counts_all, 6))
+                entry["cumulative_fraction"] = float(
+                    round(cumulative_counts[idx] / total_counts_all, 6)
+                )
+            if smoothed_total > 0:
+                entry["smoothed_fraction"] = float(
+                    round(float(smooth_val) / smoothed_total, 6)
+                )
+            if smoothed_max > 0:
+                entry["smoothed_relative"] = float(
+                    round(float(smooth_val) / smoothed_max, 6)
+                )
+            profile_samples.append(entry)
+        histogram_payload["profile_samples"] = profile_samples
 
     payload["histogram"] = histogram_payload
 

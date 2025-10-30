@@ -53,6 +53,19 @@ def test_feature_payload_includes_kde_trace():
     cumulative = hist.get("cumulative_profile")
     assert cumulative
     assert len(cumulative) == SUMMARY_BINS
+    assert hist.get("bin_centers")
+    assert len(hist["bin_centers"]) == hist["bin_count"]
+    assert hist.get("cumulative_counts")
+    assert len(hist["cumulative_counts"]) == hist["bin_count"]
+    assert hist.get("cumulative_normalized")
+    assert len(hist["cumulative_normalized"]) == hist["bin_count"]
+    samples = hist.get("profile_samples")
+    assert samples
+    assert len(samples) == hist["bin_count"]
+    first_sample = samples[0]
+    assert "x" in first_sample and "count" in first_sample
+    assert "smoothed" in first_sample
+    assert "cumulative_fraction" in first_sample or hist["bin_count"] == 0
     runs = hist.get("slope_runs")
     assert isinstance(runs, list)
     assert runs, "slope_runs should capture monotonic segments"
@@ -169,3 +182,4 @@ def test_peak_caps_allow_three_with_clear_triplet():
     heuristics = captured.get("heuristics", {}) if captured else {}
     assert heuristics.get("final_allowed_max") == 3
     assert heuristics.get("evidence_for_three") is True
+    assert heuristics.get("three_support_gaps") == []

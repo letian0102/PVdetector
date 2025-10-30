@@ -176,6 +176,351 @@ def _downsample_histogram(
     }
 
 
+def _uniform_grid(lo: float, hi: float, points: int) -> np.ndarray:
+    """Return a uniform grid within ``[lo, hi]`` (inclusive)."""
+
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo or points <= 1:
+        return np.linspace(0.0, 1.0, max(points, 2))
+    return np.linspace(lo, hi, points)
+
+
+def _summarise_multiscale_consensus(
+    profiles: list[dict[str, Any]],
+    *,
+    total_scales: int,
+) -> dict[str, Any]:
+    """Summarise multiscale KDE votes into a stability-oriented consensus."""
+
+    if total_scales <= 0 or not profiles:
+        return {}
+
+    ordered = sorted(
+        (p for p in profiles if p.get("scale") is not None),
+        key=lambda item: float(item.get("scale", 0.0)),
+    )
+    if not ordered:
+        return {}
+
+    scales = [float(p.get("scale", 0.0)) for p in ordered]
+    counts = [int(max(0, p.get("peak_count", 0))) for p in ordered]
+
+    # frequency of each vote across all scales
+    unique, freq = np.unique(counts, return_counts=True)
+    freq_map = {int(k): int(v) for k, v in zip(unique.tolist(), freq.tolist())}
+
+    # contiguous stability runs (same peak count across neighbouring scales)
+    runs: list[dict[str, Any]] = []
+    current_count: Optional[int] = None
+    current_len = 0
+    start_scale: Optional[float] = None
+    prev_scale: Optional[float] = None
+
+    for scale, count in zip(scales, counts):
+        if current_count is None or count != current_count:
+            if current_count is not None and start_scale is not None and prev_scale is not None:
+                runs.append(
+                    {
+                        "count": current_count,
+                        "length": current_len,
+                        "start_scale": float(start_scale),
+                        "end_scale": float(prev_scale),
+                    }
+                )
+            current_count = count
+            current_len = 1
+            start_scale = scale
+        else:
+            current_len += 1
+        prev_scale = scale
+
+    if current_count is not None and start_scale is not None and prev_scale is not None:
+        runs.append(
+            {
+                "count": current_count,
+                "length": current_len,
+                "start_scale": float(start_scale),
+                "end_scale": float(prev_scale),
+            }
+        )
+
+    run_map: dict[int, dict[str, Any]] = {}
+    for run in runs:
+        count = int(run["count"])
+        existing = run_map.get(count)
+        if existing is None or run["length"] > existing["length"]:
+            run_map[count] = run
+
+    vote_fraction: dict[int, float] = {
+        count: freq_map[count] / total_scales for count in freq_map
+    }
+    run_fraction: dict[int, float] = {
+        count: run_map[count]["length"] / total_scales if count in run_map else 0.0
+        for count in freq_map
+    }
+
+    stability_scores: dict[int, float] = {}
+    for count in freq_map:
+        stability_scores[count] = round(
+            vote_fraction.get(count, 0.0) + 0.6 * run_fraction.get(count, 0.0),
+            6,
+        )
+
+    if not stability_scores:
+        return {}
+
+    # pick the most stable count (highest score, tie -> lower peak count)
+    recommended = min(
+        stability_scores.items(),
+        key=lambda item: (-item[1], item[0]),
+    )[0]
+
+    persistent_counter: dict[float, int] = {}
+    for profile in ordered:
+        seen: set[float] = set()
+        for peak in profile.get("peaks", []):
+            pos = peak.get("x") if isinstance(peak, dict) else None
+            if pos is None:
+                continue
+            rounded = float(round(float(pos), 2))
+            if rounded in seen:
+                continue
+            seen.add(rounded)
+            persistent_counter[rounded] = persistent_counter.get(rounded, 0) + 1
+
+    persistent = [
+        {
+            "x": float(pos),
+            "support_fraction": round(count / total_scales, 6),
+            "support_scales": int(count),
+        }
+        for pos, count in sorted(
+            persistent_counter.items(), key=lambda item: (-item[1], item[0])
+        )
+    ]
+
+    consensus = {
+        "recommended": int(recommended),
+        "vote_fraction": round(vote_fraction.get(recommended, 0.0), 6),
+        "run_fraction": round(run_fraction.get(recommended, 0.0), 6),
+        "stability": round(stability_scores.get(recommended, 0.0), 6),
+        "counts_by_scale": [
+            {
+                "scale": float(round(scale, 3)),
+                "count": int(count),
+            }
+            for scale, count in zip(scales, counts)
+        ],
+        "frequencies": {
+            int(count): round(vote_fraction[count], 6) for count in freq_map
+        },
+    }
+
+    if run_map:
+        consensus["longest_runs"] = [
+            {
+                "count": int(run["count"]),
+                "length": int(run["length"]),
+                "start_scale": float(run["start_scale"]),
+                "end_scale": float(run["end_scale"]),
+                "fraction": round(run["length"] / total_scales, 6),
+            }
+            for run in sorted(
+                run_map.values(),
+                key=lambda r: (-r["length"], r["count"]),
+            )
+        ]
+
+    if persistent:
+        consensus["persistent_peaks"] = persistent
+
+    return consensus
+
+
+def _multiscale_kde_profiles(
+    values: np.ndarray,
+    lo: float,
+    hi: float,
+    *,
+    base_factor: float,
+    sample_std: float,
+    grid_points: int = 96,
+) -> dict[str, Any]:
+    """Evaluate KDE profiles across bandwidth scales and capture peaks."""
+
+    if values.size < 2 or not np.isfinite(base_factor) or base_factor <= 0:
+        return {"grid": [], "profiles": [], "consensus": {}}
+
+    grid_points = max(32, min(grid_points, 160))
+    grid = _uniform_grid(lo, hi, grid_points)
+    grid_step = float(grid[1] - grid[0]) if grid.size >= 2 else 1.0
+
+    scales = np.round(np.linspace(0.55, 1.6, 7), 3).tolist()
+    profiles: list[dict[str, Any]] = []
+
+    for scale in scales:
+        factor = float(base_factor * scale)
+        if factor <= 0 or not np.isfinite(factor):
+            densities = np.zeros_like(grid)
+            profile_peaks: list[dict[str, Any]] = []
+            count = 0
+            total_prom = 0.0
+            bandwidth = None
+        else:
+            try:
+                kde = gaussian_kde(values, bw_method=factor)
+                densities = kde(grid)
+            except Exception:
+                densities = np.zeros_like(grid)
+            peaks_idx, _ = find_peaks(densities)
+            prominences = np.zeros_like(peaks_idx, dtype=float)
+            widths = np.zeros_like(peaks_idx, dtype=float)
+            if peaks_idx.size:
+                try:
+                    prominences = peak_prominences(densities, peaks_idx)[0]
+                except Exception:
+                    prominences = np.zeros_like(peaks_idx, dtype=float)
+                try:
+                    widths = peak_widths(densities, peaks_idx, rel_height=0.5)[0]
+                except Exception:
+                    widths = np.zeros_like(peaks_idx, dtype=float)
+
+            heights = densities[peaks_idx] if peaks_idx.size else np.array([])
+            order = np.argsort(heights)[::-1]
+            profile_peaks = []
+            for idx in order[:5]:
+                pos = float(grid[peaks_idx[idx]]) if peaks_idx.size else 0.0
+                height = float(heights[idx]) if heights.size else 0.0
+                prom = float(prominences[idx]) if prominences.size else 0.0
+                width = float(widths[idx]) * grid_step if widths.size else 0.0
+                profile_peaks.append(
+                    {
+                        "x": float(round(pos, 4)),
+                        "height": float(round(height, 6)),
+                        "prominence": float(round(prom, 6)),
+                        "width": float(round(width, 5)) if width > 0 else None,
+                    }
+                )
+            count = int(peaks_idx.size)
+            total_prom = float(np.sum(prominences)) if prominences.size else 0.0
+            bandwidth = (
+                float(round(factor * sample_std, 6))
+                if sample_std > 0 and np.isfinite(sample_std)
+                else None
+            )
+
+        profile = {
+            "scale": float(scale),
+            "bandwidth": bandwidth,
+            "peak_count": int(count),
+            "total_prominence": float(round(total_prom, 6)),
+            "peaks": profile_peaks,
+            "density": [float(round(v, 6)) for v in densities.tolist()],
+        }
+        profiles.append(profile)
+
+    consensus = _summarise_multiscale_consensus(profiles, total_scales=len(scales))
+    return {
+        "grid": [float(round(v, 4)) for v in grid.tolist()],
+        "profiles": profiles,
+        "consensus": consensus,
+    }
+
+
+def _summarise_peak_votes(
+    peaks_out: list[dict[str, Any]],
+    multiscale: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate votes from histogram candidates and multiscale KDE."""
+
+    from collections import defaultdict
+
+    tallies: defaultdict[int, float] = defaultdict(float)
+    votes: list[dict[str, Any]] = []
+
+    def add_vote(
+        source: str,
+        count: Optional[int],
+        weight: float,
+        extra: Optional[dict[str, Any]] = None,
+    ) -> None:
+        if count is None:
+            return
+        weight = float(weight)
+        if not np.isfinite(weight) or weight <= 0:
+            return
+        c = int(max(1, count))
+        tallies[c] += weight
+        entry = {"source": source, "count": c, "weight": float(round(weight, 6))}
+        if extra:
+            entry.update(extra)
+        votes.append(entry)
+
+    consensus = (multiscale or {}).get("consensus") if isinstance(multiscale, dict) else {}
+    if isinstance(consensus, dict) and consensus.get("recommended") is not None:
+        stability = float(consensus.get("stability") or 0.0)
+        vote_frac = float(consensus.get("vote_fraction") or 0.0)
+        weight = max(0.4, stability + 0.5 * vote_frac)
+        add_vote(
+            "kde_consensus",
+            int(consensus.get("recommended")),
+            weight,
+            {
+                "stability": float(round(stability, 6)),
+                "vote_fraction": float(round(vote_frac, 6)),
+            },
+        )
+        for entry in consensus.get("counts_by_scale", []) or []:
+            scale = entry.get("scale")
+            count = entry.get("count")
+            if count is None or scale is None:
+                continue
+            add_vote(
+                "kde_scale",
+                int(count),
+                0.08,
+                {
+                    "scale": float(scale),
+                },
+            )
+
+    if peaks_out:
+        avg_prom = float(
+            np.mean([p.get("relative_prominence") or 0.0 for p in peaks_out])
+        ) if peaks_out else 0.0
+        candidate_weight = max(0.25, min(1.1, 0.45 + avg_prom))
+        add_vote(
+            "histogram_candidates",
+            len(peaks_out),
+            candidate_weight,
+            {"average_relative_prominence": float(round(avg_prom, 6))},
+        )
+
+    if not tallies:
+        return {"votes": votes, "tally": {}, "recommended": None}
+
+    total_weight = float(sum(tallies.values()))
+    tally = {
+        count: float(round(weight / total_weight, 6)) for count, weight in tallies.items()
+    }
+    recommended = min(tally.items(), key=lambda item: (-item[1], item[0]))[0]
+
+    summary: dict[str, Any] = {
+        "votes": votes,
+        "tally": tally,
+        "total_weight": float(round(total_weight, 6)),
+        "recommended": int(recommended),
+    }
+
+    if isinstance(consensus, dict):
+        summary["consensus"] = {
+            key: consensus.get(key)
+            for key in ("recommended", "stability", "vote_fraction", "run_fraction")
+            if key in consensus
+        }
+
+    return summary
+
+
 def _sparkline_from_counts(counts: np.ndarray) -> str:
     """Render a coarse ASCII sparkline from histogram counts."""
 
@@ -1008,6 +1353,21 @@ def _apply_peak_caps(
     if forced_cap is not None:
         heuristics["forced_peak_cap"] = forced_cap
 
+    vote_summary = feature_payload.get("vote_summary")
+    if isinstance(vote_summary, dict):
+        heuristics["vote_summary"] = vote_summary
+        consensus = vote_summary.get("consensus") if isinstance(vote_summary.get("consensus"), dict) else None
+    else:
+        consensus = None
+
+    if consensus is None:
+        multiscale = feature_payload.get("kde_multiscale")
+        if isinstance(multiscale, dict) and isinstance(multiscale.get("consensus"), dict):
+            consensus = multiscale.get("consensus")
+
+    if consensus:
+        heuristics["multiscale_consensus"] = consensus
+
     heuristics["final_allowed_max"] = safe_max
     return safe_max, heuristics
 
@@ -1052,17 +1412,22 @@ def _build_feature_payload(
     smoothed_max = float(np.max(smoothed)) if smoothed.size else 0.0
 
     kde_section: dict[str, Any] | None = None
+    multiscale_section: dict[str, Any] | None = None
     kde_points = 200
+    sample_std = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+    base_factor: Optional[float] = None
     if values.size >= 2:
         try:
             kde = gaussian_kde(values, bw_method="scott")
             scale = float(kde.factor)
-            sample_std = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+            base_factor = scale if np.isfinite(scale) and scale > 0 else None
             bandwidth = scale * sample_std if sample_std > 0 else None
             xs = np.linspace(lo, hi, kde_points)
             ys = kde(xs)
             kde_section = {
-                "bandwidth": float(bandwidth) if bandwidth is not None and np.isfinite(bandwidth) else None,
+                "bandwidth": float(bandwidth)
+                if bandwidth is not None and np.isfinite(bandwidth)
+                else None,
                 "scale": scale if np.isfinite(scale) else None,
                 "x": [float(v) for v in xs.tolist()],
                 "density": [float(v) for v in ys.tolist()],
@@ -1081,6 +1446,18 @@ def _build_feature_payload(
             "x": [],
             "density": [],
         }
+
+    if base_factor is not None and base_factor > 0:
+        multiscale_section = _multiscale_kde_profiles(
+            values,
+            lo,
+            hi,
+            base_factor=base_factor,
+            sample_std=sample_std,
+            grid_points=max(64, min(140, bins)),
+        )
+    else:
+        multiscale_section = {"grid": [], "profiles": [], "consensus": {}}
 
     (
         peaks,
@@ -1250,6 +1627,9 @@ def _build_feature_payload(
     if bandwidth_hint:
         histogram_payload["bandwidth_projection"] = bandwidth_hint
 
+    if multiscale_section and multiscale_section.get("consensus"):
+        histogram_payload["multiscale_consensus"] = multiscale_section.get("consensus")
+
     if peaks_out:
         max_height = max((p["height"] for p in peaks_out), default=0.0)
         max_prominence = max((p["prominence"] for p in peaks_out), default=0.0)
@@ -1307,6 +1687,9 @@ def _build_feature_payload(
     if kde_section:
         payload["kde"] = kde_section
 
+    if multiscale_section:
+        payload["kde_multiscale"] = multiscale_section
+
     pairwise_separations: list[dict[str, Any]] = []
     if len(peaks_out) >= 2:
         bin_width = histogram_payload.get("bin_width")
@@ -1360,6 +1743,8 @@ def _build_feature_payload(
         "silverman_k1_vs_k2_p": None,
         "gmm": gmm_stats,
     }
+
+    payload["vote_summary"] = _summarise_peak_votes(peaks_out, multiscale_section)
 
     return payload
 
@@ -1531,6 +1916,24 @@ def ask_gpt_peak_count(
     payload["meta"]["allowed_peaks_max"] = safe_max
 
     payload.update(feature_payload)
+
+    consensus_meta = None
+    vote_summary = feature_payload.get("vote_summary")
+    if isinstance(vote_summary, dict) and isinstance(vote_summary.get("consensus"), dict):
+        consensus_meta = vote_summary.get("consensus")
+    if consensus_meta is None:
+        multiscale = feature_payload.get("kde_multiscale")
+        if isinstance(multiscale, dict) and isinstance(multiscale.get("consensus"), dict):
+            consensus_meta = multiscale.get("consensus")
+
+    if isinstance(consensus_meta, dict) and consensus_meta.get("recommended") is not None:
+        payload["meta"]["consensus_peak_count"] = int(consensus_meta.get("recommended"))
+        if "stability" in consensus_meta:
+            payload["meta"]["consensus_stability"] = consensus_meta.get("stability")
+        if "vote_fraction" in consensus_meta:
+            payload["meta"]["consensus_vote_fraction"] = consensus_meta.get("vote_fraction")
+        if "run_fraction" in consensus_meta:
+            payload["meta"]["consensus_run_fraction"] = consensus_meta.get("run_fraction")
 
     payload["priors"] = (priors.copy() if isinstance(priors, dict) else _default_priors(marker_name))
     payload["heuristics"] = heuristic_info

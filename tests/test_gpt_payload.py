@@ -80,6 +80,23 @@ def test_feature_payload_includes_kde_trace():
     assert len(kde["x"]) == len(kde["density"])
     assert 128 <= len(kde["x"]) <= 256
 
+    multiscale = payload.get("kde_multiscale")
+    assert multiscale
+    assert multiscale["grid"]
+    assert multiscale["profiles"], "multiscale profiles should not be empty"
+    profile0 = multiscale["profiles"][0]
+    assert len(profile0["density"]) == len(multiscale["grid"])
+    assert profile0.get("scale") is not None
+    consensus = multiscale.get("consensus")
+    assert consensus
+    assert consensus.get("recommended")
+    assert "persistent_peaks" in consensus or consensus.get("counts_by_scale")
+
+    vote_summary = payload.get("vote_summary")
+    assert vote_summary
+    assert vote_summary.get("votes")
+    assert vote_summary.get("recommended")
+
     # JSON serialization should succeed for downstream GPT usage
     json.dumps(payload)
 
@@ -136,6 +153,9 @@ def test_ask_gpt_peak_count_accepts_missing_kde():
     assert captured is not None
     assert "kde" not in captured
     assert "kde_bandwidth" not in captured.get("histogram", {})
+    assert captured.get("kde_multiscale")
+    meta = captured.get("meta", {})
+    assert meta.get("consensus_peak_count") is not None
 
 
 def test_peak_caps_allow_three_with_clear_triplet():
@@ -185,3 +205,6 @@ def test_peak_caps_allow_three_with_clear_triplet():
     assert heuristics.get("final_allowed_max") == 3
     assert heuristics.get("evidence_for_three") is True
     assert heuristics.get("three_support_gaps") == []
+    consensus = heuristics.get("multiscale_consensus")
+    assert isinstance(consensus, dict)
+    assert consensus.get("recommended") == 3

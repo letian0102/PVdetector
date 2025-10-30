@@ -336,22 +336,24 @@ def _smooth_histogram(counts: np.ndarray) -> np.ndarray:
 def _extract_peak_candidates(
     centers: np.ndarray,
     smoothed: np.ndarray,
+    counts: Optional[np.ndarray] = None,
 ) -> tuple[
     list[dict[str, Any]],
     Optional[float],
     Optional[float],
     Optional[float],
     Optional[float],
+    list[dict[str, Any]],
 ]:
     """Return candidate peak descriptors and valley heuristics."""
 
     if smoothed.size == 0:
-        return [], None, None, None, None
+        return [], None, None, None, None, []
 
     prom_thresh = np.max(smoothed) * 0.05 if np.max(smoothed) > 0 else 0.0
     idx, _ = find_peaks(smoothed, prominence=prom_thresh, width=1)
     if idx.size == 0:
-        return [], None, None, None, None
+        return [], None, None, None, None, []
 
     prominences, left_bases, right_bases = peak_prominences(smoothed, idx)
     widths_samples = peak_widths(smoothed, idx, rel_height=0.5)[0]
@@ -389,12 +391,46 @@ def _extract_peak_candidates(
             }
         )
 
-    # heuristics for first valley/right-tail mass/ratios
+    # heuristics for valleys/right-tail mass/ratios
     first_valley_x: Optional[float] = None
     valley_depth_ratio: Optional[float] = None
     prominence_ratio: Optional[float] = None
     valley_depth_abs: Optional[float] = None
+    valley_series: list[dict[str, Any]] = []
     if len(idx) >= 2:
+        for i in range(len(idx) - 1):
+            left = idx[i]
+            right = idx[i + 1]
+            if right <= left:
+                continue
+            seg = smoothed[left : right + 1]
+            if seg.size == 0:
+                continue
+            rel = int(np.argmin(seg))
+            valley_idx = left + rel
+            valley_height = float(smoothed[valley_idx])
+            left_height = float(smoothed[left])
+            right_height = float(smoothed[right])
+            denom_min = min(left_height, right_height)
+            denom_mean = 0.5 * (left_height + right_height)
+            ratio_min = float(valley_height / denom_min) if denom_min > 0 else None
+            ratio_mean = float(valley_height / denom_mean) if denom_mean > 0 else None
+            entry: dict[str, Any] = {
+                "between": [int(i), int(i + 1)],
+                "x": float(centers[valley_idx]),
+                "height": valley_height,
+                "relative_height_min": float(ratio_min) if ratio_min is not None else None,
+                "relative_height_mean": float(ratio_mean) if ratio_mean is not None else None,
+            }
+            if counts is not None and counts.size > 0:
+                left_idx = max(min(left, counts.size - 1), 0)
+                right_idx = max(min(right, counts.size - 1), 0)
+                if right_idx >= left_idx:
+                    window = counts[left_idx : right_idx + 1]
+                    if window.size:
+                        entry["area"] = float(np.sum(window))
+            valley_series.append(entry)
+
         left, right = idx[0], idx[1]
         seg = smoothed[left : right + 1]
         if seg.size:
@@ -410,13 +446,21 @@ def _extract_peak_candidates(
             if main_prom > 0:
                 prominence_ratio = float(sec_prom / main_prom)
 
-    return peaks, first_valley_x, valley_depth_ratio, prominence_ratio, valley_depth_abs
+    return (
+        peaks,
+        first_valley_x,
+        valley_depth_ratio,
+        prominence_ratio,
+        valley_depth_abs,
+        valley_series,
+    )
 
 
 def _describe_shape(
     summary_counts: np.ndarray,
     summary_edges: np.ndarray,
     peaks: list[dict[str, Any]],
+    valleys: list[dict[str, Any]],
     valley_depth_ratio: Optional[float],
     prominence_ratio: Optional[float],
     lo: float,
@@ -451,7 +495,18 @@ def _describe_shape(
             )
             desc.append(f"Approx. widths (bins) {widths}.")
 
-    if valley_depth_ratio is not None:
+    if valleys:
+        valley_bits: list[str] = []
+        for v in valleys:
+            rel = v.get("relative_height_min")
+            if rel is None:
+                continue
+            valley_bits.append(
+                f"{v['x']:.2f} retains {rel * 100:.0f}%"
+            )
+        if valley_bits:
+            desc.append("Valleys " + ", ".join(valley_bits) + " of adjacent peaks.")
+    elif valley_depth_ratio is not None:
         desc.append(f"First valley retains {valley_depth_ratio * 100:.0f}% of peak height.")
     if prominence_ratio is not None:
         desc.append(f"Second prominence is {prominence_ratio * 100:.0f}% of first.")
@@ -727,7 +782,10 @@ def _strong_two_peak_signal(
     return True, hits, min_weight, separation_info
 
 
-def _three_peak_candidate_support(peaks: list[dict[str, Any]]) -> tuple[bool, list[str]]:
+def _three_peak_candidate_support(
+    peaks: list[dict[str, Any]],
+    valleys: list[dict[str, Any]],
+) -> tuple[bool, list[str]]:
     """Return whether histogram candidates clearly support three peaks."""
 
     if len(peaks) < 3:
@@ -748,12 +806,12 @@ def _three_peak_candidate_support(peaks: list[dict[str, Any]]) -> tuple[bool, li
     hits: list[str] = []
 
     min_prom_ratio = min(p / max_prom for p in prominences)
-    if min_prom_ratio < 0.18:
+    if min_prom_ratio < 0.13:
         return False, []
     hits.append("candidate_prominence")
 
     min_height_ratio = min(h / max_height for h in heights)
-    if min_height_ratio < 0.20:
+    if min_height_ratio < 0.16:
         return False, []
     hits.append("candidate_height")
 
@@ -765,13 +823,37 @@ def _three_peak_candidate_support(peaks: list[dict[str, Any]]) -> tuple[bool, li
             separation_ok = False
             break
         ratio = separation / width_scale
-        if ratio < 1.25:
+        if ratio < 1.15:
             separation_ok = False
             break
 
     if not separation_ok:
         return False, []
     hits.append("candidate_separation")
+
+    valley_hits = 0
+    if valleys:
+        for expected_pair in ([0, 1], [1, 2]):
+            match = next(
+                (v for v in valleys if v.get("between") == [expected_pair[0], expected_pair[1]]),
+                None,
+            )
+            if not match:
+                continue
+            rel = match.get("relative_height_min")
+            if rel is None:
+                continue
+            if rel <= 0.85:
+                valley_hits += 1
+                hits.append(f"valley_{expected_pair[0]}_{expected_pair[1]}")
+            elif rel <= 0.92:
+                hits.append(f"valley_soft_{expected_pair[0]}_{expected_pair[1]}")
+        if valley_hits >= 1:
+            hits.append("valley_support")
+        else:
+            if min_height_ratio < 0.25 and min_prom_ratio < 0.25:
+                return False, []
+
     hits.append("candidate_triplet")
 
     return True, hits
@@ -785,15 +867,16 @@ def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]
 
     candidates = features.get("candidates") or {}
     peaks = candidates.get("peaks") or []
+    valleys = candidates.get("valleys") or []
 
-    geometry_ok, geometry_hits = _three_peak_candidate_support(peaks)
+    geometry_ok, geometry_hits = _three_peak_candidate_support(peaks, valleys)
 
     min_weight = None
     weight_hits: list[str] = []
     weight_support = True
     if weights_k3:
         min_weight = min(weights_k3)
-        if min_weight >= 0.06:
+        if min_weight >= 0.045:
             weight_hits.append("weights_k3")
         else:
             weight_support = False
@@ -810,7 +893,8 @@ def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]
         support = True
 
     if delta_bic is not None:
-        weight_ok_for_delta = (min_weight is None) or (min_weight >= 0.06)
+        weight_ok_for_delta = (min_weight is None) or (min_weight >= 0.045)
+        relaxed_weight_ok = (min_weight is None) or (min_weight >= 0.03)
         if weight_ok_for_delta and delta_bic <= -7.0:
             if weight_hits and not weights_added:
                 hits.extend(weight_hits)
@@ -819,9 +903,8 @@ def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]
             support = True
         elif (
             geometry_ok
-            and weight_support
-            and weight_ok_for_delta
-            and delta_bic <= -5.0
+            and (weight_support or relaxed_weight_ok)
+            and delta_bic <= -5.2
         ):
             if weight_hits and not weights_added:
                 hits.extend(weight_hits)
@@ -934,9 +1017,20 @@ def _build_feature_payload(
             "density": [],
         }
 
-    peaks, valley_x, valley_depth_ratio, prominence_ratio, valley_depth_abs = _extract_peak_candidates(
-        centers, smoothed
-    )
+    (
+        peaks,
+        valley_x,
+        valley_depth_ratio,
+        prominence_ratio,
+        valley_depth_abs,
+        valley_series,
+    ) = _extract_peak_candidates(centers, smoothed, counts)
+
+    if valley_series and total_counts_all > 0:
+        for v in valley_series:
+            area = v.get("area")
+            if area is not None:
+                v["area_fraction"] = float(round(float(area) / total_counts_all, 6))
     peaks_out = []
     for p in peaks[:3]:
         entry = {
@@ -991,6 +1085,22 @@ def _build_feature_payload(
             "excess_kurtosis": _safe_metric(kurt_val),
         }
 
+        try:
+            qs = np.percentile(values, [1, 5, 10, 25, 50, 75, 90, 95, 99])
+            histogram_payload["quantiles"] = {
+                "p01": float(round(qs[0], 6)),
+                "p05": float(round(qs[1], 6)),
+                "p10": float(round(qs[2], 6)),
+                "p25": float(round(qs[3], 6)),
+                "p50": float(round(qs[4], 6)),
+                "p75": float(round(qs[5], 6)),
+                "p90": float(round(qs[6], 6)),
+                "p95": float(round(qs[7], 6)),
+                "p99": float(round(qs[8], 6)),
+            }
+        except Exception:
+            histogram_payload["quantiles"] = {}
+
     summary_payload = _downsample_histogram(
         values,
         lo,
@@ -1017,10 +1127,16 @@ def _build_feature_payload(
             summary_payload["normalized_counts"] = [
                 float(round(c / total_summary, 6)) for c in summary_counts
             ]
+            histogram_payload["cumulative_profile"] = [
+                float(round(v, 6))
+                for v in np.cumsum(summary_counts.astype(float)) / total_summary
+            ]
         else:
             summary_payload["normalized_counts"] = [0.0 for _ in summary_counts]
+            histogram_payload["cumulative_profile"] = [0.0 for _ in summary_counts]
     else:
         summary_payload.setdefault("normalized_counts", [])
+        histogram_payload.setdefault("cumulative_profile", [])
 
     sparkline = _sparkline_from_counts(summary_counts)
     if sparkline:
@@ -1101,6 +1217,7 @@ def _build_feature_payload(
         summary_counts,
         summary_edges,
         peaks_out,
+        valley_series,
         valley_depth_ratio,
         prominence_ratio,
         lo,
@@ -1116,6 +1233,7 @@ def _build_feature_payload(
         "right_tail_mass_after_first_valley": _right_tail_mass(values, valley_x),
         "valley_depth_ratio": valley_depth_ratio,
         "valley_depth_abs": valley_depth_abs,
+        "valleys": valley_series,
         "prominence_ratio": prominence_ratio,
         "shape_description": shape_description,
     }

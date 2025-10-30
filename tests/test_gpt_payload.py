@@ -38,6 +38,9 @@ def test_feature_payload_includes_kde_trace():
     moments = hist["moment_summary"]
     assert moments["mean"] is not None
     assert moments["std"] >= 0
+    quantiles = hist.get("quantiles")
+    assert quantiles
+    assert "p50" in quantiles
     summary_bins = hist["summary_bins"]
     assert summary_bins["bin_count"] == SUMMARY_BINS
     assert len(summary_bins["counts"]) == SUMMARY_BINS
@@ -47,6 +50,9 @@ def test_feature_payload_includes_kde_trace():
     assert hist.get("profile_points")
     assert len(hist["profile_points"]) == SUMMARY_BINS
     assert hist.get("normalized_counts")
+    cumulative = hist.get("cumulative_profile")
+    assert cumulative
+    assert len(cumulative) == SUMMARY_BINS
     runs = hist.get("slope_runs")
     assert isinstance(runs, list)
     assert runs, "slope_runs should capture monotonic segments"
@@ -67,6 +73,10 @@ def test_feature_payload_includes_kde_trace():
     candidates = payload["candidates"]
     assert candidates["count"] == len(candidates["peaks"])
     assert candidates["shape_description"]
+    valleys = candidates.get("valleys")
+    assert isinstance(valleys, list)
+    if valleys:
+        assert "relative_height_min" in valleys[0]
     if candidates["count"] >= 1:
         first_peak = candidates["peaks"][0]
         assert "relative_height" in first_peak

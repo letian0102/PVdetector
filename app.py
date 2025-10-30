@@ -1249,6 +1249,8 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
     sel_batch_clean = [None if pd.isna(b) else b for b in (sel_b or [])]
     sel_batch_set = set(sel_batch_clean)
 
+    expr_marker_lookup = {str(col): col for col in expr_df.columns}
+    missing_markers: set[str] = set()
     desired: dict[str, tuple[str, str, str | None]] = {}
     index_cache: dict[tuple[str, str | None], list[int]] = {}
 
@@ -1275,6 +1277,10 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
             if not cell_idx:
                 continue
             for m in sel_m:
+                column_label = expr_marker_lookup.get(m)
+                if column_label is None:
+                    missing_markers.add(m)
+                    continue
                 stem = (
                     f"{s}_{m}_raw_counts"
                     if b is None
@@ -1339,7 +1345,11 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         indices = entry.get("cell_indices")
         if not indices:
             indices = _cached_indices(s, b)
-        vals = expr_df.loc[indices, m]
+        column_label = expr_marker_lookup.get(m)
+        if column_label is None:
+            missing_markers.add(m)
+            continue
+        vals = expr_df.loc[indices, column_label]
         entry["cell_indices"] = vals.index.tolist()
 
         cli_native = bool(st.session_state.get("cli_counts_native"))
@@ -1368,6 +1378,13 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         setattr(bio, "batch", b)
         st.session_state.generated_csvs.append((stem, bio))
         st.session_state.generated_meta[stem] = entry
+
+    if missing_markers:
+        st.warning(
+            "Skipped markers missing from the expression matrix: "
+            + ", ".join(sorted(missing_markers))
+            + "."
+        )
 
 
 # ─────────────────────────── CLI import helpers ──────────────────────────────
@@ -1631,13 +1648,32 @@ def _queue_cli_samples(
         st.warning("No matching rows were found in the imported summary.")
         return
 
+    expr_marker_lookup = {str(col): col for col in expr_df.columns}
     markers = sorted({str(m) for m in subset.get("marker", []) if isinstance(m, str)})
+    missing_markers = sorted({m for m in markers if m not in expr_marker_lookup})
+    markers = [m for m in markers if m in expr_marker_lookup]
     samples = sorted({str(s) for s in subset.get("sample", []) if isinstance(s, str)})
     if "batch" in subset:
         raw_batches = subset["batch"].tolist()
         batches = sorted({None if pd.isna(b) else b for b in raw_batches})
     else:
         batches = []
+
+    if missing_markers:
+        st.warning(
+            "The expression matrix is missing columns for the following markers: "
+            + ", ".join(missing_markers)
+            + ". They will be skipped."
+        )
+
+    if not markers:
+        st.error(
+            "None of the selected markers were found in the loaded expression matrix."
+        )
+        st.session_state.sel_markers = []
+        st.session_state.sel_samples = samples
+        st.session_state.sel_batches = batches
+        return
 
     st.session_state.sel_markers = markers
     st.session_state.sel_samples = samples

@@ -2,6 +2,90 @@ from __future__ import annotations
 import numpy as np
 from scipy.stats  import gaussian_kde
 from scipy.signal import find_peaks, fftconvolve, peak_prominences
+
+try:  # NumPy ≥ 2.1 exposes ``get_array_backend``
+    from numpy import get_array_backend as _np_get_array_backend  # type: ignore[attr-defined]
+except (ImportError, AttributeError):
+    _np_get_array_backend = None
+
+
+class _NumPyBackend:
+    """Minimal ArrayBackend shim for environments lacking the helper."""
+
+    name = "numpy"
+    xp = np
+    signal = None
+    fft = np.fft
+    linalg = np.linalg
+
+    @staticmethod
+    def __array_namespace__(*args, **kwargs):
+        return np
+
+    @staticmethod
+    def to_cpu(array):
+        return np.asarray(array)
+
+    @staticmethod
+    def to_device(array, device=None):
+        return np.asarray(array)
+
+    @staticmethod
+    def asarray(array, dtype=None):
+        if dtype is None:
+            return np.asarray(array)
+        return np.asarray(array, dtype=dtype)
+
+    def __getattr__(self, name):
+        if hasattr(self.xp, name):
+            return getattr(self.xp, name)
+        raise AttributeError(name)
+
+
+try:  # SciPy provides the signal namespace we proxy through the backend
+    import scipy.signal as _scipy_signal
+except Exception:  # pragma: no cover - SciPy should be present, but guard just in case
+    _scipy_signal = None
+
+
+_NUMPY_BACKEND = _NumPyBackend()
+if _scipy_signal is not None:
+    _NUMPY_BACKEND.signal = _scipy_signal
+
+
+def get_array_backend(*arrays, **kwargs):
+    """Return the active array backend (NumPy fallback when unavailable)."""
+
+    if _np_get_array_backend is None:
+        return _NUMPY_BACKEND
+
+    try:
+        backend = _np_get_array_backend(*arrays, **kwargs)
+    except TypeError:
+        return _NUMPY_BACKEND
+
+    if backend is np:
+        return _NUMPY_BACKEND
+
+    if not hasattr(backend, "xp"):
+        return _NUMPY_BACKEND
+
+    # Some old builds return a light shim lacking optional helpers.
+    for attr, default in {
+        "signal": _scipy_signal,
+        "fft": np.fft,
+        "linalg": np.linalg,
+        "to_cpu": np.asarray,
+        "to_device": np.asarray,
+        "asarray": np.asarray,
+    }.items():
+        if not hasattr(backend, attr) and default is not None:
+            setattr(backend, attr, default)
+
+    if not hasattr(backend, "__array_namespace__"):
+        backend.__array_namespace__ = lambda *a, **k: backend.xp  # type: ignore[attr-defined]
+
+    return backend
 from .consistency import _enforce_valley_rule
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]

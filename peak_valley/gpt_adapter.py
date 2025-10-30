@@ -359,12 +359,12 @@ def _gmm_statistics(x: np.ndarray, max_components: int = 3) -> dict[str, Any]:
         stats["stds_k3"] = [float(s) for s in stds[order]]
         stats["weights_k3"] = [float(w) for w in gm3.weights_[order]]
 
-    if 1 in stats["bic"] and 2 in stats["bic"]:
+    if "k1" in stats["bic"] and "k2" in stats["bic"]:
         b1 = stats["bic"].get("k1")
         b2 = stats["bic"].get("k2")
         if b1 is not None and b2 is not None:
             stats["delta_bic_21"] = float(b2 - b1)
-    if 2 in stats["bic"] and 3 in stats["bic"]:
+    if "k2" in stats["bic"] and "k3" in stats["bic"]:
         b2 = stats["bic"].get("k2")
         b3 = stats["bic"].get("k3")
         if b2 is not None and b3 is not None:
@@ -574,19 +574,11 @@ def _apply_peak_caps(
 
     heuristics["requested_max"] = safe_max
 
-    tri_modal_markers = {"CD4", "CD45RA", "CD45RO"}
-    tri_modal = bool(marker_name and marker_name.upper() in tri_modal_markers)
-    heuristics["tri_modal_marker"] = tri_modal
-
     has_two, two_hits, min_weight, separation_info = _strong_two_peak_signal(feature_payload)
     heuristics["evidence_for_two"] = has_two
     heuristics["support_two_signals"] = two_hits
     heuristics["min_component_weight_k2"] = min_weight
     heuristics["peak_separation"] = separation_info
-
-    if safe_max >= 3 and not tri_modal:
-        safe_max = 2
-        heuristics["non_tri_modal_cap"] = 2
 
     if safe_max >= 2 and not has_two:
         safe_max = 1
@@ -608,17 +600,15 @@ def _apply_peak_caps(
 
 
 def _default_priors(marker_name: Optional[str]) -> dict[str, Any]:
-    tri_modal = {"CD4", "CD45RA", "CD45RO"}
     priors = {
         "typical_peaks": {
             "CD4": [1, 3],
             "CD45RA": [1, 3],
             "CD45RO": [1, 3],
         },
-        "others_max": 2,
     }
-    if marker_name and marker_name.upper() not in tri_modal:
-        priors["marker_max"] = 2
+    if marker_name:
+        priors["marker"] = marker_name.upper()
     return priors
 
 
@@ -892,10 +882,10 @@ def ask_gpt_peak_count(
     system = (
         "You are a cytometry/ADT gating assistant. Infer the number of visible density peaks "
         "(modes) using only the provided features. Prefer fewer peaks unless strong evidence "
-        "suggests more. For CD4 and sometimes CD45RA/RO, allow 3 peaks; otherwise treat 1–2 as typical. "
-        "Histogram bins and KDE traces summarise the distribution; prefer the smoother KDE profile and its "
-        "bandwidth hints when judging shoulders versus true peaks. Tiny shoulders are not peaks unless prominence "
-        "and width thresholds are met. Output only the JSON object described by the schema."
+        "suggests more, while respecting the user-specified maximum. Histogram bins and KDE traces "
+        "summarise the distribution; prefer the smoother KDE profile and its bandwidth hints when judging "
+        "shoulders versus true peaks. Tiny shoulders are not peaks unless prominence and width thresholds "
+        "are met. Output only the JSON object described by the schema."
     )
 
     response_format = {

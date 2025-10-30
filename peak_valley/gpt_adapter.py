@@ -780,6 +780,9 @@ def _aggregate_votes(
                         fallback_masses.append(float(alt))
                 if fallback_masses:
                     mass_sources["kde_multiscale"] = fallback_masses
+        collapse_adjustment = multiscale_summary.get("collapse_adjustment")
+        if isinstance(collapse_adjustment, dict):
+            result["smoothing_adjustment"] = collapse_adjustment
 
     tally = Counter(counts)
     if tally:
@@ -801,6 +804,18 @@ def _aggregate_votes(
 
     if "recommended_peak_count" not in result and "robust_peak_count" in result:
         result["recommended_peak_count"] = int(result["robust_peak_count"])
+
+    collapse_adjustment = result.get("smoothing_adjustment")
+    if isinstance(collapse_adjustment, dict) and collapse_adjustment.get("triggered"):
+        preferred = collapse_adjustment.get("preferred_count")
+        try:
+            preferred_int = int(preferred) if preferred is not None else 1
+        except (TypeError, ValueError):
+            preferred_int = 1
+        current = result.get("recommended_peak_count")
+        if not isinstance(current, int) or preferred_int < current:
+            result["recommended_peak_count"] = max(1, preferred_int)
+            collapse_adjustment["applied"] = True
 
     mass_metrics = _evaluate_mass_support(mass_sources)
     result["mass_metrics"] = mass_metrics
@@ -1193,6 +1208,8 @@ def _multiscale_peak_profile(
 
     robust_peaks: list[dict[str, Any]] = []
     total_scales = len(scales_used)
+    collapse_info: Optional[dict[str, Any]] = None
+
     for cluster in clusters:
         scales_present = sorted({float(np.round(p["scale"], 3)) for p in cluster["peaks"]})
         if not scales_present:
@@ -1227,6 +1244,77 @@ def _multiscale_peak_profile(
             }
         )
 
+    if scale_results and robust_peaks:
+        sorted_scales = sorted(scales_used)
+        if sorted_scales:
+            high_group = max(1, len(sorted_scales) // 3)
+            high_span = max(2, high_group)
+            high_scales = sorted_scales[-high_span:]
+            high_threshold = high_scales[0]
+            high_counts = [
+                res
+                for res in scale_results
+                if isinstance(res.get("scale"), (int, float))
+                and float(res["scale"]) >= high_threshold - 1e-6
+            ]
+            if high_counts and all(int(res.get("peak_count", 0)) <= 1 for res in high_counts):
+                filtered_peaks: list[dict[str, Any]] = []
+                dropped_peaks: list[dict[str, Any]] = []
+                for rp in robust_peaks:
+                    rp_scales = rp.get("scales") or []
+                    if any(float(s) >= high_threshold - 1e-6 for s in rp_scales):
+                        filtered_peaks.append(rp)
+                    else:
+                        dropped_peaks.append(rp)
+
+                if filtered_peaks:
+                    if dropped_peaks:
+                        collapse_info = {
+                            "triggered": True,
+                            "reason": "high_bandwidth_single_peak",
+                            "high_scale_min": float(np.round(high_threshold, 3)),
+                            "high_scale_max": float(np.round(sorted_scales[-1], 3)),
+                            "high_scale_counts": [
+                                {
+                                    "scale": float(res.get("scale", 0.0)),
+                                    "peak_count": int(res.get("peak_count", 0)),
+                                }
+                                for res in high_counts
+                            ],
+                            "dropped_peaks": int(len(dropped_peaks)),
+                            "preferred_count": 1,
+                        }
+                    robust_peaks = filtered_peaks
+                elif dropped_peaks:
+                    # If every robust peak was confined to small scales, retain the
+                    # strongest peak but mark the adjustment so downstream logic
+                    # can treat the distribution as effectively unimodal.
+                    best_peak = max(
+                        dropped_peaks,
+                        key=lambda item: (
+                            float(item.get("support_fraction") or 0.0),
+                            float(item.get("median_mass_fraction") or 0.0),
+                            float(item.get("max_prominence") or 0.0),
+                        ),
+                    )
+                    robust_peaks = [best_peak]
+                    collapse_info = {
+                        "triggered": True,
+                        "reason": "high_bandwidth_single_peak",
+                        "high_scale_min": float(np.round(high_threshold, 3)),
+                        "high_scale_max": float(np.round(sorted_scales[-1], 3)),
+                        "high_scale_counts": [
+                            {
+                                "scale": float(res.get("scale", 0.0)),
+                                "peak_count": int(res.get("peak_count", 0)),
+                            }
+                            for res in high_counts
+                        ],
+                        "dropped_peaks": int(len(dropped_peaks) - 1),
+                        "forced_retain": True,
+                        "preferred_count": 1,
+                    }
+
     profile = {
         "scales_tested": scales_used,
         "scale_results": scale_results,
@@ -1236,6 +1324,9 @@ def _multiscale_peak_profile(
 
     if std > 0 and np.isfinite(std):
         profile["base_bandwidth_value"] = float(np.round(base_factor * std, 6))
+
+    if collapse_info:
+        profile["collapse_adjustment"] = collapse_info
 
     return profile
 

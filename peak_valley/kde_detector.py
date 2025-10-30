@@ -202,6 +202,58 @@ def _collapse_with_bandwidth(
     return np.asarray(sorted(set(keep)), dtype=int)
 
 
+def _enforce_peak_spacing(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    p_idx: np.ndarray,
+    min_x_sep: float | None,
+) -> np.ndarray:
+    """Keep the tallest peak within every ``min_x_sep`` window.
+
+    Parameters
+    ----------
+    xs, ys : np.ndarray
+        KDE grid and values.
+    p_idx : np.ndarray
+        Candidate peak indices.
+    min_x_sep : float | None
+        Minimum spacing required between surviving peaks.  ``None`` keeps
+        the original candidates.
+    """
+
+    if p_idx.size <= 1:
+        return np.asarray(sorted(set(int(i) for i in p_idx)), dtype=int)
+
+    if min_x_sep is None:
+        return np.asarray(sorted(set(int(i) for i in p_idx)), dtype=int)
+
+    try:
+        min_x_sep = float(min_x_sep)
+    except (TypeError, ValueError):  # pragma: no cover - defensive guard
+        return np.asarray(sorted(set(int(i) for i in p_idx)), dtype=int)
+
+    if min_x_sep <= 0:
+        return np.asarray(sorted(set(int(i) for i in p_idx)), dtype=int)
+
+    p_idx = np.asarray(p_idx, dtype=int)
+    if p_idx.size <= 1:
+        return p_idx
+
+    # pick tallest peaks first to keep the dominant mode within each window
+    order = np.argsort(-ys[p_idx])
+    chosen: list[int] = []
+    for idx in p_idx[order]:
+        x_val = float(xs[idx])
+        if all(abs(x_val - float(xs[keep])) >= min_x_sep for keep in chosen):
+            chosen.append(int(idx))
+
+    if not chosen:
+        # fall back to the single strongest candidate
+        return np.asarray([int(p_idx[int(np.argmax(ys[p_idx]))])], dtype=int)
+
+    return np.asarray(sorted(set(chosen)), dtype=int)
+
+
 def _filter_prominence(ys: np.ndarray, p_idx: np.ndarray, ratio: float = 0.25) -> np.ndarray:
     """Discard peaks with tiny prominence relative to the strongest mode."""
 
@@ -661,17 +713,8 @@ def kde_peaks_valleys(
     else:
         peaks_idx = np.sort(locs)
     
+    peaks_idx = _enforce_peak_spacing(xs, ys, peaks_idx, min_x_sep)
     peaks_x = xs[peaks_idx].tolist()
-
-    if (min_x_sep is not None) and (len(peaks_x) > 1):   # 2 safe now
-        peaks_x.sort()
-        keep = [peaks_x[0]]
-        for px in peaks_x[1:]:
-            if px - keep[-1] >= min_x_sep:
-                keep.append(px)
-        peaks_x = keep
-
-    peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
 
     # ---------- GMM fallback (unchanged) ----------
     if n_peaks is not None and len(peaks_x) < n_peaks:
@@ -690,7 +733,11 @@ def kde_peaks_valleys(
         peaks_x = sorted(peaks_x)[:n_peaks]
 
     # ---------- *re-derive* indices for every peak we now have ----------
-    peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+    peaks_idx = np.asarray([
+        int(np.argmin(np.abs(xs - px))) for px in peaks_x
+    ], dtype=int)
+    peaks_idx = _enforce_peak_spacing(xs, ys, peaks_idx, min_x_sep)
+    peaks_x = xs[peaks_idx].tolist()
 
     # ---------- valleys ----------
     valleys_x: list[float] = []

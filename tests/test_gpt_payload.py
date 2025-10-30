@@ -86,6 +86,7 @@ def test_feature_payload_includes_kde_trace():
     candidates = payload["candidates"]
     assert candidates["count"] == len(candidates["peaks"])
     assert candidates["shape_description"]
+    assert "prominence_threshold" in candidates
     valleys = candidates.get("valleys")
     assert isinstance(valleys, list)
     if valleys:
@@ -94,6 +95,7 @@ def test_feature_payload_includes_kde_trace():
         first_peak = candidates["peaks"][0]
         assert "relative_height" in first_peak
         assert "bin_index" in first_peak
+        assert "original_order" in first_peak
     if candidates["count"] >= 2:
         assert candidates["pairwise_separations"]
 

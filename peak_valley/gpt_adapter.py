@@ -344,16 +344,40 @@ def _extract_peak_candidates(
     Optional[float],
     Optional[float],
     list[dict[str, Any]],
+    Optional[float],
 ]:
     """Return candidate peak descriptors and valley heuristics."""
 
     if smoothed.size == 0:
-        return [], None, None, None, None, []
+        return [], None, None, None, None, [], None
 
-    prom_thresh = np.max(smoothed) * 0.05 if np.max(smoothed) > 0 else 0.0
-    idx, _ = find_peaks(smoothed, prominence=prom_thresh, width=1)
+    max_height = float(np.max(smoothed))
+    prom_thresh = max_height * 0.05 if max_height > 0 else 0.0
+    best_idx = np.array([], dtype=int)
+    best_thresh = prom_thresh
+    thresholds = [prom_thresh]
+    if max_height > 0:
+        thresholds.extend([
+            max_height * 0.03,
+            max_height * 0.015,
+            max_height * 0.008,
+        ])
+    used_thresh = prom_thresh
+    for thresh in thresholds:
+        thresh = float(max(thresh, 0.0))
+        idx, _ = find_peaks(smoothed, prominence=thresh, width=1)
+        if idx.size > best_idx.size:
+            best_idx = idx
+            best_thresh = thresh
+        if idx.size >= 3:
+            best_idx = idx
+            best_thresh = thresh
+            break
+    idx = best_idx
+    used_thresh = best_thresh
+
     if idx.size == 0:
-        return [], None, None, None, None, []
+        return [], None, None, None, None, [], None
 
     prominences, left_bases, right_bases = peak_prominences(smoothed, idx)
     widths_samples = peak_widths(smoothed, idx, rel_height=0.5)[0]
@@ -453,6 +477,7 @@ def _extract_peak_candidates(
         prominence_ratio,
         valley_depth_abs,
         valley_series,
+        float(used_thresh) if np.isfinite(used_thresh) else None,
     )
 
 
@@ -808,36 +833,49 @@ def _three_peak_candidate_support(
         return False, [], deficits
 
     hits: list[str] = []
+    geometry_ok = True
 
     min_prom_ratio = min(p / max_prom for p in prominences)
-    if min_prom_ratio < 0.08:
+    if min_prom_ratio < 0.035:
         deficits.append("weak_prominence")
-        return False, [], deficits
-    hits.append("candidate_prominence")
+        geometry_ok = False
+    else:
+        if min_prom_ratio < 0.06:
+            hits.append("candidate_prominence_soft")
+        else:
+            hits.append("candidate_prominence")
 
     min_height_ratio = min(h / max_height for h in heights)
-    if min_height_ratio < 0.12:
+    if min_height_ratio < 0.06:
         deficits.append("weak_height")
-        return False, [], deficits
-    hits.append("candidate_height")
+        geometry_ok = False
+    else:
+        if min_height_ratio < 0.1:
+            hits.append("candidate_height_soft")
+        else:
+            hits.append("candidate_height")
 
-    separation_ok = True
+    min_sep_ratio = math.inf
     for i in range(2):
         separation = abs(xs[i + 1] - xs[i])
         width_scale = 0.5 * (widths[i] + widths[i + 1])
         if width_scale <= 0:
-            separation_ok = False
             deficits.append("zero_width_scale")
-            break
+            geometry_ok = False
+            continue
         ratio = separation / width_scale
-        if ratio < 0.95:
-            separation_ok = False
+        if ratio < min_sep_ratio:
+            min_sep_ratio = ratio
+    if not math.isfinite(min_sep_ratio):
+        geometry_ok = False
+    else:
+        if min_sep_ratio < 0.65:
             deficits.append("poor_separation")
-            break
-
-    if not separation_ok:
-        return False, [], deficits
-    hits.append("candidate_separation")
+            geometry_ok = False
+        elif min_sep_ratio < 0.85:
+            hits.append("candidate_separation_soft")
+        else:
+            hits.append("candidate_separation")
 
     valley_hits = 0
     if valleys:
@@ -851,10 +889,10 @@ def _three_peak_candidate_support(
             rel = match.get("relative_height_min")
             if rel is None:
                 continue
-            if rel <= 0.88:
+            if rel <= 0.92:
                 valley_hits += 1
                 hits.append(f"valley_{expected_pair[0]}_{expected_pair[1]}")
-            elif rel <= 0.94:
+            elif rel <= 0.97:
                 hits.append(f"valley_soft_{expected_pair[0]}_{expected_pair[1]}")
         if valley_hits >= 1:
             hits.append("valley_support")
@@ -863,7 +901,7 @@ def _three_peak_candidate_support(
 
     hits.append("candidate_triplet")
 
-    return True, hits, deficits
+    return geometry_ok, hits, deficits
 
 
 def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str], list[str]]:
@@ -1051,6 +1089,7 @@ def _build_feature_payload(
         prominence_ratio,
         valley_depth_abs,
         valley_series,
+        prominence_threshold,
     ) = _extract_peak_candidates(bin_centers, smoothed, counts)
 
     if valley_series and total_counts_all > 0:
@@ -1059,7 +1098,12 @@ def _build_feature_payload(
             if area is not None:
                 v["area_fraction"] = float(round(float(area) / total_counts_all, 6))
     peaks_out = []
-    for p in peaks[:3]:
+    sorted_peaks = sorted(
+        peaks,
+        key=lambda item: float(item.get("height", 0.0)),
+        reverse=True,
+    )
+    for p in sorted_peaks[:5]:
         entry = {
             "x": p["x"],
             "height": float(p["height"]),
@@ -1073,6 +1117,7 @@ def _build_feature_payload(
             "right_base_x": float(p.get("right_base_x")) if p.get("right_base_x") is not None else None,
             "left_base_height": float(p.get("left_base_height")) if p.get("left_base_height") is not None else None,
             "right_base_height": float(p.get("right_base_height")) if p.get("right_base_height") is not None else None,
+            "original_order": int(p.get("order", 0)),
         }
         peaks_out.append(entry)
 
@@ -1301,6 +1346,11 @@ def _build_feature_payload(
         "valley_depth_abs": valley_depth_abs,
         "valleys": valley_series,
         "prominence_ratio": prominence_ratio,
+        "prominence_threshold": (
+            float(round(prominence_threshold, 6))
+            if prominence_threshold is not None
+            else None
+        ),
         "shape_description": shape_description,
     }
 

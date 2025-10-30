@@ -12,19 +12,40 @@ except (ImportError, AttributeError):
     _np_get_array_backend = None
 
 
+class _NumPyBackend:
+    """Minimal ``ArrayBackend`` shim exposing ``xp`` for older NumPy versions."""
+
+    xp = np
+
+    @staticmethod
+    def __array_namespace__(*args, **kwargs):
+        return np
+
+
+_NUMPY_BACKEND = _NumPyBackend()
+
+
 def get_array_backend(*arrays, **kwargs):
     """Return the array backend associated with ``arrays`` (NumPy fallback)."""
 
     if _np_get_array_backend is None:
-        return np
+        return _NUMPY_BACKEND
 
     try:
-        return _np_get_array_backend(*arrays, **kwargs)
+        backend = _np_get_array_backend(*arrays, **kwargs)
     except TypeError:
         # ``get_array_backend`` without ``default`` argument (NumPy 2.0) raises
         # ``TypeError`` when no array-like inputs are provided.  Fall back to
         # the standard NumPy module in that case.
-        return np
+        return _NUMPY_BACKEND
+
+    if backend is np:
+        return _NUMPY_BACKEND
+
+    if not hasattr(backend, "xp"):
+        return _NUMPY_BACKEND
+
+    return backend
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
 

@@ -1,93 +1,8 @@
 from __future__ import annotations
-
 import numpy as np
-import scipy.signal as _scipy_signal
-from scipy.stats import gaussian_kde
+from scipy.stats  import gaussian_kde
 from scipy.signal import find_peaks, fftconvolve, peak_prominences
-
 from .consistency import _enforce_valley_rule
-
-try:  # NumPy ≥ 2.1
-    from numpy import get_array_backend as _np_get_array_backend  # type: ignore[attr-defined]
-except (ImportError, AttributeError):
-    _np_get_array_backend = None
-
-
-class _NumPyBackend:
-    """Minimal ``ArrayBackend`` shim exposing ``xp`` for older NumPy versions.
-
-    NumPy < 2.1 does not ship :func:`get_array_backend`.  A handful of helper
-    functions introduced after the multibackend refactor expect the returned
-    backend object to offer ``xp`` (array namespace), optional SciPy signal
-    helpers, and utilities such as ``to_cpu`` when running on CuPy/JAX.  Older
-    environments only have plain NumPy, so the shim below provides the
-    attributes we rely on while transparently delegating unknown lookups to the
-    NumPy module.
-    """
-
-    name = "numpy"
-    xp = np
-    signal = _scipy_signal
-    fft = np.fft
-    linalg = np.linalg
-
-    @staticmethod
-    def __array_namespace__(*args, **kwargs):
-        return np
-
-    @staticmethod
-    def to_cpu(array):
-        """Return ``array`` as a NumPy ``ndarray`` (GPU no-op fallback)."""
-
-        return np.asarray(array)
-
-    @staticmethod
-    def to_device(array, device=None):
-        """Return ``array`` copied to the requested device (CPU-only shim)."""
-
-        # ``device`` is ignored because legacy environments only support CPU.
-        return np.asarray(array)
-
-    @staticmethod
-    def asarray(array, dtype=None):
-        """NumPy-compatible ``asarray`` helper used by some backends."""
-
-        if dtype is None:
-            return np.asarray(array)
-        return np.asarray(array, dtype=dtype)
-
-    def __getattr__(self, name):
-        """Delegate unknown attributes to :mod:`numpy` when possible."""
-
-        if hasattr(self.xp, name):
-            return getattr(self.xp, name)
-        raise AttributeError(name)
-
-
-_NUMPY_BACKEND = _NumPyBackend()
-
-
-def get_array_backend(*arrays, **kwargs):
-    """Return the array backend associated with ``arrays`` (NumPy fallback)."""
-
-    if _np_get_array_backend is None:
-        return _NUMPY_BACKEND
-
-    try:
-        backend = _np_get_array_backend(*arrays, **kwargs)
-    except TypeError:
-        # ``get_array_backend`` without ``default`` argument (NumPy 2.0) raises
-        # ``TypeError`` when no array-like inputs are provided.  Fall back to
-        # the standard NumPy module in that case.
-        return _NUMPY_BACKEND
-
-    if backend is np:
-        return _NUMPY_BACKEND
-
-    if not hasattr(backend, "xp"):
-        return _NUMPY_BACKEND
-
-    return backend
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
 
@@ -98,13 +13,11 @@ import numpy as np
 
 # peak_valley/kde_detector.py  (only the helper changed)
 # ----------------------------------------------------------------------
-def _merge_close_peaks(
-    xs: np.ndarray,
-    ys: np.ndarray,
-    p_idx: np.ndarray,
-    min_x_sep: float = 0.4,
-    min_valley_drop: float = 0.15,
-) -> np.ndarray:
+def _merge_close_peaks(xs: np.ndarray,
+                       ys: np.ndarray,
+                       p_idx: np.ndarray,
+                       min_x_sep: float = 0.4,
+                       min_valley_drop: float = 0.15) -> np.ndarray:
     """
     Collapse spurious twin-peaks produced by flat tops / wiggles.
 
@@ -142,137 +55,6 @@ def _merge_close_peaks(
         i = j
 
     return np.asarray(sorted(keep), dtype=int)
-
-
-def _collapse_with_bandwidth(
-    xs: np.ndarray,
-    ys: np.ndarray,
-    p_idx: np.ndarray,
-    bandwidth: float,
-    min_x_sep: float | None,
-    min_valley_drop: float,
-    data_iqr: float,
-) -> np.ndarray:
-    """Merge peaks that cannot be sustained under the effective bandwidth."""
-
-    if p_idx.size < 2:
-        return p_idx
-
-    if not np.isfinite(bandwidth) or bandwidth <= 0 or xs.size < 2:
-        return p_idx
-
-    grid_dx = float(xs[1] - xs[0])
-    if not np.isfinite(grid_dx) or grid_dx <= 0:
-        return p_idx
-
-    # Require wider separation when smoothing is heavy.
-    collapse_sep = 0.75 * bandwidth
-    if min_x_sep is not None:
-        collapse_sep = max(collapse_sep, float(min_x_sep))
-    else:
-        collapse_sep = max(collapse_sep, 0.0)
-
-    spread = float(data_iqr)
-    if not np.isfinite(spread) or spread <= 0:
-        spread = float(np.ptp(xs)) if xs.size else grid_dx
-        if not np.isfinite(spread) or spread <= 0:
-            spread = grid_dx
-
-    # Stronger smoothing demands a deeper valley to keep multi-peak structure.
-    ratio = min(3.0, bandwidth / max(spread, 1e-9))
-    drop_required = np.clip(min_valley_drop + 0.2 * ratio, min_valley_drop, 0.8)
-
-    keep: list[int] = [int(p_idx[0])]
-    for idx in map(int, p_idx[1:]):
-        prev = keep[-1]
-        sep = float(xs[idx] - xs[prev])
-        if sep <= collapse_sep:
-            lo = min(prev, idx)
-            hi = max(prev, idx)
-            valley = float(np.min(ys[lo : hi + 1]))
-            base = float(min(ys[prev], ys[idx]))
-            if base <= 0:
-                base = float(max(ys[prev], ys[idx], 1e-12))
-            if base <= 0 or valley >= base * (1.0 - drop_required):
-                if ys[idx] > ys[prev]:
-                    keep[-1] = idx
-                continue
-        keep.append(idx)
-
-    return np.asarray(sorted(set(keep)), dtype=int)
-
-
-def _enforce_peak_spacing(
-    xs: np.ndarray,
-    ys: np.ndarray,
-    p_idx: np.ndarray,
-    min_x_sep: float | None,
-) -> np.ndarray:
-    """Keep the tallest peak within every ``min_x_sep`` window.
-
-    Parameters
-    ----------
-    xs, ys : np.ndarray
-        KDE grid and values.
-    p_idx : np.ndarray
-        Candidate peak indices.
-    min_x_sep : float | None
-        Minimum spacing required between surviving peaks.  ``None`` keeps
-        the original candidates.
-    """
-
-    if p_idx.size <= 1:
-        return np.asarray(sorted(set(int(i) for i in p_idx)), dtype=int)
-
-    if min_x_sep is None:
-        return np.asarray(sorted(set(int(i) for i in p_idx)), dtype=int)
-
-    try:
-        min_x_sep = float(min_x_sep)
-    except (TypeError, ValueError):  # pragma: no cover - defensive guard
-        return np.asarray(sorted(set(int(i) for i in p_idx)), dtype=int)
-
-    if min_x_sep <= 0:
-        return np.asarray(sorted(set(int(i) for i in p_idx)), dtype=int)
-
-    p_idx = np.asarray(p_idx, dtype=int)
-    if p_idx.size <= 1:
-        return p_idx
-
-    # pick tallest peaks first to keep the dominant mode within each window
-    order = np.argsort(-ys[p_idx])
-    chosen: list[int] = []
-    for idx in p_idx[order]:
-        x_val = float(xs[idx])
-        if all(abs(x_val - float(xs[keep])) >= min_x_sep for keep in chosen):
-            chosen.append(int(idx))
-
-    if not chosen:
-        # fall back to the single strongest candidate
-        return np.asarray([int(p_idx[int(np.argmax(ys[p_idx]))])], dtype=int)
-
-    return np.asarray(sorted(set(chosen)), dtype=int)
-
-
-def _filter_prominence(ys: np.ndarray, p_idx: np.ndarray, ratio: float = 0.25) -> np.ndarray:
-    """Discard peaks with tiny prominence relative to the strongest mode."""
-
-    if p_idx.size <= 1:
-        return p_idx
-
-    prominences, _, _ = peak_prominences(ys, p_idx)
-    if prominences.size == 0:
-        return p_idx
-
-    best = float(np.max(prominences))
-    if not np.isfinite(best) or best <= 0:
-        return p_idx
-
-    keep = [int(idx) for idx, prom in zip(p_idx, prominences) if prom >= best * ratio]
-    if not keep:
-        keep = [int(p_idx[int(np.argmax(prominences))])]
-
-    return np.asarray(sorted(set(keep)), dtype=int)
 
 def _mostly_small_discrete(x: np.ndarray, threshold: float = 0.9) -> bool:
     """Heuristic to catch almost-discrete samples near zero (0..3).
@@ -616,11 +398,6 @@ def kde_peaks_valleys(
     if x.size == 0:
         return [], [], np.array([]), np.array([])
 
-    q25, q75 = np.percentile(x, [25, 75])
-    data_iqr = float(q75 - q25)
-    if not np.isfinite(data_iqr) or data_iqr <= 0:
-        data_iqr = float(np.ptp(x)) if x.size else 0.0
-
     # ---------- KDE grid ----------
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
@@ -631,9 +408,6 @@ def kde_peaks_valleys(
     xs  = np.linspace(x.min() - h, x.max() + h,
                       min(grid_size, max(4000, 4 * x.size)))
     ys  = _evaluate_kde(x, xs, kde)
-    bandwidth_eff = float(kde.factor * x.std(ddof=1)) if x.size > 1 else 0.0
-    if not np.isfinite(bandwidth_eff) or bandwidth_eff <= 0:
-        bandwidth_eff = float(abs(xs[1] - xs[0])) if xs.size > 1 else 0.0
 
     # ---------- primary peaks ----------
 
@@ -671,27 +445,8 @@ def kde_peaks_valleys(
                     strongest[-1] = idx
             locs = np.unique(np.concatenate([locs, strongest]))
 
-    locs_initial = np.array(locs, copy=True)
-    locs = _merge_close_peaks(
-        xs,
-        ys,
-        locs,
-        min_x_sep=min_x_sep,
-        min_valley_drop=min_valley_drop,
-    )
-    if n_peaks is None:
-        locs = _collapse_with_bandwidth(
-            xs,
-            ys,
-            locs,
-            bandwidth_eff,
-            min_x_sep,
-            min_valley_drop,
-            data_iqr,
-        )
-        locs = _filter_prominence(ys, locs)
-        if locs.size == 0 and locs_initial.size:
-            locs = np.asarray([int(locs_initial[np.argmax(ys[locs_initial])])])
+    locs = _merge_close_peaks(xs, ys, locs,
+            min_x_sep=min_x_sep, min_valley_drop=min_valley_drop)
 
     # relax prominence if too few
     if n_peaks is not None and locs.size < n_peaks:
@@ -712,9 +467,35 @@ def kde_peaks_valleys(
                     np.sort(locs[np.argsort(ys[locs])[-n_peaks:]])
     else:
         peaks_idx = np.sort(locs)
-    
-    peaks_idx = _enforce_peak_spacing(xs, ys, peaks_idx, min_x_sep)
+
     peaks_x = xs[peaks_idx].tolist()
+
+    if (min_x_sep is not None) and (len(peaks_x) > 1):   # 2 safe now
+        peaks_x.sort()
+        keep = [peaks_x[0]]
+        for px in peaks_x[1:]:
+            if px - keep[-1] >= min_x_sep:
+                keep.append(px)
+        peaks_x = keep
+
+    peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+
+    if n_peaks is None and len(peaks_idx) >= 2:
+        try:
+            prominences, _, _ = peak_prominences(ys, np.asarray(peaks_idx, dtype=int))
+        except ValueError:
+            prominences = np.array([])
+        if prominences.size:
+            best = float(np.max(prominences))
+            if np.isfinite(best) and best > 0:
+                keep_idx = [
+                    int(idx)
+                    for idx, prom in zip(peaks_idx, prominences)
+                    if prom >= best * 0.18
+                ]
+                if keep_idx:
+                    peaks_idx = sorted(set(keep_idx))
+                    peaks_x = [float(xs[i]) for i in peaks_idx]
 
     # ---------- GMM fallback (unchanged) ----------
     if n_peaks is not None and len(peaks_x) < n_peaks:
@@ -733,11 +514,7 @@ def kde_peaks_valleys(
         peaks_x = sorted(peaks_x)[:n_peaks]
 
     # ---------- *re-derive* indices for every peak we now have ----------
-    peaks_idx = np.asarray([
-        int(np.argmin(np.abs(xs - px))) for px in peaks_x
-    ], dtype=int)
-    peaks_idx = _enforce_peak_spacing(xs, ys, peaks_idx, min_x_sep)
-    peaks_x = xs[peaks_idx].tolist()
+    peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
 
     # ---------- valleys ----------
     valleys_x: list[float] = []

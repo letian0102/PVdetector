@@ -20,13 +20,7 @@ except (ImportError, AttributeError):
 
 
 class _NumPyBackend:
-    """Minimal ``ArrayBackend`` shim exposing ``xp`` for older NumPy versions.
-
-    Mirrors the extended shim in :mod:`peak_valley.kde_detector` so Streamlit
-    sessions running on legacy NumPy builds continue to offer the helper
-    attributes expected by the detector modules (``xp``, ``signal``,
-    ``to_cpu``/``to_device`` and friends).
-    """
+    """Minimal ``ArrayBackend`` shim exposing ``xp`` for older NumPy versions."""
 
     name = "numpy"
     xp = np
@@ -70,8 +64,6 @@ def get_array_backend(*arrays, **kwargs):
     try:
         backend = _np_get_array_backend(*arrays, **kwargs)
     except TypeError:
-        # ``get_array_backend`` prior to NumPy 2.1 lacks ``default`` and
-        # raises ``TypeError`` when invoked without array arguments.
         return _NUMPY_BACKEND
 
     if backend is np:

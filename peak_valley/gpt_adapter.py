@@ -574,6 +574,66 @@ def _quick_estimate_votes(
     return votes
 
 
+def _evaluate_mass_support(mass_sources: dict[str, list[float]]) -> dict[str, Any]:
+    """Summarise how much probability mass secondary peaks hold."""
+
+    cleaned: dict[str, list[float]] = {}
+    dominant_mass = 0.0
+    secondary_masses: list[float] = []
+    sources_with_secondary = 0
+
+    for name, values in mass_sources.items():
+        if not values:
+            continue
+        arr = [float(v) for v in values if isinstance(v, (int, float)) and np.isfinite(v) and v > 0]
+        if not arr:
+            continue
+        arr_sorted = sorted(arr, reverse=True)
+        cleaned[name] = [float(np.round(v, 6)) for v in arr_sorted]
+        dominant_mass = max(dominant_mass, arr_sorted[0])
+        if len(arr_sorted) >= 2:
+            secondary = arr_sorted[1:]
+            secondary_masses.extend(secondary)
+            if max(secondary) >= 0.02:
+                sources_with_secondary += 1
+
+    max_secondary = max(secondary_masses) if secondary_masses else 0.0
+    total_secondary = float(np.sum(secondary_masses)) if secondary_masses else 0.0
+    median_secondary = float(np.median(secondary_masses)) if secondary_masses else 0.0
+
+    supports = False
+    MAX_THRESHOLD = 0.045
+    TOTAL_THRESHOLD = 0.10
+    MEDIAN_THRESHOLD = 0.035
+    COMBO_MAX_THRESHOLD = 0.035
+    COMBO_TOTAL_THRESHOLD = 0.07
+    if secondary_masses:
+        if max_secondary >= MAX_THRESHOLD or total_secondary >= TOTAL_THRESHOLD:
+            supports = True
+        elif sources_with_secondary >= 2 and median_secondary >= MEDIAN_THRESHOLD:
+            supports = True
+        elif (
+            max_secondary >= COMBO_MAX_THRESHOLD
+            and total_secondary >= COMBO_TOTAL_THRESHOLD
+            and len(secondary_masses) >= 2
+        ):
+            supports = True
+
+    summary = {
+        "sources": cleaned,
+        "dominant_mass": float(np.round(dominant_mass, 6)) if dominant_mass else 0.0,
+        "max_secondary_mass": float(np.round(max_secondary, 6)) if secondary_masses else 0.0,
+        "median_secondary_mass": float(np.round(median_secondary, 6)) if secondary_masses else 0.0,
+        "total_secondary_mass": float(np.round(total_secondary, 6)) if secondary_masses else 0.0,
+        "secondary_count": int(len(secondary_masses)),
+        "sources_with_secondary": int(sources_with_secondary),
+        "secondary_masses": _round_series(secondary_masses, decimals=6) if secondary_masses else [],
+        "supports_multiple": supports,
+    }
+
+    return summary
+
+
 def _aggregate_votes(
     hist_peaks: list[dict[str, Any]],
     kde_summary: Optional[dict[str, Any]],
@@ -585,6 +645,7 @@ def _aggregate_votes(
 
     sources: list[dict[str, Any]] = []
     counts: list[int] = []
+    mass_sources: dict[str, list[float]] = {}
 
     if hist_peaks:
         entry = {
@@ -619,6 +680,14 @@ def _aggregate_votes(
                     for p in peaks
                 ],
             }
+            masses = [
+                float(p.get("mass_fraction", 0.0))
+                for p in peaks
+                if isinstance(p.get("mass_fraction"), (int, float)) and np.isfinite(p.get("mass_fraction"))
+            ]
+            if masses:
+                entry["peak_masses"] = [float(np.round(m, 6)) for m in masses]
+                mass_sources["kde_grid"] = masses
             sources.append(entry)
             counts.append(entry["count"])
 
@@ -657,6 +726,17 @@ def _aggregate_votes(
 
         robust_peaks = multiscale_summary.get("robust_peaks") or []
         robust_count = int(len(robust_peaks)) if robust_peaks else None
+        robust_masses: list[float] = []
+        for rp in robust_peaks:
+            mass_val = rp.get("median_mass_fraction")
+            if isinstance(mass_val, (int, float)) and np.isfinite(mass_val):
+                robust_masses.append(float(mass_val))
+                continue
+            alt = rp.get("max_mass_fraction")
+            if isinstance(alt, (int, float)) and np.isfinite(alt):
+                robust_masses.append(float(alt))
+        if robust_masses:
+            mass_sources["kde_multiscale"] = robust_masses
 
         entry_count = robust_count if robust_count is not None else ms_majority
         entry = {
@@ -688,6 +768,18 @@ def _aggregate_votes(
         if robust_peaks:
             result["robust_peak_count"] = int(len(robust_peaks))
             result["robust_peaks"] = robust_peaks
+            if "kde_multiscale" not in mass_sources:
+                fallback_masses: list[float] = []
+                for rp in robust_peaks:
+                    mass_val = rp.get("median_mass_fraction")
+                    if isinstance(mass_val, (int, float)) and np.isfinite(mass_val):
+                        fallback_masses.append(float(mass_val))
+                        continue
+                    alt = rp.get("max_mass_fraction")
+                    if isinstance(alt, (int, float)) and np.isfinite(alt):
+                        fallback_masses.append(float(alt))
+                if fallback_masses:
+                    mass_sources["kde_multiscale"] = fallback_masses
 
     tally = Counter(counts)
     if tally:
@@ -709,6 +801,33 @@ def _aggregate_votes(
 
     if "recommended_peak_count" not in result and "robust_peak_count" in result:
         result["recommended_peak_count"] = int(result["robust_peak_count"])
+
+    mass_metrics = _evaluate_mass_support(mass_sources)
+    result["mass_metrics"] = mass_metrics
+
+    recommended = result.get("recommended_peak_count")
+    if isinstance(recommended, int) and recommended > 1:
+        supports_mass = bool(mass_metrics.get("supports_multiple"))
+        if not supports_mass:
+            max_secondary = float(mass_metrics.get("max_secondary_mass") or 0.0)
+            total_secondary = float(mass_metrics.get("total_secondary_mass") or 0.0)
+            secondary_count = int(mass_metrics.get("secondary_count") or 0)
+            if secondary_count == 0 or (max_secondary < 0.03 and total_secondary < 0.06):
+                adjustment = {
+                    "triggered": True,
+                    "reason": "insufficient_mass",
+                    "previous_count": int(recommended),
+                    "max_secondary_mass": mass_metrics.get("max_secondary_mass"),
+                    "total_secondary_mass": mass_metrics.get("total_secondary_mass"),
+                }
+                result["mass_adjustment"] = adjustment
+                result["recommended_peak_count"] = 1
+            else:
+                result["mass_adjustment"] = {"triggered": False, "suppressed": True}
+        else:
+            result["mass_adjustment"] = {"triggered": False}
+    else:
+        result["mass_adjustment"] = {"triggered": False}
 
     vote_sources = [
         entry
@@ -813,8 +932,10 @@ def _summarize_kde(
     density_percentiles: list[float] = []
 
     if ys.size and np.max(ys) > 0:
-        prom_thresh = 0.05 * float(np.max(ys))
+        max_density = float(np.max(ys))
+        prom_thresh = 0.05 * max_density
         step = float(xs[1] - xs[0]) if xs.size > 1 else 1.0
+        total_mass = float(np.trapz(ys, xs)) if xs.size > 1 else float(np.sum(ys))
 
         idx, _ = find_peaks(ys, prominence=prom_thresh, width=1)
         if idx.size:
@@ -828,17 +949,32 @@ def _summarize_kde(
                 seg = ys[left : right + 1]
                 valley_depth = float(seg.min()) if seg.size else None
                 width_val = float(widths_samples[pos] * step)
-                peaks_info.append(
-                    {
-                        "x": float(np.round(xs[j], 4)),
-                        "height": float(np.round(ys[j], 6)),
-                        "prominence": float(np.round(prominences[pos], 6)),
-                        "width": float(np.round(width_val, 4)),
-                        "valley_depth": (
-                            float(np.round(valley_depth, 6)) if valley_depth is not None else None
-                        ),
-                    }
-                )
+                record = {
+                    "x": float(np.round(xs[j], 4)),
+                    "height": float(np.round(ys[j], 6)),
+                    "prominence": float(np.round(prominences[pos], 6)),
+                    "width": float(np.round(width_val, 4)),
+                    "valley_depth": (
+                        float(np.round(valley_depth, 6)) if valley_depth is not None else None
+                    ),
+                    "relative_height": float(np.round(ys[j] / max_density, 6))
+                    if max_density > 0
+                    else None,
+                }
+                if total_mass > 0 and right >= left:
+                    baseline = 0.0
+                    if valley_depth is not None and np.isfinite(valley_depth):
+                        baseline = max(0.0, valley_depth)
+                    base_level = float(
+                        min(ys[left], ys[right], baseline)
+                    ) if right >= left else 0.0
+                    trimmed = np.maximum(seg - base_level, 0.0)
+                    area = float(np.trapz(trimmed, xs[left : right + 1])) if trimmed.size else 0.0
+                    record["mass_fraction"] = (
+                        float(np.round(area / total_mass, 6)) if area > 0 else 0.0
+                    )
+                    record["mass_baseline"] = float(np.round(base_level, 6))
+                peaks_info.append(record)
 
         valley_idx, _ = find_peaks(-ys, prominence=prom_thresh * 0.5, width=1)
         if valley_idx.size:
@@ -977,19 +1113,33 @@ def _multiscale_peak_profile(
             widths_samples = np.empty(0)
 
         peaks_for_scale: list[dict[str, Any]] = []
+        total_mass_scale = float(np.trapz(ys, xs)) if xs.size > 1 else float(np.sum(ys))
         for pos, j in enumerate(idx):
             left = int(max(0, np.floor(left_bases[pos])))
             right = int(min(len(ys) - 1, np.ceil(right_bases[pos])))
             seg = ys[left : right + 1]
             valley_depth = float(seg.min()) if seg.size else None
             width_val = float(widths_samples[pos] * base_step)
+            area = 0.0
             peak_record = {
                 "x": float(np.round(xs[j], 4)),
                 "height": float(np.round(ys[j], 6)),
                 "prominence": float(np.round(prominences[pos], 6)),
                 "width": float(np.round(width_val, 4)),
                 "valley_depth": float(np.round(valley_depth, 6)) if valley_depth is not None else None,
+                "relative_height": float(np.round(ys[j] / max_density, 6)) if max_density > 0 else None,
             }
+            if total_mass_scale > 0 and right >= left:
+                baseline = 0.0
+                if valley_depth is not None and np.isfinite(valley_depth):
+                    baseline = max(0.0, valley_depth)
+                base_level = float(min(ys[left], ys[right], baseline)) if right >= left else 0.0
+                trimmed = np.maximum(seg - base_level, 0.0)
+                area = float(np.trapz(trimmed, xs[left : right + 1])) if trimmed.size else 0.0
+                peak_record["mass_fraction"] = (
+                    float(np.round(area / total_mass_scale, 6)) if area > 0 else 0.0
+                )
+                peak_record["mass_baseline"] = float(np.round(base_level, 6))
             peaks_for_scale.append(peak_record)
             all_peaks.append(
                 {
@@ -998,6 +1148,7 @@ def _multiscale_peak_profile(
                     "prominence": float(prominences[pos]),
                     "width": float(width_val),
                     "height": float(ys[j]),
+                    "mass_fraction": float(area / total_mass_scale) if total_mass_scale > 0 and area > 0 else 0.0,
                 }
             )
 
@@ -1052,6 +1203,12 @@ def _multiscale_peak_profile(
 
         prominences = [float(p["prominence"]) for p in cluster["peaks"]]
         widths = [float(p["width"]) for p in cluster["peaks"] if np.isfinite(p["width"])]
+        masses = [
+            float(p.get("mass_fraction", 0.0))
+            for p in cluster["peaks"]
+            if isinstance(p.get("mass_fraction"), (int, float))
+            and np.isfinite(p.get("mass_fraction"))
+        ]
 
         robust_peaks.append(
             {
@@ -1063,6 +1220,10 @@ def _multiscale_peak_profile(
                 else None,
                 "max_prominence": float(np.round(cluster["max_prominence"], 6)),
                 "median_width": float(np.round(float(np.median(widths)), 4)) if widths else None,
+                "median_mass_fraction": float(np.round(float(np.median(masses)), 6))
+                if masses
+                else None,
+                "max_mass_fraction": float(np.round(float(np.max(masses)), 6)) if masses else None,
             }
         )
 
@@ -1100,6 +1261,14 @@ def _auto_peak_decision(
     if recommended > max(1, int(allowed_max)):
         info["reason"] = "over_cap"
         return None, info
+
+    mass_metrics = analysis.get("mass_metrics") if isinstance(analysis, dict) else None
+    if isinstance(recommended, int) and recommended > 1 and isinstance(mass_metrics, dict):
+        supports_mass = mass_metrics.get("supports_multiple")
+        if supports_mass is False:
+            info["reason"] = "insufficient_mass"
+            info["mass_metrics"] = mass_metrics
+            return None, info
 
     sources = analysis.get("sources") or []
     vote_sources = [s for s in sources if isinstance(s.get("count"), int)]

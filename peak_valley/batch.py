@@ -91,7 +91,7 @@ class BatchOptions:
     min_width: int = 0
     curvature: float = 0.0001
     turning_points: bool = False
-    min_separation: float = 6.0
+    min_separation: float = 0.5
     grid_size: int = 20_000
     valley_drop: float = 10.0  # percent of peak height
     first_valley: str = "slope"  # or "drop"
@@ -268,7 +268,9 @@ def _resolve_parameters(
 
     min_sep_val = _coerce_float(overrides.get("min_separation"))
     params["min_separation"] = (
-        float(min_sep_val) if min_sep_val is not None else float(options.min_separation)
+        max(0.0, float(min_sep_val))
+        if min_sep_val is not None
+        else max(0.0, float(options.min_separation))
     )
 
     grid_val = _coerce_int(overrides.get("max_grid"))

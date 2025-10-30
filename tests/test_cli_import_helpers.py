@@ -19,13 +19,13 @@ def test_parse_peak_positions_accepts_scalar_numbers():
 
 
 def test_derive_min_separation_returns_margin_when_smaller_than_baseline():
-    derived = derive_min_separation([0.0, 2.0, 5.0], baseline=6.0)
-    assert 0.0 < derived < 2.0
-    assert not math.isclose(derived, 6.0)
+    derived = derive_min_separation([0.0, 0.46, 1.5], baseline=0.5)
+    assert 0.0 < derived < 0.46
+    assert not math.isclose(derived, 0.5)
 
 
 def test_derive_min_separation_none_when_spacing_meets_baseline():
-    assert derive_min_separation([0.0, 8.0], baseline=6.0) is None
+    assert derive_min_separation([0.0, 0.8], baseline=0.5) is None
 
 
 def test_derive_min_separation_handles_missing_or_duplicate_peaks():

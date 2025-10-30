@@ -50,7 +50,7 @@ warnings.filterwarnings(
 # ────────────────────────── Streamlit page & state ──────────────────────────
 st.set_page_config("Peak & Valley Detector", None, layout="wide")
 
-DEFAULT_MIN_SEPARATION = 6.0
+DEFAULT_MIN_SEPARATION = 0.5
 st.title("Peak & Valley Detector — CSV *or* full dataset")
 st.warning(
     "**Heads-up:** if you refresh or close this page, all of your uploaded data and results will be lost."
@@ -596,7 +596,7 @@ def _render_override_controls(
         default_sep = (
             sep_prev
             if sep_prev is not None
-            else float(run_defaults.get("min_separation", 6.0))
+            else float(run_defaults.get("min_separation", DEFAULT_MIN_SEPARATION))
         )
         sep_val = col_sep.slider(
             "Min peak separation",
@@ -607,7 +607,7 @@ def _render_override_controls(
             key=f"{key_prefix}_sep_val",
             help="Minimum distance required between peaks.",
         )
-        overrides["min_separation"] = float(sep_val)
+        overrides["min_separation"] = max(0.0, float(sep_val))
 
     grid_prev = _coerce_int(prev.get("max_grid"))
     grid_toggle = col_grid.checkbox(
@@ -2464,7 +2464,7 @@ def _render_dataset_overrides(
 
         sep_val = row.get("Min separation")
         if sep_val not in (None, "") and not pd.isna(sep_val):
-            overrides["min_separation"] = float(sep_val)
+            overrides["min_separation"] = max(0.0, float(sep_val))
 
         grid_val = row.get("Max grid")
         if grid_val not in (None, "") and not pd.isna(grid_val):
@@ -3406,7 +3406,11 @@ if st.session_state.run_active and st.session_state.pending:
         turning_use = tp
 
     min_sep_override = _coerce_float(over.get("min_separation"))
-    min_sep_use = min_sep_override if min_sep_override is not None else min_sep
+    min_sep_use = (
+        max(0.0, float(min_sep_override))
+        if min_sep_override is not None
+        else float(min_sep)
+    )
 
     grid_override = _coerce_int(over.get("max_grid"))
     grid_use = grid_override if grid_override is not None else grid_sz

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import textwrap
+from collections import Counter
 from typing import Any, Optional
 
 import numpy as np
@@ -11,7 +12,7 @@ from scipy.signal import find_peaks, peak_prominences, peak_widths
 from scipy.stats import gaussian_kde
 from sklearn.mixture import GaussianMixture
 
-from .kde_detector import quick_peak_estimate, _mostly_small_discrete
+from .kde_detector import quick_peak_estimate, _mostly_small_discrete, kde_peaks_valleys
 from .signature import shape_signature
 
 __all__ = ["ask_gpt_peak_count", "ask_gpt_prominence", "ask_gpt_bandwidth"]
@@ -462,6 +463,35 @@ def _default_priors(marker_name: Optional[str]) -> dict[str, Any]:
     return priors
 
 
+def _estimate_bandwidth_factor(
+    values: np.ndarray,
+    bandwidth: float | str | None,
+) -> float | None:
+    """Return the scale factor corresponding to ``bandwidth``.
+
+    The helper mirrors the KDE construction used elsewhere so that subsequent
+    multiscale analyses can reuse the same effective smoothing that governs the
+    Streamlit plots and automatic detector.  ``None`` is returned when the
+    bandwidth cannot be estimated (e.g. gaussian_kde raises)."""
+
+    if values.size < 2:
+        return None
+
+    try:
+        kde = gaussian_kde(values, bw_method=bandwidth)
+    except Exception:
+        return None
+
+    if _mostly_small_discrete(values):
+        kde.set_bandwidth(kde.factor * 4.0)
+
+    factor = float(getattr(kde, "factor", 0.0))
+    if not np.isfinite(factor) or factor <= 0:
+        return None
+
+    return factor
+
+
 def _summarize_kde_profile(
     values: np.ndarray,
     lo: float,
@@ -511,6 +541,85 @@ def _summarize_kde_profile(
     total_mass = float(np.trapz(density, grid))
     if np.isfinite(total_mass) and total_mass > 0:
         profile["total_mass"] = total_mass
+
+    return profile
+
+
+def _multiscale_peak_profile(
+    values: np.ndarray,
+    bandwidth: float | str | None,
+    *,
+    min_x_sep: float = 0.5,
+) -> dict[str, Any]:
+    """Collect peak counts across several bandwidth scalings.
+
+    The profile keeps the effective KDE factor so downstream logic can reason
+    about the smoothing regime.  ``scales`` always contains the evaluated scale
+    multipliers (relative to the effective factor) alongside the resulting peak
+    counts.  The helper deliberately stays compact to keep GPT payloads small."""
+
+    profile: dict[str, Any] = {}
+
+    if values.size < 3:
+        return profile
+
+    factor = None
+    if isinstance(bandwidth, (int, float)):
+        try:
+            factor = float(bandwidth)
+        except (TypeError, ValueError):
+            factor = None
+    else:
+        factor = _estimate_bandwidth_factor(values, bandwidth)
+
+    if factor is None or not np.isfinite(factor) or factor <= 0:
+        # Fallback to the default Scott factor of ``gaussian_kde``
+        factor = _estimate_bandwidth_factor(values, "scott")
+
+    if factor is None or not np.isfinite(factor) or factor <= 0:
+        return profile
+
+    profile["effective_factor"] = factor
+
+    scales = [0.65, 0.85, 1.0, 1.3, 1.7]
+    results: list[dict[str, Any]] = []
+    counts: list[int] = []
+
+    for scale in scales:
+        bw_method = float(max(factor * scale, 1e-6))
+        try:
+            peaks, _, _, _ = kde_peaks_valleys(
+                values,
+                None,
+                prominence=0.045,
+                bw=bw_method,
+                min_x_sep=min_x_sep,
+            )
+            count = int(len(peaks))
+        except Exception:
+            count = 0
+            peaks = []
+
+        results.append({
+            "scale": float(scale),
+            "peak_count": count,
+            "peaks": [float(p) for p in peaks[:6]],
+        })
+        if count:
+            counts.append(count)
+
+    profile["scales"] = results
+
+    if not counts:
+        return profile
+
+    vote_counts = Counter(counts)
+    mode_count, support = vote_counts.most_common(1)[0]
+    agreement = float(support / len(results))
+    profile["mode_peak_count"] = int(mode_count)
+    profile["mode_support"] = agreement
+    profile["max_scale_peak_count"] = int(results[-1]["peak_count"])
+    profile["min_scale_peak_count"] = int(results[0]["peak_count"])
 
     return profile
 
@@ -575,7 +684,129 @@ def _build_feature_payload(
         if kde_profile:
             payload["kde_profile"] = kde_profile
 
+    multiscale = _multiscale_peak_profile(values, bandwidth)
+    if multiscale:
+        payload["multiscale_profile"] = multiscale
+
     return payload
+
+
+def _auto_peak_decision(
+    features: dict[str, Any],
+    safe_max: int,
+    heuristics: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return an automatic peak decision when evidence is overwhelming."""
+
+    profile = features.get("multiscale_profile") or {}
+    scales = profile.get("scales")
+    if not scales:
+        return None
+
+    counts = [int(s.get("peak_count", 0)) for s in scales]
+    positive = [c for c in counts if c > 0]
+    if not positive:
+        return None
+
+    vote_counts = Counter(positive)
+    mode_count, support = vote_counts.most_common(1)[0]
+    agreement = float(support / len(counts))
+
+    info: dict[str, Any] = {
+        "mode_count": int(mode_count),
+        "agreement": agreement,
+        "counts": counts,
+        "high_bandwidth_count": int(scales[-1].get("peak_count", 0)),
+        "low_bandwidth_count": int(scales[0].get("peak_count", 0)),
+    }
+
+    candidates = features.get("candidates") or {}
+    peaks = candidates.get("peaks") or []
+    valley_ratio = candidates.get("valley_depth_ratio")
+    prominence_ratio = candidates.get("prominence_ratio")
+
+    stats = (features.get("statistics") or {}).get("gmm") or {}
+    delta_bic = stats.get("delta_bic_21")
+    ashman = stats.get("ashmans_d_k2")
+    weights = stats.get("weights_k2") or []
+    min_weight = min(weights) if weights else None
+
+    info["delta_bic_21"] = delta_bic
+    info["ashmans_d_k2"] = ashman
+    info["min_component_weight_k2"] = min_weight
+    info["valley_depth_ratio"] = valley_ratio
+    info["prominence_ratio"] = prominence_ratio
+
+    two_evidence = heuristics.get("evidence_for_two")
+    three_evidence = heuristics.get("evidence_for_three")
+    info["evidence_for_two"] = two_evidence
+    info["evidence_for_three"] = three_evidence
+
+    decision = None
+    confidence = 0.0
+    reason = None
+
+    # Strong unimodal signal: high bandwidth collapses to one peak and
+    # geometric/statistical cues do not provide compelling two-peak evidence.
+    if (
+        mode_count <= 1
+        and info["high_bandwidth_count"] <= 1
+        and agreement >= 0.6
+        and not two_evidence
+        and (valley_ratio is None or valley_ratio >= 0.78)
+        and (prominence_ratio is None or prominence_ratio <= 0.35)
+        and (min_weight is None or min_weight < 0.16)
+        and (delta_bic is None or delta_bic > -9.5)
+    ):
+        decision = 1
+        confidence = min(0.97, 0.82 + 0.12 * agreement)
+        reason = "high-bandwidth unimodal consensus"
+
+    # Three-peak support requires consensus plus statistical confirmation.
+    if (
+        decision is None
+        and safe_max >= 3
+        and mode_count == 3
+        and agreement >= 0.55
+        and three_evidence
+    ):
+        decision = 3
+        confidence = min(0.96, 0.78 + 0.15 * agreement)
+        reason = "multiscale and GMM favour three peaks"
+
+    # Two-peak signal: consensus across scales together with geometric support.
+    if (
+        decision is None
+        and safe_max >= 2
+        and mode_count == 2
+        and agreement >= 0.6
+        and two_evidence
+    ):
+        second_height_ratio = None
+        if len(peaks) >= 2 and peaks[0].get("height"):
+            h0 = float(peaks[0]["height"])
+            h1 = float(peaks[1]["height"])
+            if h0 > 0:
+                second_height_ratio = h1 / h0
+
+        if (
+            info["high_bandwidth_count"] >= 2
+            or (second_height_ratio is not None and second_height_ratio >= 0.45)
+            or (delta_bic is not None and delta_bic <= -11.0)
+        ):
+            decision = 2
+            confidence = min(0.95, 0.78 + 0.14 * agreement)
+            reason = "stable two-peak consensus"
+
+    if decision is None:
+        return None
+
+    info["decision"] = int(decision)
+    info["confidence"] = float(confidence)
+    if reason:
+        info["reason"] = reason
+
+    return info
 
 def ask_gpt_bandwidth(
     client: OpenAI,
@@ -750,6 +981,12 @@ def ask_gpt_peak_count(
 
     safe_max, heuristic_info = _apply_peak_caps(feature_payload, marker_name, requested_max)
     payload["meta"]["allowed_peaks_max"] = safe_max
+
+    auto_info = _auto_peak_decision(feature_payload, safe_max, heuristic_info)
+    if auto_info:
+        heuristic_info["auto_peak_decision"] = auto_info
+        if auto_info.get("decision") is not None and auto_info.get("confidence", 0.0) >= 0.9:
+            return int(auto_info["decision"])
 
     payload.update(feature_payload)
 

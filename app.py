@@ -596,7 +596,7 @@ def _render_override_controls(
         default_sep = (
             sep_prev
             if sep_prev is not None
-            else float(run_defaults.get("min_separation", DEFAULT_MIN_SEPARATION))
+            else float(run_defaults.get("min_separation", 6.0))
         )
         sep_val = col_sep.slider(
             "Min peak separation",
@@ -3454,9 +3454,12 @@ if st.session_state.run_active and st.session_state.pending:
         else:
             try:
                 n_use = ask_gpt_peak_count(
-                    client, gpt_model, max_peaks_use, counts_full=cnts,
+                    client,
+                    gpt_model,
+                    max_peaks_use,
+                    counts_full=cnts,
                     marker_name=marker,
-                    kde_bandwidth=bw_use,
+                    bandwidth=bw_use,
                 )
             except AuthenticationError:
                 if not st.session_state.invalid_api_key:

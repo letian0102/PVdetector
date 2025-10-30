@@ -1,7 +1,7 @@
 from __future__ import annotations
 import numpy as np
 from scipy.stats  import gaussian_kde
-from scipy.signal import find_peaks, fftconvolve
+from scipy.signal import find_peaks, fftconvolve, peak_prominences
 from .consistency import _enforce_valley_rule
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
@@ -13,11 +13,13 @@ import numpy as np
 
 # peak_valley/kde_detector.py  (only the helper changed)
 # ----------------------------------------------------------------------
-def _merge_close_peaks(xs: np.ndarray,
-                       ys: np.ndarray,
-                       p_idx: np.ndarray,
-                       min_x_sep: float = 0.5,
-                       min_valley_drop: float = 0.15) -> np.ndarray:
+def _merge_close_peaks(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    p_idx: np.ndarray,
+    min_x_sep: float = 0.4,
+    min_valley_drop: float = 0.15,
+) -> np.ndarray:
     """
     Collapse spurious twin-peaks produced by flat tops / wiggles.
 
@@ -55,6 +57,85 @@ def _merge_close_peaks(xs: np.ndarray,
         i = j
 
     return np.asarray(sorted(keep), dtype=int)
+
+
+def _collapse_with_bandwidth(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    p_idx: np.ndarray,
+    bandwidth: float,
+    min_x_sep: float | None,
+    min_valley_drop: float,
+    data_iqr: float,
+) -> np.ndarray:
+    """Merge peaks that cannot be sustained under the effective bandwidth."""
+
+    if p_idx.size < 2:
+        return p_idx
+
+    if not np.isfinite(bandwidth) or bandwidth <= 0 or xs.size < 2:
+        return p_idx
+
+    grid_dx = float(xs[1] - xs[0])
+    if not np.isfinite(grid_dx) or grid_dx <= 0:
+        return p_idx
+
+    # Require wider separation when smoothing is heavy.
+    collapse_sep = 0.75 * bandwidth
+    if min_x_sep is not None:
+        collapse_sep = max(collapse_sep, float(min_x_sep))
+    else:
+        collapse_sep = max(collapse_sep, 0.0)
+
+    spread = float(data_iqr)
+    if not np.isfinite(spread) or spread <= 0:
+        spread = float(np.ptp(xs)) if xs.size else grid_dx
+        if not np.isfinite(spread) or spread <= 0:
+            spread = grid_dx
+
+    # Stronger smoothing demands a deeper valley to keep multi-peak structure.
+    ratio = min(3.0, bandwidth / max(spread, 1e-9))
+    drop_required = np.clip(min_valley_drop + 0.2 * ratio, min_valley_drop, 0.8)
+
+    keep: list[int] = [int(p_idx[0])]
+    for idx in map(int, p_idx[1:]):
+        prev = keep[-1]
+        sep = float(xs[idx] - xs[prev])
+        if sep <= collapse_sep:
+            lo = min(prev, idx)
+            hi = max(prev, idx)
+            valley = float(np.min(ys[lo : hi + 1]))
+            base = float(min(ys[prev], ys[idx]))
+            if base <= 0:
+                base = float(max(ys[prev], ys[idx], 1e-12))
+            if base <= 0 or valley >= base * (1.0 - drop_required):
+                if ys[idx] > ys[prev]:
+                    keep[-1] = idx
+                continue
+        keep.append(idx)
+
+    return np.asarray(sorted(set(keep)), dtype=int)
+
+
+def _filter_prominence(ys: np.ndarray, p_idx: np.ndarray, ratio: float = 0.25) -> np.ndarray:
+    """Discard peaks with tiny prominence relative to the strongest mode."""
+
+    if p_idx.size <= 1:
+        return p_idx
+
+    prominences, _, _ = peak_prominences(ys, p_idx)
+    if prominences.size == 0:
+        return p_idx
+
+    best = float(np.max(prominences))
+    if not np.isfinite(best) or best <= 0:
+        return p_idx
+
+    keep = [int(idx) for idx, prom in zip(p_idx, prominences) if prom >= best * ratio]
+    if not keep:
+        keep = [int(p_idx[int(np.argmax(prominences))])]
+
+    return np.asarray(sorted(set(keep)), dtype=int)
 
 def _mostly_small_discrete(x: np.ndarray, threshold: float = 0.9) -> bool:
     """Heuristic to catch almost-discrete samples near zero (0..3).
@@ -246,27 +327,16 @@ def _first_valley_slope(
     min_idx = p_left + 2 + int(turn[0]) if turn.size else None
 
     if candidate_idx is None:
-        # Try the point where the down-slope begins to relax (largest
-        # increase in the first derivative).  ``start_idx`` skips the
-        # exclusion zone near the peak, so align the derivative window
-        # accordingly.
-        offset = max(0, start_idx - (p_left + 1))
-        if offset < dy.size:
-            rel = int(np.argmax(dy[offset:]))
-            candidate_idx = start_idx + rel
-
-        if candidate_idx is None or candidate_idx >= right:
-            if min_idx is not None and xs[min_idx] - xs[p_left] >= min_sep_abs:
-                candidate_idx = min_idx
-            elif p_right is not None:
-                return _valley_between(xs, ys, p_left, p_right, drop_frac)
+        if min_idx is not None and xs[min_idx] - xs[p_left] >= min_sep_abs:
+            candidate_idx = min_idx
+        elif p_right is not None:
+            return _valley_between(xs, ys, p_left, p_right, drop_frac)
+        else:
+            seg = ys[start_idx : right + 1]
+            if seg.size:
+                candidate_idx = start_idx + int(np.argmin(seg))
             else:
-                seg = ys[start_idx : right + 1]
-                if seg.size:
-                    rel = int(np.argmin(seg))
-                    candidate_idx = start_idx + rel
-                else:
-                    candidate_idx = max(p_left + 1, min(right, start_idx))
+                candidate_idx = max(p_left + 1, min(right, start_idx))
 
     if min_idx is not None and candidate_idx > min_idx:
         candidate_idx = min_idx
@@ -409,6 +479,11 @@ def kde_peaks_valleys(
     if x.size == 0:
         return [], [], np.array([]), np.array([])
 
+    q25, q75 = np.percentile(x, [25, 75])
+    data_iqr = float(q75 - q25)
+    if not np.isfinite(data_iqr) or data_iqr <= 0:
+        data_iqr = float(np.ptp(x)) if x.size else 0.0
+
     # ---------- KDE grid ----------
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
@@ -419,6 +494,9 @@ def kde_peaks_valleys(
     xs  = np.linspace(x.min() - h, x.max() + h,
                       min(grid_size, max(4000, 4 * x.size)))
     ys  = _evaluate_kde(x, xs, kde)
+    bandwidth_eff = float(kde.factor * x.std(ddof=1)) if x.size > 1 else 0.0
+    if not np.isfinite(bandwidth_eff) or bandwidth_eff <= 0:
+        bandwidth_eff = float(abs(xs[1] - xs[0])) if xs.size > 1 else 0.0
 
     # ---------- primary peaks ----------
 
@@ -456,8 +534,27 @@ def kde_peaks_valleys(
                     strongest[-1] = idx
             locs = np.unique(np.concatenate([locs, strongest]))
 
-    locs = _merge_close_peaks(xs, ys, locs,
-            min_x_sep=min_x_sep, min_valley_drop=min_valley_drop)
+    locs_initial = np.array(locs, copy=True)
+    locs = _merge_close_peaks(
+        xs,
+        ys,
+        locs,
+        min_x_sep=min_x_sep,
+        min_valley_drop=min_valley_drop,
+    )
+    if n_peaks is None:
+        locs = _collapse_with_bandwidth(
+            xs,
+            ys,
+            locs,
+            bandwidth_eff,
+            min_x_sep,
+            min_valley_drop,
+            data_iqr,
+        )
+        locs = _filter_prominence(ys, locs)
+        if locs.size == 0 and locs_initial.size:
+            locs = np.asarray([int(locs_initial[np.argmax(ys[locs_initial])])])
 
     # relax prominence if too few
     if n_peaks is not None and locs.size < n_peaks:

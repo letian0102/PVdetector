@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import scipy.signal as _scipy_signal
 from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks, fftconvolve, peak_prominences
 
@@ -16,6 +17,7 @@ class _NumPyBackend:
     """Minimal ``ArrayBackend`` shim exposing ``xp`` for older NumPy versions."""
 
     xp = np
+    signal = _scipy_signal
 
     @staticmethod
     def __array_namespace__(*args, **kwargs):

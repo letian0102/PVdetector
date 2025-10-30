@@ -9,6 +9,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import scipy.signal as _scipy_signal
 import streamlit as st
 from openai import OpenAI, AuthenticationError
 
@@ -18,12 +19,60 @@ except (ImportError, AttributeError):
     _np_get_array_backend = None
 
 
+class _NumPyBackend:
+    """Minimal ``ArrayBackend`` shim exposing ``xp`` for older NumPy versions."""
+
+    name = "numpy"
+    xp = np
+    signal = _scipy_signal
+    fft = np.fft
+    linalg = np.linalg
+
+    @staticmethod
+    def __array_namespace__(*args, **kwargs):
+        return np
+
+    @staticmethod
+    def to_cpu(array):
+        return np.asarray(array)
+
+    @staticmethod
+    def to_device(array, device=None):
+        return np.asarray(array)
+
+    @staticmethod
+    def asarray(array, dtype=None):
+        if dtype is None:
+            return np.asarray(array)
+        return np.asarray(array, dtype=dtype)
+
+    def __getattr__(self, name):
+        if hasattr(self.xp, name):
+            return getattr(self.xp, name)
+        raise AttributeError(name)
+
+
+_NUMPY_BACKEND = _NumPyBackend()
+
+
 def get_array_backend(*arrays, **kwargs):
     """Return the array backend associated with ``arrays`` (NumPy fallback)."""
 
     if _np_get_array_backend is None:
-        return np
-    return _np_get_array_backend(*arrays, **kwargs)
+        return _NUMPY_BACKEND
+
+    try:
+        backend = _np_get_array_backend(*arrays, **kwargs)
+    except TypeError:
+        return _NUMPY_BACKEND
+
+    if backend is np:
+        return _NUMPY_BACKEND
+
+    if not hasattr(backend, "xp"):
+        return _NUMPY_BACKEND
+
+    return backend
 
 from peak_valley.quality import stain_quality
 
@@ -50,7 +99,7 @@ warnings.filterwarnings(
 # ────────────────────────── Streamlit page & state ──────────────────────────
 st.set_page_config("Peak & Valley Detector", None, layout="wide")
 
-DEFAULT_MIN_SEPARATION = 6.0
+DEFAULT_MIN_SEPARATION = 0.5
 st.title("Peak & Valley Detector — CSV *or* full dataset")
 st.warning(
     "**Heads-up:** if you refresh or close this page, all of your uploaded data and results will be lost."
@@ -3475,8 +3524,12 @@ if st.session_state.run_active and st.session_state.pending:
         else:
             try:
                 n_use = ask_gpt_peak_count(
-                    client, gpt_model, max_peaks_use, counts_full=cnts,
-                    marker_name=marker
+                    client,
+                    gpt_model,
+                    max_peaks_use,
+                    counts_full=cnts,
+                    marker_name=marker,
+                    bandwidth=bw_use,
                 )
             except AuthenticationError:
                 if not st.session_state.invalid_api_key:

@@ -1,7 +1,91 @@
 from __future__ import annotations
 import numpy as np
 from scipy.stats  import gaussian_kde
-from scipy.signal import find_peaks, fftconvolve
+from scipy.signal import find_peaks, fftconvolve, peak_prominences
+
+try:  # NumPy ≥ 2.1 exposes ``get_array_backend``
+    from numpy import get_array_backend as _np_get_array_backend  # type: ignore[attr-defined]
+except (ImportError, AttributeError):
+    _np_get_array_backend = None
+
+
+class _NumPyBackend:
+    """Minimal ArrayBackend shim for environments lacking the helper."""
+
+    name = "numpy"
+    xp = np
+    signal = None
+    fft = np.fft
+    linalg = np.linalg
+
+    @staticmethod
+    def __array_namespace__(*args, **kwargs):
+        return np
+
+    @staticmethod
+    def to_cpu(array):
+        return np.asarray(array)
+
+    @staticmethod
+    def to_device(array, device=None):
+        return np.asarray(array)
+
+    @staticmethod
+    def asarray(array, dtype=None):
+        if dtype is None:
+            return np.asarray(array)
+        return np.asarray(array, dtype=dtype)
+
+    def __getattr__(self, name):
+        if hasattr(self.xp, name):
+            return getattr(self.xp, name)
+        raise AttributeError(name)
+
+
+try:  # SciPy provides the signal namespace we proxy through the backend
+    import scipy.signal as _scipy_signal
+except Exception:  # pragma: no cover - SciPy should be present, but guard just in case
+    _scipy_signal = None
+
+
+_NUMPY_BACKEND = _NumPyBackend()
+if _scipy_signal is not None:
+    _NUMPY_BACKEND.signal = _scipy_signal
+
+
+def get_array_backend(*arrays, **kwargs):
+    """Return the active array backend (NumPy fallback when unavailable)."""
+
+    if _np_get_array_backend is None:
+        return _NUMPY_BACKEND
+
+    try:
+        backend = _np_get_array_backend(*arrays, **kwargs)
+    except TypeError:
+        return _NUMPY_BACKEND
+
+    if backend is np:
+        return _NUMPY_BACKEND
+
+    if not hasattr(backend, "xp"):
+        return _NUMPY_BACKEND
+
+    # Some old builds return a light shim lacking optional helpers.
+    for attr, default in {
+        "signal": _scipy_signal,
+        "fft": np.fft,
+        "linalg": np.linalg,
+        "to_cpu": np.asarray,
+        "to_device": np.asarray,
+        "asarray": np.asarray,
+    }.items():
+        if not hasattr(backend, attr) and default is not None:
+            setattr(backend, attr, default)
+
+    if not hasattr(backend, "__array_namespace__"):
+        backend.__array_namespace__ = lambda *a, **k: backend.xp  # type: ignore[attr-defined]
+
+    return backend
 from .consistency import _enforce_valley_rule
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
@@ -387,7 +471,7 @@ def kde_peaks_valleys(
     min_width      : int  | None  = None,
     grid_size      : int          = 20_000,
     drop_frac      : float        = 0.10,
-    min_x_sep      : float        = 1.0,   # absolute, same units as `data`
+    min_x_sep      : float        = 0.5,   # absolute, same units as `data`
     min_valley_drop: float        = 0.15,
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,
@@ -467,7 +551,7 @@ def kde_peaks_valleys(
                     np.sort(locs[np.argsort(ys[locs])[-n_peaks:]])
     else:
         peaks_idx = np.sort(locs)
-    
+
     peaks_x = xs[peaks_idx].tolist()
 
     if (min_x_sep is not None) and (len(peaks_x) > 1):   # 2 safe now
@@ -479,6 +563,23 @@ def kde_peaks_valleys(
         peaks_x = keep
 
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+
+    if n_peaks is None and len(peaks_idx) >= 2:
+        try:
+            prominences, _, _ = peak_prominences(ys, np.asarray(peaks_idx, dtype=int))
+        except ValueError:
+            prominences = np.array([])
+        if prominences.size:
+            best = float(np.max(prominences))
+            if np.isfinite(best) and best > 0:
+                keep_idx = [
+                    int(idx)
+                    for idx, prom in zip(peaks_idx, prominences)
+                    if prom >= best * 0.18
+                ]
+                if keep_idx:
+                    peaks_idx = sorted(set(keep_idx))
+                    peaks_x = [float(xs[i]) for i in peaks_idx]
 
     # ---------- GMM fallback (unchanged) ----------
     if n_peaks is not None and len(peaks_x) < n_peaks:
@@ -498,6 +599,11 @@ def kde_peaks_valleys(
 
     # ---------- *re-derive* indices for every peak we now have ----------
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+
+    # from here on treat indices as a NumPy array so downstream size/shape
+    # checks work even on legacy environments that expect ``.size``.
+    peaks_idx = np.asarray(peaks_idx, dtype=int)
+    peaks_x = [float(xs[i]) for i in peaks_idx]
 
     # ---------- valleys ----------
     valleys_x: list[float] = []

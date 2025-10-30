@@ -19,6 +19,7 @@ from peak_valley.gpt_adapter import (
 )
 
 
+
 def _dummy_counts() -> np.ndarray:
     left = np.linspace(-2.0, 0.0, 60)
     right = np.linspace(2.5, 4.0, 60)
@@ -260,3 +261,38 @@ def test_gpt_peak_count_request_includes_image_payload():
     assert image_parts, "Expected input_image payload when distribution image provided"
     image_url = image_parts[0].get("image_url", {}).get("url")
     assert isinstance(image_url, str) and image_url.startswith("data:image/png;base64,")
+
+
+def test_distribution_preview_passes_bandwidth_keyword(monkeypatch):
+    import importlib
+    import os
+
+    os.environ.setdefault("STREAMLIT_SUPPRESS_RUN_CONTEXT_WARNING", "1")
+    app_module = importlib.import_module("app")
+
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_kde_peaks_valleys(values, n_peaks, prominence, **kwargs):
+        captured_kwargs.update(kwargs)
+        xs = np.linspace(-1.0, 1.0, 8)
+        ys = np.linspace(0.0, 1.0, 8)
+        return [0.0], [0.5], xs, ys
+
+    monkeypatch.setattr(app_module, "kde_peaks_valleys", fake_kde_peaks_valleys)
+
+    preview = app_module._gpt_distribution_preview(
+        "demo",
+        _dummy_counts(),
+        prominence=0.05,
+        bandwidth="scott",
+        min_width=None,
+        grid_size=128,
+        drop_fraction=0.1,
+        min_separation=0.5,
+        curvature=None,
+        turning_peak=False,
+        first_valley_mode="slope",
+    )
+
+    assert preview is not None
+    assert captured_kwargs.get("bw") == "scott"

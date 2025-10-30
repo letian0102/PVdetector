@@ -1,8 +1,30 @@
 from __future__ import annotations
+
 import numpy as np
-from scipy.stats  import gaussian_kde
+from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks, fftconvolve, peak_prominences
+
 from .consistency import _enforce_valley_rule
+
+try:  # NumPy ≥ 2.1
+    from numpy import get_array_backend as _np_get_array_backend  # type: ignore[attr-defined]
+except (ImportError, AttributeError):
+    _np_get_array_backend = None
+
+
+def get_array_backend(*arrays, **kwargs):
+    """Return the array backend associated with ``arrays`` (NumPy fallback)."""
+
+    if _np_get_array_backend is None:
+        return np
+
+    try:
+        return _np_get_array_backend(*arrays, **kwargs)
+    except TypeError:
+        # ``get_array_backend`` without ``default`` argument (NumPy 2.0) raises
+        # ``TypeError`` when no array-like inputs are provided.  Fall back to
+        # the standard NumPy module in that case.
+        return np
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
 

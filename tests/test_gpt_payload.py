@@ -38,6 +38,15 @@ def test_feature_payload_includes_kde_trace():
     summary_bins = hist["summary_bins"]
     assert summary_bins["bin_count"] == SUMMARY_BINS
     assert len(summary_bins["counts"]) == SUMMARY_BINS
+    assert hist.get("sparkline")
+    assert len(hist["sparkline"]) == SUMMARY_BINS
+    assert hist.get("profile_points")
+    assert len(hist["profile_points"]) == SUMMARY_BINS
+    runs = hist.get("slope_runs")
+    assert isinstance(runs, list)
+    assert runs, "slope_runs should capture monotonic segments"
+    projection = hist.get("bandwidth_projection")
+    assert projection is None or projection["sigma_bins"] > 0
 
     assert "kde" in payload
     kde = payload["kde"]

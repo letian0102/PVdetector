@@ -176,6 +176,116 @@ def _downsample_histogram(
     }
 
 
+def _sparkline_from_counts(counts: np.ndarray) -> str:
+    """Render a coarse ASCII sparkline from histogram counts."""
+
+    if counts.size == 0:
+        return ""
+
+    glyphs = "0123456789"
+    max_count = float(np.max(counts))
+    if max_count <= 0:
+        return glyphs[0] * int(counts.size)
+
+    scaled = counts.astype(float) / max_count
+    scaled = np.clip(np.round(scaled * (len(glyphs) - 1)), 0, len(glyphs) - 1).astype(int)
+    return "".join(glyphs[i] for i in scaled.tolist())
+
+
+def _summarise_slope_runs(
+    counts: np.ndarray, edges: np.ndarray, tol: float = 1e-3
+) -> list[dict[str, Any]]:
+    """Summarise monotonic runs (up/down/flat) within coarse histogram bins."""
+
+    if counts.size < 2 or edges.size != counts.size + 1:
+        return []
+
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    diffs = np.diff(counts.astype(float))
+    if diffs.size == 0:
+        return []
+
+    def classify(delta: float) -> str:
+        if delta > tol:
+            return "up"
+        if delta < -tol:
+            return "down"
+        return "flat"
+
+    directions = [classify(delta) for delta in diffs]
+    runs: list[dict[str, Any]] = []
+    start = 0
+    current = directions[0]
+
+    def emit(start_idx: int, end_idx: int, direction: str) -> None:
+        if end_idx <= start_idx:
+            return
+        start_x = float(centers[start_idx])
+        end_x = float(centers[end_idx])
+        start_val = float(counts[start_idx])
+        end_val = float(counts[end_idx])
+        delta = end_val - start_val
+        span = end_x - start_x
+        mean_slope = delta / span if span not in (0.0, -0.0) else 0.0
+        runs.append(
+            {
+                "direction": direction,
+                "start": start_x,
+                "end": end_x,
+                "bins": int(end_idx - start_idx),
+                "delta": float(delta),
+                "mean_slope": float(mean_slope) if np.isfinite(mean_slope) else 0.0,
+            }
+        )
+
+    for idx, direction in enumerate(directions[1:], start=1):
+        if direction != current:
+            emit(start, idx, current)
+            start = idx
+            current = direction
+
+    emit(start, len(directions), current)
+    return runs
+
+
+def _bandwidth_projection(
+    bandwidth: Optional[float], bin_width: Optional[float], counts: np.ndarray
+) -> Optional[dict[str, Any]]:
+    """Provide bandwidth-derived expectations about the smoothed outline."""
+
+    if bandwidth is None or bin_width is None:
+        return None
+    if not (np.isfinite(bandwidth) and np.isfinite(bin_width)):
+        return None
+    if bin_width <= 0:
+        return None
+
+    sigma_bins = bandwidth / bin_width
+    support_bins = 6.0 * sigma_bins  # ±3σ window in bin units
+    three_sigma_span = 3.0 * bandwidth
+    expected_resolution = max(1.0, 2.0 * sigma_bins)
+
+    payload: dict[str, Any] = {
+        "bandwidth": float(round(bandwidth, 6)),
+        "bin_width": float(round(bin_width, 6)),
+        "sigma_bins": float(round(sigma_bins, 4)),
+        "full_support_bins": float(round(support_bins, 4)),
+        "three_sigma_span": float(round(three_sigma_span, 6)),
+        "expected_peak_resolution_bins": float(round(expected_resolution, 4)),
+    }
+
+    max_count = float(np.max(counts)) if counts.size else 0.0
+    if max_count > 0:
+        avg_height = float(np.mean(counts.astype(float))) / max_count
+        payload["average_height_ratio"] = float(round(avg_height, 4))
+
+    payload["description"] = (
+        f"Bandwidth spans ±{3 * sigma_bins:.1f} bins (~±{three_sigma_span:.3f} units); "
+        f"peaks closer than ≈{expected_resolution:.1f} bins may merge."
+    )
+    return payload
+
+
 def _second_derivative_summary(smoothed: np.ndarray) -> dict[str, Any]:
     """Summarise curvature structure from a smoothed histogram."""
 
@@ -783,12 +893,44 @@ def _build_feature_payload(
         "range": {"lo": float(lo), "hi": float(hi)},
     }
 
-    histogram_payload["summary_bins"] = _downsample_histogram(
+    summary_payload = _downsample_histogram(
         values,
         lo,
         hi,
         SUMMARY_BINS,
     )
+
+    histogram_payload["summary_bins"] = summary_payload
+
+    summary_counts = np.asarray(summary_payload.get("counts", []), dtype=float)
+    summary_edges = np.asarray(summary_payload.get("bin_edges", []), dtype=float)
+
+    sparkline = _sparkline_from_counts(summary_counts)
+    if sparkline:
+        histogram_payload["sparkline"] = sparkline
+
+    if summary_counts.size and summary_edges.size:
+        runs = _summarise_slope_runs(summary_counts, summary_edges)
+        histogram_payload["slope_runs"] = runs
+
+        centers = 0.5 * (summary_edges[:-1] + summary_edges[1:])
+        max_count = float(np.max(summary_counts)) if summary_counts.size else 0.0
+        if max_count > 0:
+            histogram_payload["profile_points"] = [
+                {
+                    "x": float(round(cx, 4)),
+                    "relative_height": float(round(count / max_count, 4)),
+                }
+                for cx, count in zip(centers, summary_counts)
+            ]
+
+    bandwidth_hint = _bandwidth_projection(
+        histogram_payload.get("kde_bandwidth"),
+        histogram_payload.get("bin_width"),
+        summary_counts,
+    )
+    if bandwidth_hint:
+        histogram_payload["bandwidth_projection"] = bandwidth_hint
 
     payload["histogram"] = histogram_payload
 

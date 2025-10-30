@@ -332,6 +332,7 @@ def test_distribution_preview_passes_bandwidth_keyword(monkeypatch):
     app_module = importlib.import_module("app")
 
     captured_kwargs: dict[str, object] = {}
+    captured_plot: dict[str, object] = {}
 
     def fake_kde_peaks_valleys(values, n_peaks, prominence, **kwargs):
         captured_kwargs.update(kwargs)
@@ -339,7 +340,18 @@ def test_distribution_preview_passes_bandwidth_keyword(monkeypatch):
         ys = np.linspace(0.0, 1.0, 8)
         return [0.0], [0.5], xs, ys
 
+    def fake_plot_png(stem, xs, ys, peaks, valleys):
+        captured_plot.update({
+            "stem": stem,
+            "xs": xs,
+            "ys": ys,
+            "peaks": list(peaks),
+            "valleys": list(valleys),
+        })
+        return b"preview"
+
     monkeypatch.setattr(app_module, "kde_peaks_valleys", fake_kde_peaks_valleys)
+    monkeypatch.setattr(app_module, "_plot_png", fake_plot_png)
 
     preview = app_module._gpt_distribution_preview(
         "demo",
@@ -355,5 +367,8 @@ def test_distribution_preview_passes_bandwidth_keyword(monkeypatch):
         first_valley_mode="slope",
     )
 
-    assert preview is not None
+    assert preview == b"preview"
     assert captured_kwargs.get("bw") == "scott"
+    assert captured_plot["stem"] == "demo"
+    assert captured_plot["peaks"] == []
+    assert captured_plot["valleys"] == []

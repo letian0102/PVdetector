@@ -1768,7 +1768,10 @@ def _gpt_distribution_preview(
     if xs.size == 0 or ys.size == 0:
         return None
 
-    return _plot_png(f"{stem} (GPT preview)", xs, ys, peaks, valleys)
+    # Reuse the same blue KDE rendering that the UI shows to users so GPT sees the
+    # identical distribution snapshot. The peaks/valleys are conveyed via
+    # structured features, so keep the image focused on the density curve itself.
+    return _plot_png(stem, xs, ys, [], [])
 
 # ───────────────────── helper: inline editor + plot ─────────────────────────
 

@@ -241,21 +241,21 @@ def _strong_two_peak_signal(
     delta_bic = gmm.get("delta_bic_21")
     ashman = gmm.get("ashmans_d_k2")
 
-    WEIGHT_THRESHOLD = 0.14
-    DELTA_BIC_THRESHOLD = -9.5
-    STRONG_DELTA_BIC_THRESHOLD = -13.5
-    ASHMAN_THRESHOLD = 2.05
-    STRONG_ASHMAN_THRESHOLD = 2.55
-    VALLEY_RATIO_THRESHOLD = 0.78
-    STRONG_VALLEY_RATIO_THRESHOLD = 0.62
-    RIGHT_TAIL_THRESHOLD = 0.11
-    STRONG_RIGHT_TAIL_THRESHOLD = 0.18
-    PROMINENCE_RATIO_THRESHOLD = 0.24
-    STRONG_PROMINENCE_RATIO_THRESHOLD = 0.36
-    SEPARATION_RATIO_THRESHOLD = 1.5
+    WEIGHT_THRESHOLD = 0.08
+    DELTA_BIC_THRESHOLD = -7.5
+    STRONG_DELTA_BIC_THRESHOLD = -10.5
+    ASHMAN_THRESHOLD = 1.75
+    STRONG_ASHMAN_THRESHOLD = 2.2
+    VALLEY_RATIO_THRESHOLD = 0.88
+    STRONG_VALLEY_RATIO_THRESHOLD = 0.72
+    RIGHT_TAIL_THRESHOLD = 0.06
+    STRONG_RIGHT_TAIL_THRESHOLD = 0.12
+    PROMINENCE_RATIO_THRESHOLD = 0.18
+    STRONG_PROMINENCE_RATIO_THRESHOLD = 0.30
+    SEPARATION_RATIO_THRESHOLD = 1.05
 
     hits: list[str] = []
-    has_weight_support = min_weight is not None and min_weight >= WEIGHT_THRESHOLD
+    has_weight_support = min_weight is None or min_weight >= WEIGHT_THRESHOLD
 
     separation_info: dict[str, Any] = {
         "separation": None,
@@ -263,7 +263,7 @@ def _strong_two_peak_signal(
         "separation_ok": None,
     }
 
-    if not has_weight_support:
+    if min_weight is not None and not has_weight_support:
         return False, ["low_component_weight"], min_weight, separation_info
 
     if len(peaks) < 2:
@@ -314,9 +314,6 @@ def _strong_two_peak_signal(
     stat_count = len(stat_votes)
     strong_stat = bool(strong_stat_votes)
 
-    if stat_count == 0:
-        return False, ["insufficient_statistical_support"], min_weight, separation_info
-
     geometry_votes: list[str] = []
     primary_geo_votes = 0
     strong_geo_votes = 0
@@ -341,29 +338,30 @@ def _strong_two_peak_signal(
     if prominence_ratio is not None and prominence_ratio >= PROMINENCE_RATIO_THRESHOLD:
         prominence_vote = True
         geometry_votes.append("prominence_ratio")
+        primary_geo_votes += 1
         if prominence_ratio >= STRONG_PROMINENCE_RATIO_THRESHOLD:
             strong_geo_votes += 1
 
     geometry_vote_count = len(geometry_votes)
 
-    # Require at least one geometric indicator beyond separation
-    if geometry_vote_count == 0:
-        return False, ["insufficient_geometric_support"], min_weight, separation_info
-
     allow_two = False
-    if stat_count >= 2:
-        if primary_geo_votes >= 1 or strong_stat or strong_geo_votes >= 1:
+    if stat_count >= 1:
+        if (
+            primary_geo_votes >= 1
+            or strong_stat
+            or strong_geo_votes >= 1
+            or stat_count >= 2
+        ):
             allow_two = True
-    else:  # exactly one statistical vote
-        if primary_geo_votes >= 1 and geometry_vote_count >= 1:
+    else:
+        if strong_geo_votes >= 1 or primary_geo_votes >= 2:
             allow_two = True
-        elif strong_stat and geometry_vote_count >= 2:
-            allow_two = True
-        elif strong_geo_votes >= 1 and geometry_vote_count >= 2:
-            allow_two = True
+
+    if geometry_vote_count == 0 and not allow_two:
+        return False, ["insufficient_support"], min_weight, separation_info
 
     if not allow_two:
-        return False, [], min_weight, separation_info
+        return False, ["insufficient_support"], min_weight, separation_info
 
     if has_delta:
         hits.append("delta_bic")
@@ -398,8 +396,8 @@ def _strong_three_peak_signal(features: dict[str, Any]) -> tuple[bool, list[str]
 
     hits: list[str] = []
 
-    if delta_bic is not None and delta_bic <= -8.0:
-        if weights_k3 and min(weights_k3) >= 0.08:
+    if delta_bic is not None and delta_bic <= -6.0:
+        if not weights_k3 or min(weights_k3) >= 0.06:
             hits.append("delta_bic")
 
     return bool(hits), hits
@@ -425,24 +423,13 @@ def _apply_peak_caps(
     heuristics["min_component_weight_k2"] = min_weight
     heuristics["peak_separation"] = separation_info
 
-    if safe_max >= 3 and not tri_modal:
-        safe_max = 2
-        heuristics["non_tri_modal_cap"] = 2
-
-    if safe_max >= 2 and not has_two:
-        safe_max = 1
-        heuristics["forced_peak_cap"] = 1
-
     if safe_max >= 3:
         has_three, three_hits = _strong_three_peak_signal(feature_payload)
-        heuristics["evidence_for_three"] = has_three
-        heuristics["support_three_signals"] = three_hits
-        if not has_three:
-            safe_max = 2
-            heuristics["forced_peak_cap"] = heuristics.get("forced_peak_cap", 2)
     else:
-        heuristics["evidence_for_three"] = False
-        heuristics["support_three_signals"] = []
+        has_three, three_hits = False, []
+
+    heuristics["evidence_for_three"] = has_three
+    heuristics["support_three_signals"] = three_hits
 
     heuristics["final_allowed_max"] = safe_max
     return safe_max, heuristics
@@ -727,11 +714,13 @@ def _auto_peak_decision(
 
     stats = (features.get("statistics") or {}).get("gmm") or {}
     delta_bic = stats.get("delta_bic_21")
+    delta_bic_32 = stats.get("delta_bic_32")
     ashman = stats.get("ashmans_d_k2")
     weights = stats.get("weights_k2") or []
     min_weight = min(weights) if weights else None
 
     info["delta_bic_21"] = delta_bic
+    info["delta_bic_32"] = delta_bic_32
     info["ashmans_d_k2"] = ashman
     info["min_component_weight_k2"] = min_weight
     info["valley_depth_ratio"] = valley_ratio
@@ -749,18 +738,20 @@ def _auto_peak_decision(
     # Strong unimodal signal: high bandwidth collapses to one peak and
     # geometric/statistical cues do not provide compelling two-peak evidence.
     if (
-        mode_count <= 1
+        mode_count == 1
         and info["high_bandwidth_count"] <= 1
-        and agreement >= 0.6
+        and info["low_bandwidth_count"] <= 1
+        and agreement >= 0.75
         and not two_evidence
-        and (valley_ratio is None or valley_ratio >= 0.78)
-        and (prominence_ratio is None or prominence_ratio <= 0.35)
-        and (min_weight is None or min_weight < 0.16)
-        and (delta_bic is None or delta_bic > -9.5)
+        and not three_evidence
+        and (valley_ratio is None or valley_ratio >= 0.85)
+        and (prominence_ratio is None or prominence_ratio <= 0.32)
+        and (min_weight is None or min_weight < 0.18)
+        and (delta_bic is None or delta_bic > -7.5)
     ):
         decision = 1
-        confidence = min(0.97, 0.82 + 0.12 * agreement)
-        reason = "high-bandwidth unimodal consensus"
+        confidence = min(0.98, 0.84 + 0.12 * agreement)
+        reason = "strong unimodal consensus"
 
     # Three-peak support requires consensus plus statistical confirmation.
     if (
@@ -769,17 +760,22 @@ def _auto_peak_decision(
         and mode_count == 3
         and agreement >= 0.55
         and three_evidence
+        and (
+            info["high_bandwidth_count"] >= 3
+            or info["low_bandwidth_count"] >= 3
+            or (delta_bic_32 is not None and delta_bic_32 <= -5.5)
+        )
     ):
         decision = 3
-        confidence = min(0.96, 0.78 + 0.15 * agreement)
-        reason = "multiscale and GMM favour three peaks"
+        confidence = min(0.96, 0.78 + 0.14 * agreement)
+        reason = "three-peak consensus across scales"
 
     # Two-peak signal: consensus across scales together with geometric support.
     if (
         decision is None
         and safe_max >= 2
         and mode_count == 2
-        and agreement >= 0.6
+        and agreement >= 0.58
         and two_evidence
     ):
         second_height_ratio = None
@@ -791,12 +787,14 @@ def _auto_peak_decision(
 
         if (
             info["high_bandwidth_count"] >= 2
-            or (second_height_ratio is not None and second_height_ratio >= 0.45)
-            or (delta_bic is not None and delta_bic <= -11.0)
-        ):
+            or info["low_bandwidth_count"] >= 2
+            or (second_height_ratio is not None and second_height_ratio >= 0.32)
+            or (prominence_ratio is not None and prominence_ratio >= 0.32)
+            or (delta_bic is not None and delta_bic <= -8.0)
+        ) and (valley_ratio is None or valley_ratio <= 0.9):
             decision = 2
-            confidence = min(0.95, 0.78 + 0.14 * agreement)
-            reason = "stable two-peak consensus"
+            confidence = min(0.97, 0.80 + 0.12 * agreement)
+            reason = "consistent two-peak consensus"
 
     if decision is None:
         return None

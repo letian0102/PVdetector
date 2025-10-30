@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import math
 import re
@@ -1875,6 +1876,7 @@ def ask_gpt_peak_count(
     batch_id: str | None = None,
     features: Optional[dict[str, Any]] = None,
     priors: Optional[dict[str, Any]] = None,
+    distribution_image: Optional[bytes] = None,
 ) -> int | None:
     """Query GPT for the number of visible density peaks using structured output."""
 
@@ -1966,6 +1968,28 @@ def ask_gpt_peak_count(
         },
     }
 
+    if distribution_image:
+        try:
+            image_b64 = base64.b64encode(distribution_image).decode("ascii")
+        except Exception:
+            image_b64 = ""
+    else:
+        image_b64 = ""
+
+    if image_b64:
+        user_content: Any = [
+            {"type": "text", "text": json.dumps(payload)},
+            {
+                "type": "input_image",
+                "image_url": {
+                    "url": f"data:image/png;base64,{image_b64}",
+                    "detail": "high",
+                },
+            },
+        ]
+    else:
+        user_content = json.dumps(payload)
+
     try:
         rsp = client.chat.completions.create(
             model=model_name,
@@ -1974,7 +1998,7 @@ def ask_gpt_peak_count(
             timeout=45,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user", "content": json.dumps(payload)},
+                {"role": "user", "content": user_content},
             ],
             response_format=response_format,
         )

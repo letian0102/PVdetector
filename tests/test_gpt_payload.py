@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import io
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+from PIL import Image
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -21,6 +23,12 @@ def _dummy_counts() -> np.ndarray:
     left = np.linspace(-2.0, 0.0, 60)
     right = np.linspace(2.5, 4.0, 60)
     return np.concatenate([left, right])
+
+
+def _dummy_png() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 10), color="white").save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def test_feature_payload_includes_kde_trace():
@@ -208,3 +216,47 @@ def test_peak_caps_allow_three_with_clear_triplet():
     consensus = heuristics.get("multiscale_consensus")
     assert isinstance(consensus, dict)
     assert consensus.get("recommended") == 3
+
+
+def test_gpt_peak_count_request_includes_image_payload():
+    counts = _dummy_counts()
+    image_bytes = _dummy_png()
+
+    captured_content = None
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            nonlocal captured_content
+            user_msg = next(msg for msg in kwargs["messages"] if msg["role"] == "user")
+            captured_content = user_msg["content"]
+            response = {
+                "peak_count": 2,
+                "confidence": 0.5,
+                "reason": "looks bimodal",
+                "peak_indices": [0, 1],
+            }
+            message = SimpleNamespace(content=json.dumps(response))
+            choice = SimpleNamespace(message=message)
+            return SimpleNamespace(choices=[choice])
+
+    client = DummyClient()
+
+    result = ask_gpt_peak_count(
+        client,
+        model_name="dummy",
+        max_peaks=4,
+        counts_full=counts,
+        distribution_image=image_bytes,
+    )
+
+    assert result == 2
+    assert isinstance(captured_content, list)
+    assert captured_content
+    assert captured_content[0]["type"] == "text"
+    image_parts = [part for part in captured_content if part.get("type") == "input_image"]
+    assert image_parts, "Expected input_image payload when distribution image provided"
+    image_url = image_parts[0].get("image_url", {}).get("url")
+    assert isinstance(image_url, str) and image_url.startswith("data:image/png;base64,")

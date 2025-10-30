@@ -1728,6 +1728,48 @@ def _plot_png(stem: str, xs: np.ndarray, ys: np.ndarray,
     out = fig_to_png(fig); plt.close(fig)
     return out
 
+
+def _gpt_distribution_preview(
+    stem: str,
+    counts: np.ndarray,
+    *,
+    prominence: float,
+    bandwidth: float | str,
+    min_width: int | None,
+    grid_size: int,
+    drop_fraction: float,
+    min_separation: float,
+    curvature: float | None,
+    turning_peak: bool,
+    first_valley_mode: str,
+) -> bytes | None:
+    """Render a KDE plot snapshot for GPT peak-counting assistance."""
+
+    try:
+        peaks, valleys, xs, ys = kde_peaks_valleys(
+            counts,
+            None,
+            prominence,
+            bandwidth,
+            min_width,
+            grid_size,
+            drop_frac=drop_fraction,
+            min_x_sep=min_separation,
+            curvature_thresh=curvature,
+            turning_peak=turning_peak,
+            first_valley=first_valley_mode,
+        )
+    except Exception as exc:
+        print(f"Failed to build GPT KDE preview for {stem}: {exc}")
+        return None
+
+    if not isinstance(xs, np.ndarray) or not isinstance(ys, np.ndarray):
+        return None
+    if xs.size == 0 or ys.size == 0:
+        return None
+
+    return _plot_png(f"{stem} (GPT preview)", xs, ys, peaks, valleys)
+
 # ───────────────────── helper: inline editor + plot ─────────────────────────
 
 def _manual_editor(stem: str):
@@ -2968,6 +3010,16 @@ with st.sidebar:
         help="Upper limit when GPT determines peak count."
     )
 
+    share_gpt_plot = st.checkbox(
+        "Send KDE plot to GPT (automatic only)",
+        value=st.session_state.get("send_gpt_plot", False),
+        help=(
+            "When enabled, the GPT peak counter also receives a snapshot of the "
+            "current KDE distribution so it can judge peaks from the actual plot."
+        ),
+    )
+    st.session_state.send_gpt_plot = share_gpt_plot
+
     # Bandwidth
     bw_mode = st.selectbox(
         "Bandwidth mode", ["Manual", "GPT automatic"],
@@ -3478,9 +3530,29 @@ if st.session_state.run_active and st.session_state.pending:
             n_use = None
         else:
             try:
+                gpt_image = None
+                if st.session_state.get("send_gpt_plot", False):
+                    curvature_preview = (
+                        curv_use if (curv_use and curv_use > 0) else None
+                    )
+                    gpt_image = _gpt_distribution_preview(
+                        stem,
+                        cnts,
+                        prominence=float(prom_use),
+                        bandwidth=bw_use,
+                        min_width=min_w_use or None,
+                        grid_size=grid_use,
+                        drop_fraction=drop_use / 100.0,
+                        min_separation=float(min_sep_use),
+                        curvature=curvature_preview,
+                        turning_peak=bool(turning_use),
+                        first_valley_mode=(
+                            "drop" if val_mode_use == "Valley drop" else "slope"
+                        ),
+                    )
                 n_use = ask_gpt_peak_count(
                     client, gpt_model, max_peaks_use, counts_full=cnts,
-                    marker_name=marker
+                    marker_name=marker, distribution_image=gpt_image
                 )
             except AuthenticationError:
                 if not st.session_state.invalid_api_key:

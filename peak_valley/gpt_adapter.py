@@ -412,10 +412,7 @@ def _apply_peak_caps(
     heuristics: dict[str, Any] = {}
 
     heuristics["requested_max"] = safe_max
-
-    tri_modal_markers = {"CD4", "CD45RA", "CD45RO"}
-    tri_modal = bool(marker_name and marker_name.upper() in tri_modal_markers)
-    heuristics["tri_modal_marker"] = tri_modal
+    heuristics["marker"] = (marker_name.upper() if marker_name else None)
 
     has_two, two_hits, min_weight, separation_info = _strong_two_peak_signal(feature_payload)
     heuristics["evidence_for_two"] = has_two
@@ -423,41 +420,42 @@ def _apply_peak_caps(
     heuristics["min_component_weight_k2"] = min_weight
     heuristics["peak_separation"] = separation_info
 
-    if safe_max >= 3 and not tri_modal:
-        safe_max = 2
-        heuristics["non_tri_modal_cap"] = 2
+    forced_cap: Optional[int] = None
 
     if safe_max >= 2 and not has_two:
         safe_max = 1
-        heuristics["forced_peak_cap"] = 1
+        forced_cap = 1
 
     if safe_max >= 3:
         has_three, three_hits = _strong_three_peak_signal(feature_payload)
         heuristics["evidence_for_three"] = has_three
         heuristics["support_three_signals"] = three_hits
         if not has_three:
-            safe_max = 2
-            heuristics["forced_peak_cap"] = heuristics.get("forced_peak_cap", 2)
+            reduced_cap = 2 if safe_max > 2 else safe_max
+            safe_max = reduced_cap
+            forced_cap = 2 if forced_cap is None else min(forced_cap, reduced_cap)
     else:
         heuristics["evidence_for_three"] = False
         heuristics["support_three_signals"] = []
+
+    if forced_cap is not None:
+        heuristics["forced_peak_cap"] = forced_cap
 
     heuristics["final_allowed_max"] = safe_max
     return safe_max, heuristics
 
 
-def _default_priors(marker_name: Optional[str]) -> dict[str, Any]:
-    tri_modal = {"CD4", "CD45RA", "CD45RO"}
-    priors = {
-        "typical_peaks": {
-            "CD4": [1, 3],
-            "CD45RA": [1, 3],
-            "CD45RO": [1, 3],
-        },
-        "others_max": 2,
+def _default_priors(marker_name: Optional[str], allowed_max: int) -> dict[str, Any]:
+    safe_max = max(1, int(allowed_max))
+
+    priors: dict[str, Any] = {
+        "typical_peaks": {},
+        "global_max": safe_max,
     }
-    if marker_name and marker_name.upper() not in tri_modal:
-        priors["marker_max"] = 2
+
+    if marker_name:
+        priors["typical_peaks"][marker_name.upper()] = [1, safe_max]
+
     return priors
 
 
@@ -686,15 +684,17 @@ def ask_gpt_peak_count(
 
     payload.update(feature_payload)
 
-    payload["priors"] = (priors.copy() if isinstance(priors, dict) else _default_priors(marker_name))
+    payload["priors"] = (
+        priors.copy() if isinstance(priors, dict) else _default_priors(marker_name, safe_max)
+    )
     payload["heuristics"] = heuristic_info
 
     system = (
         "You are a cytometry/ADT gating assistant. Infer the number of visible density peaks "
         "(modes) using only the provided features. Prefer fewer peaks unless strong evidence "
-        "suggests more. For CD4 and sometimes CD45RA/RO, allow 3 peaks; otherwise treat 1–2 as typical. "
-        "Tiny shoulders are not peaks unless prominence and width thresholds are met. Output only the JSON "
-        "object described by the schema."
+        "suggests more. Respect the allowed_peaks_max value in the payload when considering "
+        "how many peaks may be reported. Tiny shoulders are not peaks unless prominence and "
+        "width thresholds are met. Output only the JSON object described by the schema."
     )
 
     response_format = {

@@ -14,14 +14,54 @@ except (ImportError, AttributeError):
 
 
 class _NumPyBackend:
-    """Minimal ``ArrayBackend`` shim exposing ``xp`` for older NumPy versions."""
+    """Minimal ``ArrayBackend`` shim exposing ``xp`` for older NumPy versions.
 
+    NumPy < 2.1 does not ship :func:`get_array_backend`.  A handful of helper
+    functions introduced after the multibackend refactor expect the returned
+    backend object to offer ``xp`` (array namespace), optional SciPy signal
+    helpers, and utilities such as ``to_cpu`` when running on CuPy/JAX.  Older
+    environments only have plain NumPy, so the shim below provides the
+    attributes we rely on while transparently delegating unknown lookups to the
+    NumPy module.
+    """
+
+    name = "numpy"
     xp = np
     signal = _scipy_signal
+    fft = np.fft
+    linalg = np.linalg
 
     @staticmethod
     def __array_namespace__(*args, **kwargs):
         return np
+
+    @staticmethod
+    def to_cpu(array):
+        """Return ``array`` as a NumPy ``ndarray`` (GPU no-op fallback)."""
+
+        return np.asarray(array)
+
+    @staticmethod
+    def to_device(array, device=None):
+        """Return ``array`` copied to the requested device (CPU-only shim)."""
+
+        # ``device`` is ignored because legacy environments only support CPU.
+        return np.asarray(array)
+
+    @staticmethod
+    def asarray(array, dtype=None):
+        """NumPy-compatible ``asarray`` helper used by some backends."""
+
+        if dtype is None:
+            return np.asarray(array)
+        return np.asarray(array, dtype=dtype)
+
+    def __getattr__(self, name):
+        """Delegate unknown attributes to :mod:`numpy` when possible."""
+
+        if hasattr(self.xp, name):
+            return getattr(self.xp, name)
+        raise AttributeError(name)
 
 
 _NUMPY_BACKEND = _NumPyBackend()

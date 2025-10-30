@@ -9,6 +9,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import scipy.signal as _scipy_signal
 import streamlit as st
 from openai import OpenAI, AuthenticationError
 
@@ -19,13 +20,42 @@ except (ImportError, AttributeError):
 
 
 class _NumPyBackend:
-    """Minimal ``ArrayBackend`` shim exposing ``xp`` for older NumPy versions."""
+    """Minimal ``ArrayBackend`` shim exposing ``xp`` for older NumPy versions.
 
+    Mirrors the extended shim in :mod:`peak_valley.kde_detector` so Streamlit
+    sessions running on legacy NumPy builds continue to offer the helper
+    attributes expected by the detector modules (``xp``, ``signal``,
+    ``to_cpu``/``to_device`` and friends).
+    """
+
+    name = "numpy"
     xp = np
+    signal = _scipy_signal
+    fft = np.fft
+    linalg = np.linalg
 
     @staticmethod
     def __array_namespace__(*args, **kwargs):
         return np
+
+    @staticmethod
+    def to_cpu(array):
+        return np.asarray(array)
+
+    @staticmethod
+    def to_device(array, device=None):
+        return np.asarray(array)
+
+    @staticmethod
+    def asarray(array, dtype=None):
+        if dtype is None:
+            return np.asarray(array)
+        return np.asarray(array, dtype=dtype)
+
+    def __getattr__(self, name):
+        if hasattr(self.xp, name):
+            return getattr(self.xp, name)
+        raise AttributeError(name)
 
 
 _NUMPY_BACKEND = _NumPyBackend()

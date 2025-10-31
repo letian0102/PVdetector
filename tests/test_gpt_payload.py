@@ -318,8 +318,8 @@ def test_gpt_peak_count_request_includes_image_payload():
     assert isinstance(captured_content, list)
     assert captured_content
     assert captured_content[0]["type"] == "text"
-    image_parts = [part for part in captured_content if part.get("type") == "input_image"]
-    assert image_parts, "Expected input_image payload when distribution image provided"
+    image_parts = [part for part in captured_content if part.get("type") == "image_url"]
+    assert image_parts, "Expected image_url payload when distribution image provided"
     image_url = image_parts[0].get("image_url", {}).get("url")
     assert isinstance(image_url, str) and image_url.startswith("data:image/png;base64,")
 

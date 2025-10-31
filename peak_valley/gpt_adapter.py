@@ -2009,7 +2009,7 @@ def ask_gpt_peak_count(
         user_content: Any = [
             {"type": "text", "text": json.dumps(payload)},
             {
-                "type": "input_image",
+                "type": "image_url",
                 "image_url": {
                     "url": f"data:image/png;base64,{image_b64}",
                     "detail": "high",

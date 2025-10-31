@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import io
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+from PIL import Image
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -17,10 +20,17 @@ from peak_valley.gpt_adapter import (
 )
 
 
+
 def _dummy_counts() -> np.ndarray:
     left = np.linspace(-2.0, 0.0, 60)
     right = np.linspace(2.5, 4.0, 60)
     return np.concatenate([left, right])
+
+
+def _dummy_png() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 10), color="white").save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def test_feature_payload_includes_kde_trace():
@@ -117,6 +127,33 @@ def test_feature_payload_includes_kde_trace():
         assert candidates["pairwise_separations"]
 
 
+def test_feature_payload_respects_numeric_bandwidth_override():
+    counts = _dummy_counts()
+    payload = _build_feature_payload(counts, kde_bandwidth=0.42)
+
+    hist = payload["histogram"]
+    assert hist["kde_bandwidth_source"] == "provided_value"
+    assert hist["kde_bandwidth"] == pytest.approx(0.42)
+    assert "kde_bandwidth_rule" not in hist
+
+    kde = payload["kde"]
+    assert kde["bandwidth"] == pytest.approx(0.42)
+    assert "bandwidth_rule" not in kde
+
+
+def test_feature_payload_records_bandwidth_rule_override():
+    counts = _dummy_counts()
+    payload = _build_feature_payload(counts, kde_bandwidth="silverman")
+
+    hist = payload["histogram"]
+    assert hist["kde_bandwidth_source"] == "provided_rule"
+    assert hist.get("kde_bandwidth_rule") == "silverman"
+
+    kde = payload["kde"]
+    assert kde.get("bandwidth_rule") == "silverman"
+    assert kde["bandwidth"] is None or kde["bandwidth"] > 0
+
+
 def test_ask_gpt_peak_count_accepts_missing_kde():
     counts = _dummy_counts()
     features = _build_feature_payload(counts)
@@ -156,6 +193,39 @@ def test_ask_gpt_peak_count_accepts_missing_kde():
     assert captured.get("kde_multiscale")
     meta = captured.get("meta", {})
     assert meta.get("consensus_peak_count") is not None
+
+
+def test_ask_gpt_peak_count_passes_bandwidth_metadata():
+    counts = _dummy_counts()
+    captured: dict | None = None
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            nonlocal captured
+            user = next(msg for msg in kwargs["messages"] if msg["role"] == "user")
+            captured = json.loads(user["content"])
+            response = {"peak_count": 1, "confidence": 0.5, "reason": "ok", "peak_indices": [0]}
+            message = SimpleNamespace(content=json.dumps(response))
+            choice = SimpleNamespace(message=message)
+            return SimpleNamespace(choices=[choice])
+
+    client = DummyClient()
+    result = ask_gpt_peak_count(
+        client,
+        model_name="dummy",
+        max_peaks=3,
+        counts_full=counts,
+        kde_bandwidth="scott",
+    )
+
+    assert result == 1
+    assert captured is not None
+    hist = captured.get("histogram", {})
+    assert hist.get("kde_bandwidth_source") == "provided_rule"
+    assert hist.get("kde_bandwidth_rule") == "scott"
 
 
 def test_peak_caps_allow_three_with_clear_triplet():
@@ -208,3 +278,97 @@ def test_peak_caps_allow_three_with_clear_triplet():
     consensus = heuristics.get("multiscale_consensus")
     assert isinstance(consensus, dict)
     assert consensus.get("recommended") == 3
+
+
+def test_gpt_peak_count_request_includes_image_payload():
+    counts = _dummy_counts()
+    image_bytes = _dummy_png()
+
+    captured_content = None
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            nonlocal captured_content
+            user_msg = next(msg for msg in kwargs["messages"] if msg["role"] == "user")
+            captured_content = user_msg["content"]
+            response = {
+                "peak_count": 2,
+                "confidence": 0.5,
+                "reason": "looks bimodal",
+                "peak_indices": [0, 1],
+            }
+            message = SimpleNamespace(content=json.dumps(response))
+            choice = SimpleNamespace(message=message)
+            return SimpleNamespace(choices=[choice])
+
+    client = DummyClient()
+
+    result = ask_gpt_peak_count(
+        client,
+        model_name="dummy",
+        max_peaks=4,
+        counts_full=counts,
+        distribution_image=image_bytes,
+    )
+
+    assert result == 2
+    assert isinstance(captured_content, list)
+    assert captured_content
+    assert captured_content[0]["type"] == "text"
+    image_parts = [part for part in captured_content if part.get("type") == "image_url"]
+    assert image_parts, "Expected image_url payload when distribution image provided"
+    image_url = image_parts[0].get("image_url", {}).get("url")
+    assert isinstance(image_url, str) and image_url.startswith("data:image/png;base64,")
+
+
+def test_distribution_preview_passes_bandwidth_keyword(monkeypatch):
+    import importlib
+    import os
+
+    os.environ.setdefault("STREAMLIT_SUPPRESS_RUN_CONTEXT_WARNING", "1")
+    app_module = importlib.import_module("app")
+
+    captured_kwargs: dict[str, object] = {}
+    captured_plot: dict[str, object] = {}
+
+    def fake_kde_peaks_valleys(values, n_peaks, prominence, **kwargs):
+        captured_kwargs.update(kwargs)
+        xs = np.linspace(-1.0, 1.0, 8)
+        ys = np.linspace(0.0, 1.0, 8)
+        return [0.0], [0.5], xs, ys
+
+    def fake_plot_png(stem, xs, ys, peaks, valleys):
+        captured_plot.update({
+            "stem": stem,
+            "xs": xs,
+            "ys": ys,
+            "peaks": list(peaks),
+            "valleys": list(valleys),
+        })
+        return b"preview"
+
+    monkeypatch.setattr(app_module, "kde_peaks_valleys", fake_kde_peaks_valleys)
+    monkeypatch.setattr(app_module, "_plot_png", fake_plot_png)
+
+    preview = app_module._gpt_distribution_preview(
+        "demo",
+        _dummy_counts(),
+        prominence=0.05,
+        bandwidth="scott",
+        min_width=None,
+        grid_size=128,
+        drop_fraction=0.1,
+        min_separation=0.5,
+        curvature=None,
+        turning_peak=False,
+        first_valley_mode="slope",
+    )
+
+    assert preview == b"preview"
+    assert captured_kwargs.get("bw") == "scott"
+    assert captured_plot["stem"] == "demo"
+    assert captured_plot["peaks"] == []
+    assert captured_plot["valleys"] == []

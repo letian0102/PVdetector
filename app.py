@@ -109,6 +109,8 @@ for key, default in {
     "cli_positions_cache": {},
     "cli_positions_pending": [],
     "cli_positions_fixed": set(),
+    "cli_group_mode": "none",
+    "cli_group_new_name": "",
     "mode_selector": "Counts CSV files",
     "mode_selector_target": None,
     # incremental‑run machinery
@@ -135,6 +137,70 @@ if pending_mode_selector is not None:
 def _keyify(label: str) -> str:
     """Sanitize labels so they are safe to use in Streamlit widget keys."""
     return re.sub(r"[^0-9A-Za-z_]+", "_", label)
+
+
+def _normalize_label(value) -> str | None:
+    """Return a stripped string label or ``None`` when empty."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        text = str(value).strip()
+
+    return text or None
+
+
+def _marker_lookup_variants(value) -> list[str]:
+    """Return string variants that can help match marker column names."""
+
+    if value is None:
+        return []
+
+    text = str(value)
+    variants: list[str] = []
+
+    def _add(option: str | None) -> None:
+        if option and option not in variants:
+            variants.append(option)
+
+    _add(text)
+    stripped = text.strip()
+    _add(stripped)
+
+    lowered = stripped.casefold()
+    _add(lowered)
+
+    squeezed = re.sub(r"[\s_-]+", "", lowered)
+    _add(squeezed)
+
+    canonical = re.sub(r"[^0-9a-z]+", "", lowered)
+    _add(canonical)
+
+    return [variant for variant in variants if variant]
+
+
+def _build_expr_marker_lookup(expr_df: pd.DataFrame) -> dict[str, object]:
+    """Return a mapping of marker-name variants to expression columns."""
+
+    lookup: dict[str, object] = {}
+    for column in expr_df.columns:
+        for key in _marker_lookup_variants(column):
+            if key not in lookup:
+                lookup[key] = column
+    return lookup
+
+
+def _resolve_expr_marker(marker: object, lookup: dict[str, object]) -> object | None:
+    """Resolve ``marker`` to an expression column using ``lookup`` variants."""
+
+    for key in _marker_lookup_variants(marker):
+        column = lookup.get(key)
+        if column is not None:
+            return column
+    return None
 
 
 def _summarize_sources(label: str, sources: list[str]) -> str | None:
@@ -1247,6 +1313,8 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
     sel_batch_clean = [None if pd.isna(b) else b for b in (sel_b or [])]
     sel_batch_set = set(sel_batch_clean)
 
+    marker_lookup = _build_expr_marker_lookup(expr_df)
+    missing_markers: set[str] = set()
     desired: dict[str, tuple[str, str, str | None]] = {}
     index_cache: dict[tuple[str, str | None], list[int]] = {}
 
@@ -1273,12 +1341,20 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
             if not cell_idx:
                 continue
             for m in sel_m:
+                marker_label = _normalize_label(m)
+                if not marker_label:
+                    continue
+                column_label = _resolve_expr_marker(marker_label, marker_lookup)
+                if column_label is None:
+                    missing_markers.add(marker_label)
+                    continue
+                resolved_marker = _normalize_label(column_label) or marker_label
                 stem = (
-                    f"{s}_{m}_raw_counts"
+                    f"{s}_{resolved_marker}_raw_counts"
                     if b is None
-                    else f"{s}_{b}_{m}_raw_counts"
+                    else f"{s}_{b}_{resolved_marker}_raw_counts"
                 )
-                desired[stem] = (s, m, b)
+                desired[stem] = (s, resolved_marker, b)
 
     # remove stale combinations
     st.session_state.generated_csvs = [
@@ -1337,7 +1413,11 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         indices = entry.get("cell_indices")
         if not indices:
             indices = _cached_indices(s, b)
-        vals = expr_df.loc[indices, m]
+        column_label = _resolve_expr_marker(m, marker_lookup)
+        if column_label is None:
+            missing_markers.add(m)
+            continue
+        vals = expr_df.loc[indices, column_label]
         entry["cell_indices"] = vals.index.tolist()
 
         cli_native = bool(st.session_state.get("cli_counts_native"))
@@ -1367,6 +1447,13 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         st.session_state.generated_csvs.append((stem, bio))
         st.session_state.generated_meta[stem] = entry
 
+    if missing_markers:
+        st.warning(
+            "Skipped markers missing from the expression matrix: "
+            + ", ".join(sorted(missing_markers))
+            + "."
+        )
+
 
 # ─────────────────────────── CLI import helpers ──────────────────────────────
 
@@ -1382,6 +1469,8 @@ def _clear_cli_import() -> None:
     st.session_state["cli_positions_cache"] = {}
     st.session_state["cli_positions_pending"] = []
     st.session_state["cli_positions_fixed"] = set()
+    st.session_state["cli_group_mode"] = "none"
+    st.session_state["cli_group_new_name"] = ""
 
 
 def _load_cli_import(
@@ -1477,6 +1566,8 @@ def _load_cli_import(
     st.session_state.cli_positions_cache = positions_cache
     st.session_state.cli_positions_pending = list(summary_lookup)
     st.session_state.cli_positions_fixed = set(summary_lookup)
+    st.session_state.cli_group_mode = "none"
+    st.session_state.cli_group_new_name = ""
 
     samples = [str(s) for s in summary_df.get("sample", []) if isinstance(s, str)]
     markers = [str(m) for m in summary_df.get("marker", []) if isinstance(m, str)]
@@ -1526,7 +1617,86 @@ def _load_cli_import(
     st.session_state.mode_selector_target = "Whole dataset"
 
 
-def _queue_cli_samples(stems: list[str]) -> None:
+def _cli_assign_groups(
+    subset: pd.DataFrame,
+    *,
+    mode: str,
+    new_group: str | None,
+) -> bool:
+    """Apply grouping rules for imported CLI samples.
+
+    Returns ``True`` when grouping was applied successfully. A ``False`` return
+    indicates that the operation should be aborted (e.g. missing information).
+    """
+
+    if not isinstance(subset, pd.DataFrame) or subset.empty:
+        return True
+
+    assignments = st.session_state.get("group_assignments")
+    if not isinstance(assignments, dict):
+        assignments = {}
+        st.session_state.group_assignments = assignments
+
+    overrides = st.session_state.get("group_overrides")
+    if not isinstance(overrides, dict):
+        overrides = {"Default": {}}
+        st.session_state.group_overrides = overrides
+
+    stems = [str(s) for s in subset.get("stem", []) if isinstance(s, str) and s]
+
+    if mode == "align_sample":
+        if "sample" not in subset.columns:
+            st.warning("The imported summary does not contain a 'sample' column to align by.")
+            return False
+
+        any_grouped = False
+        for stem, sample in zip(stems, subset["sample"].tolist()):
+            if not stem:
+                continue
+            if isinstance(sample, str):
+                group_name = sample.strip()
+            else:
+                group_name = ""
+            if not group_name:
+                continue
+            overrides.setdefault(group_name, {})
+            if assignments.get(stem) != group_name:
+                assignments[stem] = group_name
+                if stem in st.session_state.results:
+                    _mark_sample_dirty(stem, "group")
+            any_grouped = True
+
+        if not any_grouped:
+            st.warning("No sample names were available to build group assignments.")
+            return False
+
+        st.session_state.group_overrides = overrides
+        return True
+
+    if mode == "new_group":
+        clean = (new_group or "").strip()
+        if not clean:
+            st.warning("Enter a group name before grouping the selected samples together.")
+            return False
+
+        overrides.setdefault(clean, {})
+        for stem in stems:
+            if assignments.get(stem) != clean:
+                assignments[stem] = clean
+                if stem in st.session_state.results:
+                    _mark_sample_dirty(stem, "group")
+        st.session_state.group_overrides = overrides
+        return True
+
+    return True
+
+
+def _queue_cli_samples(
+    stems: list[str],
+    *,
+    group_mode: str,
+    new_group: str | None,
+) -> None:
     """Queue selected CLI samples for processing."""
 
     summary_df = st.session_state.get("cli_summary_df")
@@ -1546,7 +1716,21 @@ def _queue_cli_samples(stems: list[str]) -> None:
         st.warning("No matching rows were found in the imported summary.")
         return
 
-    markers = sorted({str(m) for m in subset.get("marker", []) if isinstance(m, str)})
+    marker_lookup = _build_expr_marker_lookup(expr_df)
+    marker_map: dict[str, object] = {}
+    missing_raw: list[str] = []
+    for raw_marker in subset.get("marker", []):
+        marker_label = _normalize_label(raw_marker)
+        if not marker_label:
+            continue
+        column_label = _resolve_expr_marker(marker_label, marker_lookup)
+        if column_label is None:
+            missing_raw.append(marker_label)
+            continue
+        resolved_marker = _normalize_label(column_label) or marker_label
+        marker_map.setdefault(resolved_marker, column_label)
+    markers = list(marker_map)
+    missing_markers = sorted(set(missing_raw))
     samples = sorted({str(s) for s in subset.get("sample", []) if isinstance(s, str)})
     if "batch" in subset:
         raw_batches = subset["batch"].tolist()
@@ -1554,9 +1738,28 @@ def _queue_cli_samples(stems: list[str]) -> None:
     else:
         batches = []
 
+    if missing_markers:
+        st.warning(
+            "The expression matrix is missing columns for the following markers: "
+            + ", ".join(missing_markers)
+            + ". They will be skipped."
+        )
+
+    if not markers:
+        st.error(
+            "None of the selected markers were found in the loaded expression matrix."
+        )
+        st.session_state.sel_markers = []
+        st.session_state.sel_samples = samples
+        st.session_state.sel_batches = batches
+        return
+
     st.session_state.sel_markers = markers
     st.session_state.sel_samples = samples
     st.session_state.sel_batches = batches
+
+    if not _cli_assign_groups(subset, mode=group_mode, new_group=new_group):
+        return
 
     if st.session_state.get("cli_counts_native"):
         pending_raw = st.session_state.get("cli_positions_pending") or []
@@ -1660,6 +1863,13 @@ def _render_cli_import_section() -> None:
         st.session_state.cli_filter_text = filter_text
 
         view_df = summary_df.copy()
+        all_options = list(
+            dict.fromkeys(
+                str(stem)
+                for stem in summary_df.get("stem", [])
+                if isinstance(stem, str) and stem
+            )
+        )
         if filter_text:
             def _match(col: str) -> pd.Series:
                 if col not in view_df.columns:
@@ -1693,8 +1903,50 @@ def _render_cli_import_section() -> None:
 
         st.session_state.cli_summary_selection = selection
 
-        if st.button("Load selected samples into detector", disabled=not selection):
-            _queue_cli_samples(selection)
+        group_choices = ["none", "align_sample", "new_group"]
+        group_labels = {
+            "none": "No automatic grouping",
+            "align_sample": "Align using sample column",
+            "new_group": "Group selected together",
+        }
+        default_mode = st.session_state.get("cli_group_mode", "none")
+        try:
+            default_index = group_choices.index(default_mode)
+        except ValueError:
+            default_index = 0
+
+        group_mode = st.radio(
+            "Post-import grouping",
+            group_choices,
+            index=default_index,
+            key="cli_group_mode",
+            format_func=lambda value: group_labels.get(value, value),
+            help="Automatically assign selected samples to groups after loading.",
+        )
+
+        new_group_name = st.text_input(
+            "Group name for selected samples",
+            value=st.session_state.get("cli_group_new_name", ""),
+            key="cli_group_new_name",
+            disabled=group_mode != "new_group",
+            help="Provide the group name used when grouping the selected samples together.",
+        )
+
+        buttons_col1, buttons_col2 = st.columns([1, 1])
+        with buttons_col1:
+            if st.button("Load selected samples", disabled=not selection):
+                _queue_cli_samples(
+                    selection,
+                    group_mode=group_mode,
+                    new_group=new_group_name,
+                )
+        with buttons_col2:
+            if st.button("Load all samples", disabled=view_df.empty):
+                _queue_cli_samples(
+                    all_options,
+                    group_mode=group_mode,
+                    new_group=new_group_name,
+                )
 # ───────────────────────── helper: (re)plot a dataset ───────────────────────
 
 def _plot_png_fixed(stem, xs, ys, peaks, valleys,

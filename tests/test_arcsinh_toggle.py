@@ -115,3 +115,33 @@ def test_cli_import_skips_retransforming_counts():
     assert np.allclose(arr, np.array([0.15, 0.32]))
     assert getattr(bio, "arcsinh")
 
+
+def test_marker_matching_handles_whitespace_and_case():
+    setup_state()
+    st.session_state.apply_arcsinh = False
+
+    expr_df = pd.DataFrame({" CD4-1 ": [2.0, 3.0]})
+    meta_df = pd.DataFrame({"sample": ["s1", "s1"]})
+
+    _sync_generated_counts(["CD4-1 ", " cd4_1"], ["s1"], expr_df, meta_df)
+
+    stems = [stem for stem, _ in st.session_state.generated_csvs]
+    assert stems == ["s1_CD4-1_raw_counts"]
+
+    _stem, bio = st.session_state.generated_csvs[0]
+    arr = read_bio(bio)
+    assert np.allclose(arr, np.array([2.0, 3.0]))
+
+
+def test_missing_markers_are_skipped():
+    setup_state()
+    st.session_state.apply_arcsinh = False
+
+    expr_df = pd.DataFrame({"CD3": [1.0, 2.0]})
+    meta_df = pd.DataFrame({"sample": ["s1", "s1"]})
+
+    _sync_generated_counts(["CD3", "CD4-1"], ["s1"], expr_df, meta_df)
+
+    stems = [stem for stem, _ in st.session_state.generated_csvs]
+    assert stems == ["s1_CD3_raw_counts"]
+

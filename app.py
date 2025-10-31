@@ -139,6 +139,70 @@ def _keyify(label: str) -> str:
     return re.sub(r"[^0-9A-Za-z_]+", "_", label)
 
 
+def _normalize_label(value) -> str | None:
+    """Return a stripped string label or ``None`` when empty."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        text = str(value).strip()
+
+    return text or None
+
+
+def _marker_lookup_variants(value) -> list[str]:
+    """Return string variants that can help match marker column names."""
+
+    if value is None:
+        return []
+
+    text = str(value)
+    variants: list[str] = []
+
+    def _add(option: str | None) -> None:
+        if option and option not in variants:
+            variants.append(option)
+
+    _add(text)
+    stripped = text.strip()
+    _add(stripped)
+
+    lowered = stripped.casefold()
+    _add(lowered)
+
+    squeezed = re.sub(r"[\s_-]+", "", lowered)
+    _add(squeezed)
+
+    canonical = re.sub(r"[^0-9a-z]+", "", lowered)
+    _add(canonical)
+
+    return [variant for variant in variants if variant]
+
+
+def _build_expr_marker_lookup(expr_df: pd.DataFrame) -> dict[str, object]:
+    """Return a mapping of marker-name variants to expression columns."""
+
+    lookup: dict[str, object] = {}
+    for column in expr_df.columns:
+        for key in _marker_lookup_variants(column):
+            if key not in lookup:
+                lookup[key] = column
+    return lookup
+
+
+def _resolve_expr_marker(marker: object, lookup: dict[str, object]) -> object | None:
+    """Resolve ``marker`` to an expression column using ``lookup`` variants."""
+
+    for key in _marker_lookup_variants(marker):
+        column = lookup.get(key)
+        if column is not None:
+            return column
+    return None
+
+
 def _summarize_sources(label: str, sources: list[str]) -> str | None:
     """Return a short human-readable summary for combined CSV parts."""
 
@@ -1249,7 +1313,7 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
     sel_batch_clean = [None if pd.isna(b) else b for b in (sel_b or [])]
     sel_batch_set = set(sel_batch_clean)
 
-    expr_marker_lookup = {str(col): col for col in expr_df.columns}
+    marker_lookup = _build_expr_marker_lookup(expr_df)
     missing_markers: set[str] = set()
     desired: dict[str, tuple[str, str, str | None]] = {}
     index_cache: dict[tuple[str, str | None], list[int]] = {}
@@ -1277,16 +1341,20 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
             if not cell_idx:
                 continue
             for m in sel_m:
-                column_label = expr_marker_lookup.get(m)
-                if column_label is None:
-                    missing_markers.add(m)
+                marker_label = _normalize_label(m)
+                if not marker_label:
                     continue
+                column_label = _resolve_expr_marker(marker_label, marker_lookup)
+                if column_label is None:
+                    missing_markers.add(marker_label)
+                    continue
+                resolved_marker = _normalize_label(column_label) or marker_label
                 stem = (
-                    f"{s}_{m}_raw_counts"
+                    f"{s}_{resolved_marker}_raw_counts"
                     if b is None
-                    else f"{s}_{b}_{m}_raw_counts"
+                    else f"{s}_{b}_{resolved_marker}_raw_counts"
                 )
-                desired[stem] = (s, m, b)
+                desired[stem] = (s, resolved_marker, b)
 
     # remove stale combinations
     st.session_state.generated_csvs = [
@@ -1345,7 +1413,7 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         indices = entry.get("cell_indices")
         if not indices:
             indices = _cached_indices(s, b)
-        column_label = expr_marker_lookup.get(m)
+        column_label = _resolve_expr_marker(m, marker_lookup)
         if column_label is None:
             missing_markers.add(m)
             continue
@@ -1648,10 +1716,21 @@ def _queue_cli_samples(
         st.warning("No matching rows were found in the imported summary.")
         return
 
-    expr_marker_lookup = {str(col): col for col in expr_df.columns}
-    markers = sorted({str(m) for m in subset.get("marker", []) if isinstance(m, str)})
-    missing_markers = sorted({m for m in markers if m not in expr_marker_lookup})
-    markers = [m for m in markers if m in expr_marker_lookup]
+    marker_lookup = _build_expr_marker_lookup(expr_df)
+    marker_map: dict[str, object] = {}
+    missing_raw: list[str] = []
+    for raw_marker in subset.get("marker", []):
+        marker_label = _normalize_label(raw_marker)
+        if not marker_label:
+            continue
+        column_label = _resolve_expr_marker(marker_label, marker_lookup)
+        if column_label is None:
+            missing_raw.append(marker_label)
+            continue
+        resolved_marker = _normalize_label(column_label) or marker_label
+        marker_map.setdefault(resolved_marker, column_label)
+    markers = list(marker_map)
+    missing_markers = sorted(set(missing_raw))
     samples = sorted({str(s) for s in subset.get("sample", []) if isinstance(s, str)})
     if "batch" in subset:
         raw_batches = subset["batch"].tolist()

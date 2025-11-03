@@ -1,7 +1,11 @@
 from __future__ import annotations
+
+import math
+
 import numpy as np
-from scipy.stats  import gaussian_kde
-from scipy.signal import find_peaks, fftconvolve
+from scipy.stats import gaussian_kde
+from scipy.signal import fftconvolve, find_peaks
+
 from .consistency import _enforce_valley_rule
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
@@ -13,11 +17,13 @@ import numpy as np
 
 # peak_valley/kde_detector.py  (only the helper changed)
 # ----------------------------------------------------------------------
-def _merge_close_peaks(xs: np.ndarray,
-                       ys: np.ndarray,
-                       p_idx: np.ndarray,
-                       min_x_sep: float = 0.4,
-                       min_valley_drop: float = 0.15) -> np.ndarray:
+def _merge_close_peaks(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    p_idx: np.ndarray,
+    min_x_sep: float = 0.4,
+    min_valley_drop: float = 0.15,
+) -> np.ndarray:
     """
     Collapse spurious twin-peaks produced by flat tops / wiggles.
 
@@ -55,6 +61,47 @@ def _merge_close_peaks(xs: np.ndarray,
         i = j
 
     return np.asarray(sorted(keep), dtype=int)
+
+
+def _peak_height(xs: np.ndarray, ys: np.ndarray, peak_x: float) -> float:
+    """Return KDE height at the closest grid point to ``peak_x``."""
+
+    if xs.size == 0 or ys.size == 0:
+        return float("nan")
+
+    idx = int(np.argmin(np.abs(xs - peak_x)))
+    idx = max(0, min(idx, ys.size - 1))
+    return float(ys[idx])
+
+
+def _enforce_min_separation(
+    peaks_x: list[float],
+    xs: np.ndarray,
+    ys: np.ndarray,
+    min_x_sep: float | None,
+) -> list[float]:
+    """Drop or swap peaks so every pair obeys ``min_x_sep`` spacing."""
+
+    if min_x_sep is None or len(peaks_x) < 2:
+        return sorted(peaks_x)
+
+    keep: list[float] = []
+    for px in sorted(peaks_x):
+        if not keep:
+            keep.append(px)
+            continue
+
+        prev = keep[-1]
+        if px - prev >= min_x_sep:
+            keep.append(px)
+            continue
+
+        prev_height = _peak_height(xs, ys, prev)
+        curr_height = _peak_height(xs, ys, px)
+        if curr_height > prev_height:
+            keep[-1] = px
+
+    return keep
 
 def _mostly_small_discrete(x: np.ndarray, threshold: float = 0.9) -> bool:
     """Heuristic to catch almost-discrete samples near zero (0..3).
@@ -419,7 +466,7 @@ def kde_peaks_valleys(
         # division above could yield ``0`` which would raise a ``ValueError``.
         # Clamp the value so that ``find_peaks`` always receives a valid
         # minimum distance.
-        distance = max(1, int(min_x_sep / grid_dx))
+        distance = max(1, int(math.ceil(min_x_sep / grid_dx)))
     kw = {"prominence": prominence}
     if min_width:
         kw["width"] = min_width
@@ -468,15 +515,7 @@ def kde_peaks_valleys(
     else:
         peaks_idx = np.sort(locs)
     
-    peaks_x = xs[peaks_idx].tolist()
-
-    if (min_x_sep is not None) and (len(peaks_x) > 1):   # 2 safe now
-        peaks_x.sort()
-        keep = [peaks_x[0]]
-        for px in peaks_x[1:]:
-            if px - keep[-1] >= min_x_sep:
-                keep.append(px)
-        peaks_x = keep
+    peaks_x = _enforce_min_separation(xs[peaks_idx].tolist(), xs, ys, min_x_sep)
 
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
 
@@ -494,7 +533,14 @@ def kde_peaks_valleys(
             if uniq(m, peaks_x):
                 peaks_x.append(m)
 
-        peaks_x = sorted(peaks_x)[:n_peaks]
+        if len(peaks_x) > n_peaks:
+            # retain tallest KDE peaks before enforcing separation
+            heights = [(_peak_height(xs, ys, px), px) for px in peaks_x]
+            heights.sort(reverse=True)
+            peaks_x = [px for _, px in heights[: n_peaks]]
+
+    # Enforce separation a final time after any fallback adjustments.
+    peaks_x = _enforce_min_separation(peaks_x, xs, ys, min_x_sep)
 
     # ---------- *re-derive* indices for every peak we now have ----------
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]

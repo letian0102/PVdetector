@@ -63,3 +63,20 @@ def test_requested_peaks_respect_min_separation():
 
     # Only one well-separated peak should remain despite the higher request.
     assert len(peaks) == 1
+
+
+def test_valleys_clear_gap_to_nearest_peak():
+    rng = np.random.default_rng(21)
+    data = rng.normal(0.0, 0.08, 800)
+
+    peaks, valleys, *_ = kde_peaks_valleys(
+        data,
+        n_peaks=2,
+        grid_size=4_000,
+        bw=0.05,
+        prominence=0.005,
+        min_x_sep=1.0,
+    )
+
+    assert len(peaks) == 1
+    assert all(abs(v - peaks[0]) >= 0.5 for v in valleys)

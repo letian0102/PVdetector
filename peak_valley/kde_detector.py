@@ -103,6 +103,30 @@ def _enforce_min_separation(
 
     return keep
 
+
+def _enforce_peak_valley_clearance(
+    peaks_x: list[float],
+    valleys_x: list[float],
+    min_x_sep: float | None,
+) -> list[float]:
+    """Drop valleys that sit too close to a neighbouring peak."""
+
+    if not peaks_x or not valleys_x:
+        return list(valleys_x)
+
+    if min_x_sep is None or not np.isfinite(min_x_sep) or min_x_sep <= 0:
+        return list(valleys_x)
+
+    # Keep valleys only when they clear at least half the minimum peak gap.
+    min_gap = 0.5 * float(min_x_sep)
+    cleared: list[float] = []
+    for vx in valleys_x:
+        nearest = min(peaks_x, key=lambda px: abs(px - vx))
+        if abs(nearest - vx) >= min_gap:
+            cleared.append(vx)
+
+    return cleared
+
 def _mostly_small_discrete(x: np.ndarray, threshold: float = 0.9) -> bool:
     """Heuristic to catch almost-discrete samples near zero (0..3).
 
@@ -542,6 +566,12 @@ def kde_peaks_valleys(
     # Enforce separation a final time after any fallback adjustments.
     peaks_x = _enforce_min_separation(peaks_x, xs, ys, min_x_sep)
 
+    if n_peaks is not None and peaks_x and len(peaks_x) < n_peaks:
+        # Fall back to a single dominant peak whenever we cannot honour the
+        # requested count under the minimum-separation constraint.
+        dominant = max(peaks_x, key=lambda px: _peak_height(xs, ys, px))
+        peaks_x = [dominant]
+
     # ---------- *re-derive* indices for every peak we now have ----------
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
 
@@ -577,6 +607,7 @@ def kde_peaks_valleys(
 
     # --- enforce valley/peak relationship ----------------------------------
     valleys_x = _enforce_valley_rule(peaks_x, valleys_x)
+    valleys_x = _enforce_peak_valley_clearance(peaks_x, valleys_x, min_x_sep)
     return np.round(peaks_x, 10).tolist(), valleys_x, xs, ys
 
 # ----------------------------------------------------------------------

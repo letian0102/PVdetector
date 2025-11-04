@@ -76,13 +76,13 @@ Key flags:
 | `--arcsinh-b` | Optional | `0.2` | `--arcsinh-b 0.2` | Scaling parameter `b`; provide a decimal float. |
 | `--arcsinh-c` | Optional | `0.0` | `--arcsinh-c -1.0` | Offset parameter `c`; may be negative. |
 | `--n-peaks` | Optional | Auto | `--n-peaks 2` | Fixed peak count or `auto`/`gpt` for automatic selection. |
-| `--max-peaks` | Optional | `3` | `--max-peaks 4` | Upper bound on peaks considered during automatic runs. |
+| `--max-peaks` | Optional | `2` | `--max-peaks 4` | Upper bound on peaks considered during automatic runs. |
 | `--bandwidth` | Optional | `scott` | `--bandwidth 0.6` | KDE bandwidth value, preset (`scott`, `silverman`), or `auto`/`gpt`. |
 | `--prominence` | Optional | `0.05` | `--prominence 0.08` | Minimum prominence (`auto`/`gpt` allowed). |
 | `--min-width` | Optional | `0` | `--min-width 30` | Minimum sample count per detected peak. |
 | `--curvature` | Optional | `0.0001` | `--curvature 0.0005` | Curvature threshold for peak detection. |
 | `--turning-points` | Optional | Off | `--turning-points` | Flag to treat concave-down turning points as peaks. |
-| `--min-separation` | Optional | `0.7` | `--min-separation 0.5` | Minimum distance between peaks in marker units. |
+| `--min-separation` | Optional | `0.5` | `--min-separation 0.5` | Minimum distance between peaks in marker units. |
 | `--grid-size` | Optional | `20000` | `--grid-size 40000` | Number of KDE evaluation points (minimum 4000). |
 | `--valley-drop` | Optional | `10.0` | `--valley-drop 12.5` | Percent drop required between peaks. |
 | `--first-valley` | Optional | `slope` | `--first-valley drop` | Strategy for the first valley: `slope` or `drop`. |
@@ -93,7 +93,7 @@ Key flags:
 | `--alignment-target` | Optional | Cohort medians | `--alignment-target -1.5,0.0,1.5` | Comma-separated landmark targets; defaults to cohort medians. |
 | `--workers` | Optional | `1` | `--workers 4` | Number of parallel worker threads. |
 | `--override-file` | Optional | _None_ | `--override-file overrides.json` | JSON overrides for global/marker/sample/stem settings. |
-| `--gpt-model` | Optional | Auto (`gpt-4o-mini`) | `--gpt-model gpt-4o-mini` | Override GPT model name when using automatic suggestions. |
+| `--gpt-model` | Optional | Auto (`o4-mini`) | `--gpt-model o4-mini` | Override GPT model name when using automatic suggestions. |
 | `--api-key` | Optional | Environment variable | `--api-key sk-...` | OpenAI API key; overrides the `OPENAI_API_KEY` environment variable. |
 | `--export-plots` | Optional | Off | `--export-plots` | Emit per-sample ridge PNGs inside a `plots/` folder. |
 

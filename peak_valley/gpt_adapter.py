@@ -24,6 +24,13 @@ MIN_HISTOGRAM_BINS = 80
 BASELINE_BINS = 64
 SUMMARY_BINS = 48
 
+_SMOOTHING_KERNEL_BASE = np.array([1.0, 4.0, 6.0, 4.0, 1.0], dtype=float)
+_SMOOTHING_KERNEL = _SMOOTHING_KERNEL_BASE / _SMOOTHING_KERNEL_BASE.sum()
+_SMOOTHING_OFFSETS = np.arange(-(_SMOOTHING_KERNEL.size // 2), _SMOOTHING_KERNEL.size // 2 + 1)
+_SMOOTHING_SIGMA_BINS = float(
+    math.sqrt(np.sum(_SMOOTHING_KERNEL * (_SMOOTHING_OFFSETS.astype(float) ** 2)))
+)
+
 # keep a simple run-time cache; survives a single Streamlit run
 _cache: dict[tuple, float | int | str] = {}  # (tag, sig[, extra]) → value
 
@@ -429,6 +436,7 @@ def _multiscale_kde_profiles(
 def _summarise_peak_votes(
     peaks_out: list[dict[str, Any]],
     multiscale: Optional[dict[str, Any]],
+    smoothed_summary: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Aggregate votes from histogram candidates and multiscale KDE."""
 
@@ -483,11 +491,20 @@ def _summarise_peak_votes(
                 },
             )
 
+    smoothed_peak_count = None
+    if isinstance(smoothed_summary, dict):
+        try:
+            smoothed_peak_count = int(smoothed_summary.get("peak_count"))
+        except (TypeError, ValueError):
+            smoothed_peak_count = None
+
     if peaks_out:
         avg_prom = float(
             np.mean([p.get("relative_prominence") or 0.0 for p in peaks_out])
         ) if peaks_out else 0.0
         candidate_weight = max(0.25, min(1.1, 0.45 + avg_prom))
+        if smoothed_peak_count == 1 and len(peaks_out) > 1:
+            candidate_weight *= 0.6
         add_vote(
             "histogram_candidates",
             len(peaks_out),
@@ -671,11 +688,304 @@ def _second_derivative_summary(smoothed: np.ndarray) -> dict[str, Any]:
 
 
 def _smooth_histogram(counts: np.ndarray) -> np.ndarray:
-    """Apply a short [1,4,6,4,1] smoothing kernel."""
+    """Apply the fixed smoothing kernel used for histogram summaries."""
 
-    kernel = np.array([1.0, 4.0, 6.0, 4.0, 1.0], dtype=float)
-    kernel /= kernel.sum()
-    return np.convolve(counts.astype(float), kernel, mode="same")
+    return np.convolve(counts.astype(float), _SMOOTHING_KERNEL, mode="same")
+
+
+def _summarise_smoothed_profile(
+    bin_centers: np.ndarray,
+    smoothed: np.ndarray,
+    bin_width: Optional[float],
+) -> dict[str, Any]:
+    """Return a compact summary of the smoothed histogram profile."""
+
+    if smoothed.size == 0 or bin_centers.size == 0:
+        return {}
+
+    max_height = float(np.max(smoothed)) if smoothed.size else 0.0
+    sigma_bins = float(round(_SMOOTHING_SIGMA_BINS, 3))
+    bandwidth = None
+    if bin_width is not None and np.isfinite(bin_width):
+        try:
+            bandwidth = float(round(float(bin_width) * _SMOOTHING_SIGMA_BINS, 6))
+        except Exception:
+            bandwidth = None
+
+    kernel_info: dict[str, Any] = {
+        "weights": [float(round(w, 6)) for w in _SMOOTHING_KERNEL.tolist()],
+        "width_bins": int(_SMOOTHING_KERNEL.size),
+        "sigma_bins": sigma_bins,
+    }
+    if bandwidth is not None:
+        kernel_info["bandwidth_estimate"] = bandwidth
+
+    peaks: list[dict[str, Any]] = []
+    if max_height > 0:
+        prominence = max_height * 0.02
+        idx, props = find_peaks(smoothed, prominence=prominence, width=1)
+        prominences = props.get("prominences", np.zeros(idx.size)) if props else np.zeros(idx.size)
+        widths = props.get("widths", np.zeros(idx.size)) if props else np.zeros(idx.size)
+        max_prominence = float(np.max(prominences)) if prominences.size else 0.0
+        for i, peak_idx in enumerate(idx):
+            if peak_idx >= bin_centers.size:
+                continue
+            height = float(smoothed[peak_idx])
+            entry: dict[str, Any] = {
+                "x": float(round(float(bin_centers[peak_idx]), 4)),
+                "height": float(round(height, 4)),
+                "relative_height": float(round(height / max_height, 4)),
+                "prominence": float(round(float(prominences[i]), 4)) if prominences.size else 0.0,
+            }
+            if max_prominence > 0 and prominences.size:
+                entry["relative_prominence"] = float(
+                    round(float(prominences[i]) / max_prominence, 4)
+                )
+            width_bins = float(widths[i]) if widths.size > i else None
+            if width_bins is not None and np.isfinite(width_bins) and width_bins > 0:
+                entry["width_bins"] = float(round(width_bins, 3))
+                if bin_width is not None and np.isfinite(bin_width):
+                    entry["width"] = float(round(width_bins * float(bin_width), 6))
+            peaks.append(entry)
+
+    if peaks:
+        positions = ", ".join(f"{p['x']:.2f}" for p in peaks)
+        summary_text = (
+            f"Smoothed histogram using 5-bin near-Gaussian kernel (σ≈{sigma_bins:.2f} bins"
+        )
+        if bandwidth is not None:
+            summary_text += f", bandwidth≈{bandwidth:.2f}"
+        summary_text += f") shows {len(peaks)} dominant lobe"
+        summary_text += "s" if len(peaks) != 1 else ""
+        summary_text += f" at {positions}."
+        rels = [p.get("relative_height") for p in peaks if isinstance(p.get("relative_height"), float)]
+        if rels:
+            rel_text = ", ".join(f"{val * 100:.0f}%" for val in rels)
+            summary_text += f" Relative heights vs. max: {rel_text}."
+    else:
+        summary_text = (
+            f"Smoothed histogram using 5-bin near-Gaussian kernel (σ≈{sigma_bins:.2f} bins"
+        )
+        if bandwidth is not None:
+            summary_text += f", bandwidth≈{bandwidth:.2f}"
+        summary_text += ") shows no pronounced peaks (flat profile)."
+
+    return {
+        "kernel": kernel_info,
+        "peak_count": int(len(peaks)),
+        "peaks": peaks,
+        "summary": summary_text,
+    }
+
+
+def _detect_leading_edge_skittering(
+    peaks: list[dict[str, Any]],
+    histogram_payload: dict[str, Any],
+    smoothed_summary: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Detect tightly clustered low-prominence peaks at the distribution onset.
+
+    Some markers exhibit small oscillations near the minimum values that disappear after
+    smoothing. When the smoothed profile reports a single dominant lobe, these leading
+    bumps should generally be treated as a single mode. This helper captures a compact
+    description of that situation so the GPT prompt can call it out explicitly.
+    """
+
+    if not peaks or not isinstance(smoothed_summary, dict):
+        return None
+
+    smoothed_count = smoothed_summary.get("peak_count")
+    try:
+        smoothed_count_int = int(smoothed_count) if smoothed_count is not None else None
+    except (TypeError, ValueError):
+        smoothed_count_int = None
+
+    if smoothed_count_int is None or smoothed_count_int > 1:
+        return None
+
+    kernel_info = smoothed_summary.get("kernel")
+    sigma_bins = None
+    if isinstance(kernel_info, dict):
+        try:
+            sigma_bins = float(kernel_info.get("sigma_bins"))
+        except (TypeError, ValueError):
+            sigma_bins = None
+    if sigma_bins is None or not np.isfinite(sigma_bins) or sigma_bins <= 0:
+        sigma_bins = float(_SMOOTHING_SIGMA_BINS)
+
+    bin_width = histogram_payload.get("bin_width") if histogram_payload else None
+    try:
+        bin_width_val = float(bin_width) if bin_width is not None else None
+    except (TypeError, ValueError):
+        bin_width_val = None
+    if bin_width_val is not None and (not np.isfinite(bin_width_val) or bin_width_val <= 0):
+        bin_width_val = None
+
+    usable_peaks: list[dict[str, Any]] = []
+    for peak in peaks:
+        if not isinstance(peak, dict):
+            continue
+        x_val = peak.get("x")
+        try:
+            x_float = float(x_val)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(x_float):
+            continue
+        entry = dict(peak)
+        entry["x"] = x_float
+        usable_peaks.append(entry)
+
+    if len(usable_peaks) < 2:
+        return None
+
+    usable_peaks.sort(key=lambda item: item["x"])
+    leading = usable_peaks[0]
+    first_x = leading["x"]
+
+    if bin_width_val is not None:
+        jitter_span = bin_width_val * max(3.0, sigma_bins * 0.8)
+    else:
+        jitter_span = None
+
+    cluster: list[dict[str, Any]] = []
+    for peak in usable_peaks:
+        delta = float(peak["x"] - first_x)
+        if jitter_span is None or delta <= jitter_span:
+            cluster.append(peak)
+        else:
+            break
+
+    if len(cluster) < 2:
+        return None
+
+    span = float(cluster[-1]["x"] - cluster[0]["x"]) if cluster else 0.0
+
+    bandwidth_est = None
+    if isinstance(kernel_info, dict) and kernel_info.get("bandwidth_estimate") is not None:
+        try:
+            bandwidth_est = float(kernel_info.get("bandwidth_estimate"))
+        except (TypeError, ValueError):
+            bandwidth_est = None
+    if bandwidth_est is not None and (not np.isfinite(bandwidth_est) or bandwidth_est <= 0):
+        bandwidth_est = None
+
+    if bandwidth_est is not None and span > bandwidth_est * 1.8:
+        return None
+
+    rel_proms = []
+    for peak in cluster:
+        val = peak.get("relative_prominence")
+        try:
+            rel_proms.append(float(val) if val is not None else 0.0)
+        except (TypeError, ValueError):
+            rel_proms.append(0.0)
+    max_rel_prom = max(rel_proms) if rel_proms else 0.0
+    if max_rel_prom >= 0.65:
+        return None
+
+    area_fraction = 0.0
+    for peak in cluster:
+        area_val = peak.get("area_fraction")
+        try:
+            area_fraction += max(0.0, float(area_val)) if area_val is not None else 0.0
+        except (TypeError, ValueError):
+            continue
+
+    if area_fraction >= 0.45:
+        return None
+
+    message_parts = [
+        f"{len(cluster)} raw histogram bumps lie within Δx≈{span:.4g}",
+    ]
+    if area_fraction > 0:
+        message_parts.append(f"covering ~{area_fraction * 100:.1f}% of counts")
+    message_parts.append("and each has low prominence; treat them as one leading lobe.")
+    if bandwidth_est is not None:
+        message_parts.append(f"Smoothing bandwidth≈{bandwidth_est:.4g} merges them explicitly.")
+    elif bin_width_val is not None:
+        message_parts.append(
+            f"Kernel smoothing spans ~{sigma_bins:.2f} bins (bin width≈{bin_width_val:.4g})."
+        )
+
+    details: dict[str, Any] = {
+        "cluster_size": int(len(cluster)),
+        "span": float(round(span, 6)),
+        "max_relative_prominence": float(round(max_rel_prom, 4)),
+        "message": " ".join(message_parts),
+    }
+    if area_fraction > 0:
+        details["cluster_area_fraction"] = float(round(area_fraction, 6))
+    if jitter_span is not None:
+        details["jitter_span_estimate"] = float(round(jitter_span, 6))
+    if bandwidth_est is not None:
+        details["bandwidth_estimate"] = float(round(bandwidth_est, 6))
+
+    return details
+
+
+def _summarise_kde_profile(kde_section: dict[str, Any]) -> dict[str, Any]:
+    """Summarise the KDE trace with peak locations for GPT consumption."""
+
+    xs = np.asarray(kde_section.get("x", []), dtype=float)
+    density = np.asarray(kde_section.get("density", []), dtype=float)
+    if xs.size < 3 or density.size != xs.size:
+        return {}
+
+    max_density = float(np.max(density)) if density.size else 0.0
+    if max_density <= 0:
+        return {}
+
+    prominence = max_density * 0.02
+    idx, props = find_peaks(density, prominence=prominence, width=1)
+    prominences = props.get("prominences", np.zeros(idx.size)) if props else np.zeros(idx.size)
+    widths = props.get("widths", np.zeros(idx.size)) if props else np.zeros(idx.size)
+    max_prominence = float(np.max(prominences)) if prominences.size else 0.0
+    peaks: list[dict[str, Any]] = []
+    for i, peak_idx in enumerate(idx):
+        if peak_idx >= xs.size:
+            continue
+        height = float(density[peak_idx])
+        entry: dict[str, Any] = {
+            "x": float(round(float(xs[peak_idx]), 4)),
+            "density": float(round(height, 6)),
+            "relative_height": float(round(height / max_density, 4)),
+            "prominence": float(round(float(prominences[i]), 6)) if prominences.size else 0.0,
+        }
+        if max_prominence > 0 and prominences.size:
+            entry["relative_prominence"] = float(
+                round(float(prominences[i]) / max_prominence, 4)
+            )
+        width = float(widths[i]) if widths.size > i else None
+        if width is not None and np.isfinite(width) and width > 0:
+            entry["width_fraction"] = float(round(width / xs.size, 4))
+        peaks.append(entry)
+
+    bandwidth = kde_section.get("bandwidth")
+    if isinstance(bandwidth, (int, float, np.floating)) and np.isfinite(bandwidth):
+        bandwidth_val = float(bandwidth)
+    else:
+        bandwidth_val = None
+
+    if peaks:
+        positions = ", ".join(f"{p['x']:.2f}" for p in peaks)
+        summary_text = "KDE"
+        if bandwidth_val is not None:
+            summary_text += f" (bandwidth≈{bandwidth_val:.2f})"
+        summary_text += f" indicates {len(peaks)} mode"
+        summary_text += "s" if len(peaks) != 1 else ""
+        summary_text += f" at {positions}."
+    else:
+        summary_text = "KDE profile is smooth without clear secondary modes."
+
+    result: dict[str, Any] = {
+        "peak_count": int(len(peaks)),
+        "peaks": peaks,
+        "summary": summary_text,
+    }
+    if bandwidth_val is not None:
+        result["bandwidth"] = bandwidth_val
+    return result
 
 
 def _extract_peak_candidates(
@@ -1498,13 +1808,15 @@ def _build_feature_payload(
         }
         peaks_out.append(entry)
 
+    bin_width_value = float(round(edges[1] - edges[0], 5)) if bins > 1 else None
+
     histogram_payload: dict[str, Any] = {
         "bin_count": int(bins),
         "bin_edges": [float(round(e, 4)) for e in edges.tolist()],
         "counts": [int(c) for c in counts.tolist()],
         "kde_bandwidth": kde_section.get("bandwidth") if kde_section else None,
         "kde_scale": kde_section.get("scale") if kde_section else None,
-        "bin_width": float(round(edges[1] - edges[0], 5)) if bins > 1 else None,
+        "bin_width": bin_width_value,
         "adaptive": adaptive_info,
         "run_length_counts": _run_length_encode(counts),
         "smoothed_counts": [float(round(v, 4)) for v in smoothed.tolist()],
@@ -1682,9 +1994,20 @@ def _build_feature_payload(
             profile_samples.append(entry)
         histogram_payload["profile_samples"] = profile_samples
 
+    smoothed_summary = _summarise_smoothed_profile(bin_centers, smoothed, bin_width_value)
+    if smoothed_summary:
+        histogram_payload["smoothed_profile_summary"] = smoothed_summary
+
+    skittering_hint = _detect_leading_edge_skittering(peaks_out, histogram_payload, smoothed_summary)
+    if skittering_hint:
+        histogram_payload["leading_edge_cluster"] = skittering_hint
+
     payload["histogram"] = histogram_payload
 
     if kde_section:
+        kde_summary = _summarise_kde_profile(kde_section)
+        if kde_summary:
+            kde_section["profile_summary"] = kde_summary
         payload["kde"] = kde_section
 
     if multiscale_section:
@@ -1744,7 +2067,11 @@ def _build_feature_payload(
         "gmm": gmm_stats,
     }
 
-    payload["vote_summary"] = _summarise_peak_votes(peaks_out, multiscale_section)
+    payload["vote_summary"] = _summarise_peak_votes(
+        peaks_out,
+        multiscale_section,
+        smoothed_summary,
+    )
 
     return payload
 
@@ -1935,6 +2262,60 @@ def ask_gpt_peak_count(
         if "run_fraction" in consensus_meta:
             payload["meta"]["consensus_run_fraction"] = consensus_meta.get("run_fraction")
 
+    histogram_section = feature_payload.get("histogram") if isinstance(feature_payload, dict) else None
+    if isinstance(histogram_section, dict):
+        smooth_summary = histogram_section.get("smoothed_profile_summary")
+        if isinstance(smooth_summary, dict):
+            summary_text = smooth_summary.get("summary")
+            if isinstance(summary_text, str) and summary_text:
+                payload["meta"]["smoothed_summary"] = summary_text
+            kernel_info = smooth_summary.get("kernel")
+            if isinstance(kernel_info, dict):
+                payload["meta"]["smoothing_kernel"] = kernel_info
+                sigma_bins = kernel_info.get("sigma_bins")
+                if sigma_bins is not None:
+                    payload["meta"]["smoothing_sigma_bins"] = sigma_bins
+                bandwidth_estimate = kernel_info.get("bandwidth_estimate")
+                if bandwidth_estimate is not None:
+                    payload["meta"]["smoothing_bandwidth"] = bandwidth_estimate
+            peak_overview = smooth_summary.get("peaks")
+            if isinstance(peak_overview, list) and peak_overview:
+                simplified = []
+                for peak in peak_overview:
+                    if not isinstance(peak, dict):
+                        continue
+                    simplified.append({
+                        "x": peak.get("x"),
+                        "relative_height": peak.get("relative_height"),
+                        "relative_prominence": peak.get("relative_prominence"),
+                    })
+                if simplified:
+                    payload["meta"]["smoothed_peak_overview"] = simplified
+            peak_count_value = smooth_summary.get("peak_count")
+            if peak_count_value is not None:
+                payload["meta"]["smoothed_peak_count"] = peak_count_value
+        leading_cluster = histogram_section.get("leading_edge_cluster")
+        if isinstance(leading_cluster, dict) and leading_cluster:
+            payload["meta"]["leading_edge_cluster"] = leading_cluster
+            note = leading_cluster.get("message")
+            if isinstance(note, str) and note:
+                payload["meta"]["leading_edge_note"] = note
+
+    kde_section = feature_payload.get("kde") if isinstance(feature_payload, dict) else None
+    if isinstance(kde_section, dict):
+        kde_summary = kde_section.get("profile_summary")
+        if isinstance(kde_summary, dict):
+            summary_text = kde_summary.get("summary")
+            if isinstance(summary_text, str) and summary_text:
+                payload["meta"]["kde_summary"] = summary_text
+            if kde_summary.get("bandwidth") is not None:
+                payload["meta"]["kde_bandwidth_report"] = kde_summary.get("bandwidth")
+            kde_peaks = kde_summary.get("peaks")
+            if isinstance(kde_peaks, list) and kde_peaks:
+                payload["meta"]["kde_peak_positions"] = [
+                    peak.get("x") if isinstance(peak, dict) else None for peak in kde_peaks
+                ]
+
     payload["priors"] = (priors.copy() if isinstance(priors, dict) else _default_priors(marker_name))
     payload["heuristics"] = heuristic_info
 
@@ -1943,8 +2324,10 @@ def ask_gpt_peak_count(
         "(modes) using only the provided features. Prefer fewer peaks unless strong evidence "
         "suggests more, while respecting the user-specified maximum. Histogram bins and KDE traces "
         "summarise the distribution; prefer the smoother KDE profile and its bandwidth hints when judging "
-        "shoulders versus true peaks. Tiny shoulders are not peaks unless prominence and width thresholds "
-        "are met. Output only the JSON object described by the schema."
+        "shoulders versus true peaks. Meta fields include smoothing_bandwidth / smoothing_sigma_bins and "
+        "optional leading_edge notes describing skittering that the smoothed profile merges. Treat such "
+        "clusters as a single lobe unless other evidence contradicts it. Tiny shoulders are not peaks "
+        "unless prominence and width thresholds are met. Output only the JSON object described by the schema."
     )
 
     response_format = {

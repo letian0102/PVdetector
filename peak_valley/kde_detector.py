@@ -104,28 +104,140 @@ def _enforce_min_separation(
     return keep
 
 
-def _enforce_peak_valley_clearance(
-    peaks_x: list[float],
-    valleys_x: list[float],
+def _resolve_peak_valley_conflicts(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    peaks_idx: list[int],
+    *,
     min_x_sep: float | None,
-) -> list[float]:
-    """Drop valleys that sit too close to a neighbouring peak."""
+    drop_frac: float,
+    first_valley: str,
+) -> tuple[list[int], list[float]]:
+    """Ensure valleys clear neighbouring peaks, pruning peaks when needed."""
 
-    if not peaks_x or not valleys_x:
-        return list(valleys_x)
+    peaks_idx = sorted(set(int(i) for i in peaks_idx))
+    if not peaks_idx:
+        return [], []
 
+    grid_dx = float(xs[1] - xs[0]) if xs.size > 1 else 1.0
+    if not np.isfinite(grid_dx) or grid_dx <= 0:
+        grid_dx = 1.0
+
+    min_gap: float | None
     if min_x_sep is None or not np.isfinite(min_x_sep) or min_x_sep <= 0:
-        return list(valleys_x)
+        min_gap = None
+    else:
+        min_gap = 0.5 * float(min_x_sep)
 
-    # Keep valleys only when they clear at least half the minimum peak gap.
-    min_gap = 0.5 * float(min_x_sep)
-    cleared: list[float] = []
-    for vx in valleys_x:
-        nearest = min(peaks_x, key=lambda px: abs(px - vx))
-        if abs(nearest - vx) >= min_gap:
-            cleared.append(vx)
+    def _single_peak_valley(idx: int) -> float:
+        if first_valley == "drop":
+            val = _first_valley_drop(xs, ys, idx, drop_frac)
+        else:
+            val = _first_valley_slope(
+                xs, ys, idx, None, min_sep=min_x_sep, drop_frac=drop_frac
+            )
+            if val is None:
+                val = _first_valley_drop(xs, ys, idx, drop_frac)
 
-    return cleared
+        if val is None:
+            # Fallback: step one grid cell to the right.
+            if idx + 1 < xs.size:
+                val = float(xs[idx + 1])
+            else:
+                val = float(xs[idx]) + grid_dx
+
+        if min_gap is not None:
+            base = float(xs[idx])
+            if abs(val - base) < min_gap:
+                val = base + min_gap
+        return float(val)
+
+    def _pair_valley(left: int, right: int, prefer_first: bool) -> float:
+        if prefer_first and first_valley != "drop":
+            val = _first_valley_slope(
+                xs, ys, left, right, min_sep=min_x_sep, drop_frac=drop_frac
+            )
+            if val is None:
+                val = _valley_between(xs, ys, left, right, drop_frac)
+        elif prefer_first and first_valley == "drop":
+            val = _valley_between(xs, ys, left, right, drop_frac)
+        else:
+            val = _valley_between(xs, ys, left, right, drop_frac)
+        return float(val)
+
+    def _recompute_valleys(current: list[int]) -> list[float]:
+        if len(current) > 1:
+            vals: list[float] = []
+            left, right = current[0], current[1]
+            vals.append(_pair_valley(left, right, True))
+            for l_idx, r_idx in zip(current[1:-1], current[2:]):
+                vals.append(_pair_valley(l_idx, r_idx, False))
+            return vals
+        return [_single_peak_valley(current[0])]
+
+    valleys = _recompute_valleys(peaks_idx)
+
+    if min_gap is None:
+        return peaks_idx, valleys
+
+    while True:
+        remove_idx: int | None = None
+        recalc_idx: int | None = None
+
+        for i, vx in enumerate(valleys):
+            left_idx = peaks_idx[min(i, len(peaks_idx) - 1)]
+            left_x = float(xs[left_idx])
+
+            if abs(vx - left_x) < min_gap:
+                recalc_idx = i
+                break
+
+            right_idx = peaks_idx[i + 1] if i + 1 < len(peaks_idx) else None
+            if right_idx is not None:
+                right_x = float(xs[right_idx])
+                if abs(right_x - vx) < min_gap:
+                    remove_idx = i + 1
+                    break
+
+        if remove_idx is not None:
+            if remove_idx < len(peaks_idx):
+                del peaks_idx[remove_idx]
+            if not peaks_idx:
+                break
+            valleys = _recompute_valleys(peaks_idx)
+            continue
+
+        if recalc_idx is not None:
+            left_idx = peaks_idx[min(recalc_idx, len(peaks_idx) - 1)]
+            right_idx = peaks_idx[recalc_idx + 1] if recalc_idx + 1 < len(peaks_idx) else None
+
+            if right_idx is None:
+                valleys[recalc_idx] = _single_peak_valley(left_idx)
+            else:
+                candidate = _valley_between(xs, ys, left_idx, right_idx, drop_frac)
+                left_x = float(xs[left_idx])
+                right_x = float(xs[right_idx])
+
+                if (
+                    abs(candidate - left_x) < min_gap
+                    or abs(right_x - candidate) < min_gap
+                ):
+                    lo = left_x + min_gap
+                    hi = right_x - min_gap
+                    if hi <= lo:
+                        candidate = (left_x + right_x) / 2.0
+                    else:
+                        candidate = 0.5 * (lo + hi)
+
+                valleys[recalc_idx] = float(candidate)
+            continue
+
+        break
+
+    if not valleys and peaks_idx:
+        valleys = _recompute_valleys(peaks_idx)
+
+    return peaks_idx, valleys
 
 def _mostly_small_discrete(x: np.ndarray, threshold: float = 0.9) -> bool:
     """Heuristic to catch almost-discrete samples near zero (0..3).
@@ -606,9 +718,30 @@ def kde_peaks_valleys(
             valleys_x.append(val)
 
     # --- enforce valley/peak relationship ----------------------------------
+    peaks_idx, valleys_x = _resolve_peak_valley_conflicts(
+        xs,
+        ys,
+        peaks_idx,
+        min_x_sep=min_x_sep,
+        drop_frac=drop_frac,
+        first_valley=first_valley,
+    )
+    peaks_x = [float(xs[idx]) for idx in peaks_idx]
+    peaks_x = np.round(peaks_x, 10).tolist()
     valleys_x = _enforce_valley_rule(peaks_x, valleys_x)
-    valleys_x = _enforce_peak_valley_clearance(peaks_x, valleys_x, min_x_sep)
-    return np.round(peaks_x, 10).tolist(), valleys_x, xs, ys
+    if not valleys_x and peaks_x:
+        # Guarantee at least one valley for single-peak outputs.
+        idx0 = int(np.argmin(np.abs(xs - peaks_x[0])))
+        valleys_x = [_resolve_peak_valley_conflicts(
+            xs,
+            ys,
+            [idx0],
+            min_x_sep=min_x_sep,
+            drop_frac=drop_frac,
+            first_valley=first_valley,
+        )[1][0]]
+
+    return peaks_x, valleys_x, xs, ys
 
 # ----------------------------------------------------------------------
 def quick_peak_estimate(

@@ -4147,12 +4147,37 @@ if st.session_state.results:
                 pk_align = f(np.asarray(st.session_state.results[stem]["peaks"]))
                 vl_align = f(np.asarray(st.session_state.results[stem]["valleys"]))
 
+                try:
+                    sample_xmin = float(np.nanmin(xs))
+                    sample_xmax = float(np.nanmax(xs))
+                except ValueError:
+                    sample_xmin, sample_xmax = all_xmin, all_xmax
+
+                if not np.isfinite(sample_xmin) or not np.isfinite(sample_xmax):
+                    sample_xmin, sample_xmax = all_xmin, all_xmax
+
+                if sample_xmax == sample_xmin:
+                    span = abs(sample_xmin) if sample_xmin != 0 else 1.0
+                    pad_local = 0.05 * span
+                else:
+                    pad_local = 0.05 * (sample_xmax - sample_xmin)
+
+                x_limits = (sample_xmin - pad_local, sample_xmax + pad_local)
+
+                try:
+                    sample_ymax = float(np.nanmax(ys))
+                except ValueError:
+                    sample_ymax = all_ymax
+
+                if not np.isfinite(sample_ymax) or sample_ymax <= 0:
+                    sample_ymax = all_ymax if np.isfinite(all_ymax) and all_ymax > 0 else 1.0
+
                 png = _plot_png_fixed(
                     f"{stem} (aligned)", xs, ys,
                     pk_align[~np.isnan(pk_align)],
                     vl_align[~np.isnan(vl_align)],
-                    (all_xmin - pad, all_xmax + pad),
-                    all_ymax
+                    x_limits,
+                    sample_ymax,
                 )
 
                 st.session_state.aligned_fig_pngs[f"{stem}_aligned.png"] = png

@@ -1951,12 +1951,18 @@ def _render_cli_import_section() -> None:
 
 def _plot_png_fixed(stem, xs, ys, peaks, valleys,
                     xlim, ylim) -> bytes:
-    """Same as _plot_png but with shared axes limits."""
+    """Same as _plot_png but with externally supplied axes limits."""
     fig, ax = plt.subplots(figsize=(5, 2.5), dpi=150)
     ax.plot(xs, ys, color="orange")
     ax.fill_between(xs, 0, ys, color="#FFA50088")
-    ax.set_xlim(*xlim)
-    ax.set_ylim(0, ylim)
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    if ylim is not None:
+        try:
+            y0, y1 = ylim
+        except (TypeError, ValueError):
+            y0, y1 = 0.0, float(ylim)
+        ax.set_ylim(y0, y1)
     for p in peaks:   ax.axvline(p, color="black", ls="--", lw=1)
     for v in valleys: ax.axvline(v, color="grey",  ls=":",  lw=1)
     ax.set_yticks([]); ax.set_title(stem, fontsize=8)
@@ -4147,12 +4153,40 @@ if st.session_state.results:
                 pk_align = f(np.asarray(st.session_state.results[stem]["peaks"]))
                 vl_align = f(np.asarray(st.session_state.results[stem]["valleys"]))
 
+                try:
+                    sample_xmin = float(np.nanmin(xs))
+                    sample_xmax = float(np.nanmax(xs))
+                except ValueError:
+                    sample_xmin, sample_xmax = all_xmin, all_xmax
+
+                if not np.isfinite(sample_xmin) or not np.isfinite(sample_xmax):
+                    sample_xmin, sample_xmax = all_xmin, all_xmax
+
+                if sample_xmax == sample_xmin:
+                    span = abs(sample_xmin) if sample_xmin != 0 else 1.0
+                    pad_local = 0.05 * span
+                else:
+                    pad_local = 0.05 * (sample_xmax - sample_xmin)
+
+                x_limits = (sample_xmin - pad_local, sample_xmax + pad_local)
+
+                try:
+                    sample_ymax = float(np.nanmax(ys))
+                except ValueError:
+                    sample_ymax = np.nan
+
+                if not np.isfinite(sample_ymax) or sample_ymax <= 0:
+                    sample_ymax = all_ymax if np.isfinite(all_ymax) and all_ymax > 0 else 1.0
+
+                y_pad = 0.05 * sample_ymax if sample_ymax else 0.05
+                y_limits = (0.0, sample_ymax + y_pad)
+
                 png = _plot_png_fixed(
                     f"{stem} (aligned)", xs, ys,
                     pk_align[~np.isnan(pk_align)],
                     vl_align[~np.isnan(vl_align)],
-                    (all_xmin - pad, all_xmax + pad),
-                    all_ymax
+                    x_limits,
+                    y_limits,
                 )
 
                 st.session_state.aligned_fig_pngs[f"{stem}_aligned.png"] = png

@@ -31,6 +31,9 @@ from .gpt_adapter import (
 from .kde_detector import kde_peaks_valleys, quick_peak_estimate
 from .quality import stain_quality
 
+
+DEFAULT_GPT_MODEL = "o4-mini"
+
 try:  # optional dependency during tests
     from openai import OpenAI
 except Exception:  # pragma: no cover - OpenAI not available in tests
@@ -350,7 +353,7 @@ def _resolve_parameters(
         try:
             bw_use = ask_gpt_bandwidth(
                 gpt_client,
-                options.gpt_model or "gpt-4o-mini",
+                options.gpt_model or DEFAULT_GPT_MODEL,
                 counts,
                 peak_amount=expected,
                 default="scott",
@@ -365,7 +368,7 @@ def _resolve_parameters(
         try:
             prom_use = ask_gpt_prominence(
                 gpt_client,
-                options.gpt_model or "gpt-4o-mini",
+                options.gpt_model or DEFAULT_GPT_MODEL,
                 counts,
                 default=prom_use,
             )
@@ -380,7 +383,7 @@ def _resolve_parameters(
             try:
                 n_use = ask_gpt_peak_count(
                     gpt_client,
-                    options.gpt_model or "gpt-4o-mini",
+                    options.gpt_model or DEFAULT_GPT_MODEL,
                     params["max_peaks"],
                     counts_full=counts,
                     marker_name=marker,

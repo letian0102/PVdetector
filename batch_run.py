@@ -17,6 +17,7 @@ from peak_valley.batch import (
     collect_dataset_samples,
     run_batch,
     save_outputs,
+    DEFAULT_GPT_MODEL,
 )
 
 try:  # optional dependency – only needed when GPT features requested
@@ -252,7 +253,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(apply_arcsinh=None)
 
     parser.add_argument("--n-peaks", default=None, help="Fixed number of peaks or 'auto' for GPT/heuristic.")
-    parser.add_argument("--max-peaks", type=int, default=3)
+    parser.add_argument("--max-peaks", type=int, default=2)
     parser.add_argument("--bandwidth", default="scott", help="Bandwidth rule/value or 'auto'.")
     parser.add_argument("--prominence", default="0.05", help="Prominence value or 'auto'.")
     parser.add_argument("--min-width", type=int, default=0)
@@ -372,6 +373,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.gpt_model:
         options.gpt_model = args.gpt_model
+    else:
+        options.gpt_model = DEFAULT_GPT_MODEL
 
     # handle n-peaks / GPT settings
     if args.n_peaks is None:

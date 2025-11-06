@@ -4173,20 +4173,17 @@ if st.session_state.results:
                 try:
                     sample_ymax = float(np.nanmax(ys))
                 except ValueError:
-                    sample_ymax = np.nan
+                    sample_ymax = all_ymax
 
                 if not np.isfinite(sample_ymax) or sample_ymax <= 0:
                     sample_ymax = all_ymax if np.isfinite(all_ymax) and all_ymax > 0 else 1.0
-
-                y_pad = 0.05 * sample_ymax if sample_ymax else 0.05
-                y_limits = (0.0, sample_ymax + y_pad)
 
                 png = _plot_png_fixed(
                     f"{stem} (aligned)", xs, ys,
                     pk_align[~np.isnan(pk_align)],
                     vl_align[~np.isnan(vl_align)],
                     x_limits,
-                    y_limits,
+                    sample_ymax,
                 )
 
                 st.session_state.aligned_fig_pngs[f"{stem}_aligned.png"] = png

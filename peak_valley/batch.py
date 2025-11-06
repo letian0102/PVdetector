@@ -20,7 +20,7 @@ from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 import numpy as np
 import pandas as pd
 
-from .alignment import align_distributions
+from .alignment import align_distributions, fill_landmark_matrix
 from .consistency import enforce_marker_consistency
 from .data_io import arcsinh_transform, load_combined_csv, read_counts
 from .gpt_adapter import (
@@ -644,13 +644,26 @@ def run_batch(
             valleys_list = [r.valleys for r in results]
             density = [(r.xs, r.ys) for r in results]
 
+            landmark_matrix = fill_landmark_matrix(
+                peaks_list,
+                valleys_list,
+                align_type=options.align_mode,
+                midpoint_type="valley",
+            )
+
+            if options.target_landmarks is None:
+                target_landmark = np.nanmedian(landmark_matrix, axis=0).tolist()
+            else:
+                target_landmark = list(options.target_landmarks)
+
             try:
                 alignment = align_distributions(
                     counts_list,
                     peaks_list,
                     valleys_list,
                     align_type=options.align_mode,
-                    target_landmark=options.target_landmarks,
+                    landmark_matrix=landmark_matrix,
+                    target_landmark=target_landmark,
                     density_grids=density,
                 )
             except KeyboardInterrupt:

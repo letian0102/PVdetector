@@ -1951,12 +1951,18 @@ def _render_cli_import_section() -> None:
 
 def _plot_png_fixed(stem, xs, ys, peaks, valleys,
                     xlim, ylim) -> bytes:
-    """Same as _plot_png but with shared axes limits."""
+    """Same as _plot_png but with externally supplied axes limits."""
     fig, ax = plt.subplots(figsize=(5, 2.5), dpi=150)
     ax.plot(xs, ys, color="orange")
     ax.fill_between(xs, 0, ys, color="#FFA50088")
-    ax.set_xlim(*xlim)
-    ax.set_ylim(0, ylim)
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    if ylim is not None:
+        try:
+            y0, y1 = ylim
+        except (TypeError, ValueError):
+            y0, y1 = 0.0, float(ylim)
+        ax.set_ylim(y0, y1)
     for p in peaks:   ax.axvline(p, color="black", ls="--", lw=1)
     for v in valleys: ax.axvline(v, color="grey",  ls=":",  lw=1)
     ax.set_yticks([]); ax.set_title(stem, fontsize=8)

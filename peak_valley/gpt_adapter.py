@@ -4,6 +4,7 @@ import json
 import math
 import re
 import textwrap
+from collections import deque
 from typing import Any, Optional
 
 import numpy as np
@@ -26,6 +27,132 @@ SUMMARY_BINS = 48
 
 # keep a simple run-time cache; survives a single Streamlit run
 _cache: dict[tuple, float | int | str] = {}  # (tag, sig[, extra]) → value
+
+
+# track historical GPT peak calls per batch to provide priors
+_batch_peak_memory: dict[str, dict[str, Any]] = {}
+
+
+def _get_batch_prior(batch_id: str) -> Optional[dict[str, Any]]:
+    """Return summary statistics for previously processed samples in a batch."""
+
+    data = _batch_peak_memory.get(batch_id)
+    if not data:
+        return None
+
+    total = int(data.get("total", 0))
+    if total <= 0:
+        return None
+
+    freq: dict[int, int] = data.get("freq", {}) or {}
+    if not freq:
+        return None
+
+    # prefer lower peak counts when frequency ties occur
+    mode, mode_freq = max(freq.items(), key=lambda kv: (kv[1], -kv[0]))
+    mode_fraction = mode_freq / total if total else 0.0
+
+    recent = list(data.get("recent", []))
+    streak = 0
+    for count in reversed(recent):
+        if count == mode:
+            streak += 1
+        else:
+            break
+
+    confidence_n = int(data.get("confidence_n", 0))
+    confidence_mean: Optional[float]
+    if confidence_n > 0:
+        confidence_sum = float(data.get("confidence_sum", 0.0))
+        confidence_mean = confidence_sum / confidence_n if confidence_n else None
+    else:
+        confidence_mean = None
+
+    distribution = [
+        {"peaks": int(k), "samples": int(v)} for k, v in sorted(freq.items())
+    ]
+
+    prior: dict[str, Any] = {
+        "samples_seen": total,
+        "mode": int(mode),
+        "mode_fraction": float(round(mode_fraction, 3)),
+        "mode_frequency": int(mode_freq),
+        "recent_counts": recent,
+        "recent_mode_streak": int(streak),
+        "distribution": distribution,
+    }
+
+    if confidence_mean is not None:
+        prior["mean_confidence"] = float(round(confidence_mean, 3))
+
+    return prior
+
+
+def _register_batch_vote(batch_id: str, peak_count: int, confidence: Optional[float]) -> None:
+    """Update rolling batch statistics after each GPT vote."""
+
+    if not batch_id:
+        return
+
+    data = _batch_peak_memory.setdefault(
+        batch_id,
+        {
+            "total": 0,
+            "freq": {},
+            "recent": deque(maxlen=8),
+            "confidence_sum": 0.0,
+            "confidence_n": 0,
+        },
+    )
+
+    data["total"] = int(data.get("total", 0)) + 1
+    freq: dict[int, int] = data.setdefault("freq", {})
+    freq[int(peak_count)] = int(freq.get(int(peak_count), 0)) + 1
+
+    recent: deque[int] = data.setdefault("recent", deque(maxlen=8))
+    if isinstance(recent, deque):
+        recent.append(int(peak_count))
+    else:
+        new_recent = deque(recent, maxlen=8)
+        new_recent.append(int(peak_count))
+        data["recent"] = new_recent
+
+    if confidence is not None and np.isfinite(confidence):
+        data["confidence_sum"] = float(data.get("confidence_sum", 0.0)) + float(confidence)
+        data["confidence_n"] = int(data.get("confidence_n", 0)) + 1
+
+
+def _refine_peak_cap_with_batch_prior(
+    current_cap: int, batch_prior: Optional[dict[str, Any]]
+) -> tuple[int, Optional[int], Optional[str]]:
+    """Tighten the allowed max peaks when a batch exhibits a strong consensus."""
+
+    if not batch_prior:
+        return current_cap, None, None
+
+    samples_seen = int(batch_prior.get("samples_seen", 0))
+    mode = int(batch_prior.get("mode", 0))
+    mode_fraction = float(batch_prior.get("mode_fraction", 0.0))
+    streak = int(batch_prior.get("recent_mode_streak", 0))
+
+    applied_cap: Optional[int] = None
+    rationale: Optional[str] = None
+
+    if samples_seen >= 3 and mode_fraction >= 0.6:
+        buffer = 1 if mode >= 2 else 0
+        proposed = max(1, mode + buffer)
+        if proposed < current_cap:
+            applied_cap = proposed
+            rationale = "mode_consensus"
+            current_cap = proposed
+    elif samples_seen >= 2 and streak >= 2 and mode_fraction >= 0.5:
+        proposed = max(1, mode)
+        if proposed < current_cap:
+            applied_cap = proposed
+            rationale = "recent_agreement"
+            current_cap = proposed
+
+    return current_cap, applied_cap, rationale
 
 
 def _prepare_values(counts_full: Optional[np.ndarray]) -> np.ndarray:
@@ -726,6 +853,56 @@ def _extract_peak_candidates(
 
     prominences, left_bases, right_bases = peak_prominences(smoothed, idx)
     widths_samples = peak_widths(smoothed, idx, rel_height=0.5)[0]
+
+    # Merge spurious shoulders that arise from jitter around a dominant peak.
+    if idx.size >= 2:
+        widths_samples = np.asarray(widths_samples, dtype=float)
+        MAX_SHALLOW_RATIO = 0.82
+        MAX_BIN_GAP = 3
+        WIDTH_SCALE_FACTOR = 0.65
+        drop_orders: set[int] = set()
+        for pos in range(idx.size - 1):
+            if pos + 1 >= widths_samples.size:
+                continue
+            left = int(idx[pos])
+            right = int(idx[pos + 1])
+            if right <= left:
+                continue
+            window = smoothed[left : right + 1]
+            if window.size == 0:
+                continue
+            valley_height = float(np.min(window))
+            left_height = float(smoothed[left])
+            right_height = float(smoothed[right])
+            denom = min(left_height, right_height)
+            if denom <= 0:
+                continue
+            depth_ratio = valley_height / denom
+            if depth_ratio < MAX_SHALLOW_RATIO:
+                continue
+            span_bins = right - left
+            close_bins = span_bins <= MAX_BIN_GAP
+            mean_width = 0.5 * (widths_samples[pos] + widths_samples[pos + 1])
+            close_by_width = False
+            if mean_width > 0:
+                close_by_width = span_bins <= max(1.0, mean_width * WIDTH_SCALE_FACTOR)
+            if not (close_bins or close_by_width):
+                continue
+            drop = pos if left_height < right_height else pos + 1
+            drop_orders.add(int(drop))
+        if drop_orders and len(drop_orders) < idx.size:
+            mask = np.ones(idx.size, dtype=bool)
+            for order in drop_orders:
+                if 0 <= order < mask.size:
+                    mask[order] = False
+            idx = idx[mask]
+            prominences = prominences[mask]
+            widths_samples = widths_samples[mask]
+            left_bases = left_bases[mask]
+            right_bases = right_bases[mask]
+
+    if idx.size == 0:
+        return [], None, None, None, None, [], None
 
     # convert widths to the same units as the histogram centres
     if centers.size > 1:
@@ -1893,8 +2070,14 @@ def ask_gpt_peak_count(
         }
     }
 
+    batch_prior = _get_batch_prior(batch_id) if batch_id else None
+
     if batch_id:
         payload["meta"]["batch_id"] = batch_id
+        if batch_prior:
+            payload["meta"]["batch_samples_seen"] = batch_prior.get("samples_seen")
+            payload["meta"]["batch_mode"] = batch_prior.get("mode")
+            payload["meta"]["batch_mode_fraction"] = batch_prior.get("mode_fraction")
 
     if values.size:
         q = np.percentile(values, [5, 25, 50, 75, 95])
@@ -1935,7 +2118,27 @@ def ask_gpt_peak_count(
         if "run_fraction" in consensus_meta:
             payload["meta"]["consensus_run_fraction"] = consensus_meta.get("run_fraction")
 
-    payload["priors"] = (priors.copy() if isinstance(priors, dict) else _default_priors(marker_name))
+    payload["priors"] = (
+        priors.copy() if isinstance(priors, dict) else _default_priors(marker_name)
+    )
+    if batch_prior:
+        payload["priors"]["batch"] = batch_prior
+
+    refined_max, batch_cap, cap_reason = _refine_peak_cap_with_batch_prior(
+        safe_max, batch_prior
+    )
+    if refined_max != safe_max:
+        safe_max = refined_max
+        payload["meta"]["allowed_peaks_max"] = safe_max
+    heuristic_info["final_allowed_max"] = safe_max
+    if batch_prior:
+        heuristic_info["batch_prior"] = batch_prior
+    if batch_cap is not None:
+        heuristic_info["batch_prior_cap"] = {
+            "value": batch_cap,
+            "reason": cap_reason,
+        }
+
     payload["heuristics"] = heuristic_info
 
     system = (
@@ -1988,9 +2191,14 @@ def ask_gpt_peak_count(
         peak_count = int(data["peak_count"])
         if peak_count <= 0:
             return None
-        return min(safe_max, peak_count)
+        result = min(safe_max, peak_count)
+        confidence_val = data.get("confidence")
+        confidence_float = float(confidence_val) if confidence_val is not None else None
+        _register_batch_vote(batch_id, result, confidence_float)
+        return result
     except AuthenticationError:
         raise
     except Exception as exc:
         print(f"GPT peak count query failed: {exc}")
+        _register_batch_vote(batch_id, safe_max, None)
         return safe_max

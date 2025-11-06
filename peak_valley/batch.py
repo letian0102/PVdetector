@@ -20,7 +20,7 @@ from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 import numpy as np
 import pandas as pd
 
-from .alignment import align_distributions
+from .alignment import align_distributions, fill_landmark_matrix
 from .consistency import enforce_marker_consistency
 from .data_io import arcsinh_transform, load_combined_csv, read_counts
 from .gpt_adapter import (
@@ -70,6 +70,8 @@ class SampleResult:
     arcsinh_signature: tuple[bool, float, float, float] = (True, 1.0, 0.2, 0.0)
     aligned_counts: Optional[np.ndarray] = None
     aligned_density: Optional[tuple[np.ndarray, np.ndarray]] = None
+    aligned_peaks: Optional[list[float]] = None
+    aligned_valleys: Optional[list[float]] = None
     cell_indices: Optional[np.ndarray] = None
 
 
@@ -647,27 +649,70 @@ def run_batch(
             valleys_list = [r.valleys for r in results]
             density = [(r.xs, r.ys) for r in results]
 
+            landmark_matrix = fill_landmark_matrix(
+                peaks_list,
+                valleys_list,
+                align_type=options.align_mode,
+                midpoint_type="valley",
+            )
+
+            if options.target_landmarks is None:
+                target_landmark = np.nanmedian(landmark_matrix, axis=0).tolist()
+            else:
+                target_landmark = list(options.target_landmarks)
+
             try:
                 alignment = align_distributions(
                     counts_list,
                     peaks_list,
                     valleys_list,
                     align_type=options.align_mode,
-                    target_landmark=options.target_landmarks,
+                    landmark_matrix=landmark_matrix,
+                    target_landmark=target_landmark,
                     density_grids=density,
                 )
             except KeyboardInterrupt:
                 interrupted = True
             else:
-                aligned_counts, aligned_landmarks, _warp_funs, warped_density = alignment
+                aligned_counts, aligned_landmarks, warp_funs, warped_density = alignment
 
-                for res, counts_aligned, warped in zip(
-                    results, aligned_counts, warped_density  # type: ignore[misc]
-                ):
-                    res.aligned_counts = np.asarray(counts_aligned, float)
+                for idx, res in enumerate(results):
+                    if idx < len(aligned_counts):
+                        counts_aligned = np.asarray(aligned_counts[idx], float)
+                        res.aligned_counts = counts_aligned
+                    else:
+                        res.aligned_counts = None
+
+                    if warped_density is not None and idx < len(warped_density):
+                        warped = warped_density[idx]
+                    else:
+                        warped = None
+
                     if warped is not None:
                         xs_w, ys_w = warped
-                        res.aligned_density = (np.asarray(xs_w, float), np.asarray(ys_w, float))
+                        res.aligned_density = (
+                            np.asarray(xs_w, float),
+                            np.asarray(ys_w, float),
+                        )
+                    else:
+                        res.aligned_density = None
+
+                    warp_fun = warp_funs[idx] if idx < len(warp_funs) else None
+                    if warp_fun is not None:
+                        if res.peaks:
+                            warped_peaks = warp_fun(np.asarray(res.peaks, float))
+                            res.aligned_peaks = [float(p) for p in warped_peaks]
+                        else:
+                            res.aligned_peaks = []
+
+                        if res.valleys:
+                            warped_valleys = warp_fun(np.asarray(res.valleys, float))
+                            res.aligned_valleys = [float(v) for v in warped_valleys]
+                        else:
+                            res.aligned_valleys = []
+                    else:
+                        res.aligned_peaks = None
+                        res.aligned_valleys = None
     finally:
         if progress is not None:
             try:
@@ -909,6 +954,16 @@ def results_to_dict(batch: BatchResults) -> dict[str, Any]:
                 float(x) if math.isfinite(float(x)) else None
                 for x in res.aligned_counts
             ]
+        if res.aligned_peaks is not None:
+            sample_payload["aligned_peaks"] = [
+                float(p) if math.isfinite(float(p)) else None
+                for p in res.aligned_peaks
+            ]
+        if res.aligned_valleys is not None:
+            sample_payload["aligned_valleys"] = [
+                float(v) if math.isfinite(float(v)) else None
+                for v in res.aligned_valleys
+            ]
         payload["samples"].append(sample_payload)
 
     return payload
@@ -932,11 +987,38 @@ def export_summary(batch: BatchResults) -> pd.DataFrame:
             "bandwidth": res.params.get("bw"),
             "prominence": res.params.get("prom"),
         })
+        if res.aligned_peaks is not None:
+            row["aligned_peaks"] = "; ".join(
+                f"{float(p):.5g}"
+                for p in res.aligned_peaks
+                if p is not None and math.isfinite(float(p))
+            )
+        if res.aligned_valleys is not None:
+            row["aligned_valleys"] = "; ".join(
+                f"{float(v):.5g}"
+                for v in res.aligned_valleys
+                if v is not None and math.isfinite(float(v))
+            )
         rows.append(row)
 
     if rows:
         return pd.DataFrame(rows)
-    return pd.DataFrame(columns=["stem", "sample", "marker", "batch", "n_peaks", "peaks", "valleys", "quality"])
+    return pd.DataFrame(
+        columns=[
+            "stem",
+            "sample",
+            "marker",
+            "batch",
+            "n_peaks",
+            "peaks",
+            "valleys",
+            "quality",
+            "bandwidth",
+            "prominence",
+            "aligned_peaks",
+            "aligned_valleys",
+        ]
+    )
 
 
 def save_outputs(

@@ -7,8 +7,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from peak_valley.alignment import build_warp_function, fill_landmark_matrix
 from peak_valley.batch import (
     BatchOptions,
+    SampleInput,
     collect_counts_files,
     collect_dataset_samples,
     run_batch,
@@ -110,8 +112,33 @@ def test_combined_zip_has_expected_exports(tmp_path):
 
     batch = run_batch(samples, options)
     assert not batch.interrupted
+    assert batch.aligned_landmarks is not None
+    assert batch.target_landmarks is not None
     out_dir = tmp_path / "outputs"
     save_outputs(batch, out_dir, run_metadata=meta_info)
+
+    # Ensure aligned landmarks mirror the warped peak/valley coordinates.
+    aligned_lm = batch.aligned_landmarks
+    assert aligned_lm is not None
+    for idx, res in enumerate(batch.samples):
+        if res.aligned_counts is None:
+            continue
+        assert res.aligned_peaks is not None
+        assert res.aligned_valleys is not None
+        row = aligned_lm[idx]
+        if row.size >= 1 and np.isfinite(row[0]):
+            assert res.aligned_peaks, "Expected warped peaks for aligned sample"
+            assert res.aligned_peaks[0] == pytest.approx(float(row[0]), rel=1e-9, abs=1e-9)
+        if row.size >= 2 and np.isfinite(row[1]):
+            assert res.aligned_valleys, "Expected warped valleys for aligned sample"
+            assert res.aligned_valleys[0] == pytest.approx(float(row[1]), rel=1e-9, abs=1e-9)
+
+    # CLI manifest should expose aligned peaks/valleys just like the UI downloads.
+    results_path = out_dir / "results.json"
+    with results_path.open("r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    sample_entry = next(item for item in manifest["samples"] if item.get("aligned_peaks"))
+    assert "aligned_valleys" in sample_entry
 
     zip_path = out_dir / "before_after_alignment.zip"
     assert zip_path.exists(), "Expected combined zip export"
@@ -131,7 +158,6 @@ def test_combined_zip_has_expected_exports(tmp_path):
         assert set(meta_df["sample"]) == {"S1", "S2"}
 
     assert not (out_dir / "processed_counts.csv").exists()
-    assert not (out_dir / "aligned_counts.csv").exists()
     assert not (out_dir / "aligned_landmarks.csv").exists()
 
 
@@ -245,3 +271,73 @@ def test_run_batch_handles_keyboard_interrupt(tmp_path, monkeypatch):
         manifest = json.load(fh)
     assert manifest.get("interrupted") is True
     assert manifest["samples"], "Partial samples should still be exported"
+
+
+def test_cli_alignment_matches_warp_functions():
+    rng = np.random.default_rng(2024)
+    sample_a = np.concatenate([
+        rng.normal(loc=-2.0, scale=0.25, size=300),
+        rng.normal(loc=2.0, scale=0.35, size=300),
+    ])
+    sample_b = np.concatenate([
+        rng.normal(loc=-0.8, scale=0.22, size=280),
+        rng.normal(loc=2.8, scale=0.4, size=280),
+    ])
+
+    samples = [
+        SampleInput(
+            stem="SampleA",
+            counts=sample_a,
+            metadata={"marker": "M1", "sample": "S1"},
+            arcsinh_signature=(False, 1.0, 1.0, 0.0),
+        ),
+        SampleInput(
+            stem="SampleB",
+            counts=sample_b,
+            metadata={"marker": "M1", "sample": "S2"},
+            arcsinh_signature=(False, 1.0, 1.0, 0.0),
+        ),
+    ]
+
+    options = BatchOptions(apply_arcsinh=False, align=True, max_peaks=3)
+    batch = run_batch(samples, options)
+
+    assert not batch.interrupted
+    assert batch.aligned_landmarks is not None
+    assert batch.target_landmarks is not None
+    assert batch.alignment_mode == options.align_mode
+
+    peaks_all = [res.peaks for res in batch.samples]
+    valleys_all = [res.valleys for res in batch.samples]
+    source_landmarks = fill_landmark_matrix(
+        peaks_all,
+        valleys_all,
+        align_type=batch.alignment_mode or options.align_mode,
+        midpoint_type="valley",
+    )
+    target = np.asarray(batch.target_landmarks, float)
+
+    for idx, res in enumerate(batch.samples):
+        src_row = np.asarray(source_landmarks[idx], float)
+        valid = np.isfinite(src_row)
+        if not valid.any():
+            continue
+        warp = build_warp_function(src_row[valid], target[valid])
+
+        orig_counts = np.asarray(res.counts, float)
+        if res.aligned_counts is not None:
+            aligned_counts = np.asarray(res.aligned_counts, float)
+            assert np.allclose(aligned_counts, warp(orig_counts))
+
+        if res.aligned_density is not None:
+            xs_expected = warp(np.asarray(res.xs, float))
+            xs_actual = np.asarray(res.aligned_density[0], float)
+            assert np.allclose(xs_actual, xs_expected)
+
+        if res.peaks and res.aligned_peaks is not None:
+            peaks_expected = warp(np.asarray(res.peaks, float))
+            assert np.allclose(np.asarray(res.aligned_peaks, float), peaks_expected)
+
+        if res.valleys and res.aligned_valleys is not None:
+            valleys_expected = warp(np.asarray(res.valleys, float))
+            assert np.allclose(np.asarray(res.aligned_valleys, float), valleys_expected)

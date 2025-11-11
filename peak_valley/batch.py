@@ -258,6 +258,12 @@ def _group_results_by_marker(
     results: Sequence[SampleResult],
     order_map: Mapping[str, int],
 ) -> list[tuple[str, list[SampleResult]]]:
+    """Return ordered marker groups for the provided results.
+
+    An empty list indicates that no meaningful marker split was possible (for
+    example, when every sample lacks a marker or all share the same label).
+    """
+
     groups: dict[str, list[SampleResult]] = {}
     for res in results:
         name = _marker_group_name(res.metadata.get("marker"))
@@ -274,6 +280,13 @@ def _group_results_by_marker(
     marker_keys.sort(key=lambda k: k.lower())
     if "Default" in groups:
         marker_keys.append("Default")
+
+    if len(marker_keys) <= 1:
+        # Either every sample landed in the same marker bucket or only the
+        # fallback "Default" group exists. In both cases grouping by marker has
+        # no effect, so surface an empty list so downstream logic can behave as
+        # if grouping was disabled.
+        return []
 
     return [(name, groups[name]) for name in marker_keys]
 

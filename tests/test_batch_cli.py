@@ -200,6 +200,44 @@ def test_group_marker_ridge_exports(tmp_path):
         assert "after_alignment/aligned_ridge_markerX.png" in names
         assert "after_alignment/aligned_ridge_markerY.png" in names
 
+
+def test_group_marker_single_marker_does_not_emit_groups(tmp_path):
+    expr = pd.DataFrame(
+        {
+            "markerX": [0.5, 0.6, 2.0, 2.2],
+        }
+    )
+    meta = pd.DataFrame(
+        {
+            "sample": ["S1", "S1", "S2", "S2"],
+            "batch": ["B1"] * 4,
+        }
+    )
+
+    expr_path = tmp_path / "expr.csv"
+    meta_path = tmp_path / "meta.csv"
+    expr.to_csv(expr_path, index=False)
+    meta.to_csv(meta_path, index=False)
+
+    options = BatchOptions(apply_arcsinh=False, align=False, group_by_marker=True, max_peaks=2)
+    samples, meta_info = collect_dataset_samples(
+        expr_path,
+        meta_path,
+        options,
+    )
+
+    batch = run_batch(samples, options)
+
+    assert batch.group_by_marker
+    assert batch.marker_groups is None
+
+    out_dir = tmp_path / "single"
+    save_outputs(batch, out_dir, run_metadata=meta_info)
+
+    manifest = json.loads((out_dir / "results.json").read_text())
+    assert manifest.get("group_by_marker")
+    assert "marker_groups" not in manifest
+
 def test_stain_quality_handles_missing_valleys():
     rng = np.random.default_rng(0)
     left = rng.normal(-3.0, 0.2, size=100)

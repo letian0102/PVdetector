@@ -336,12 +336,10 @@ def test_alignment_normalizes_landmarks(monkeypatch):
 
     warp = build_warp_function(np.array([-3.0, 0.0, 3.0]), np.array([-2.0, 0.0, 2.0]))
     expected_counts = warp(np.asarray(sample.counts, float))
-    expected_peaks = warp(np.array([-3.0, 3.0]))
-    expected_valleys = warp(np.array([0.0]))
 
     np.testing.assert_allclose(result.aligned_counts, expected_counts, atol=1e-9)
-    np.testing.assert_allclose(result.aligned_peaks, expected_peaks, atol=1e-9)
-    np.testing.assert_allclose(result.aligned_valleys, expected_valleys, atol=1e-9)
+    np.testing.assert_allclose(result.aligned_peaks, np.array([-2.0, 2.0]), atol=1e-9)
+    np.testing.assert_allclose(result.aligned_valleys, np.array([0.0]), atol=1e-9)
     np.testing.assert_allclose(
         result.aligned_landmark_positions,
         np.array([-2.0, 0.0, 2.0]),

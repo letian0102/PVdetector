@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import re
 import zipfile
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass
@@ -108,6 +109,7 @@ class BatchOptions:
     align: bool = False
     align_mode: str = "negPeak_valley_posPeak"
     target_landmarks: Optional[Sequence[float]] = None
+    group_by_marker: bool = False
 
     workers: int = 1
 
@@ -132,6 +134,7 @@ class BatchResults:
     alignment_mode: Optional[str] = None
     target_landmarks: Optional[Sequence[float]] = None
     interrupted: bool = False
+    group_by_marker: bool = False
 
 
 class BatchProgress(Protocol):
@@ -645,49 +648,124 @@ def run_batch(
                     res.quality = float(stain_quality(res.counts, res.peaks, res.valleys))
 
         if not interrupted and options.align and results:
-            counts_list = [r.counts for r in results]
-            peaks_list = [r.peaks for r in results]
-            valleys_list = [r.valleys for r in results]
-            density = [(r.xs, r.ys) for r in results]
+            if options.group_by_marker:
+                grouped: dict[str, list[SampleResult]] = {}
+                for res in results:
+                    marker = res.metadata.get("marker")
+                    key = str(marker) if marker else "Default"
+                    grouped.setdefault(key, []).append(res)
 
-            try:
-                alignment = align_distributions(
-                    counts_list,
-                    peaks_list,
-                    valleys_list,
-                    align_type=options.align_mode,
-                    target_landmark=options.target_landmarks,
-                    density_grids=density,
-                )
-            except KeyboardInterrupt:
-                interrupted = True
-            else:
-                aligned_counts, aligned_landmarks, warp_funs, warped_density = alignment
+                landmark_rows: dict[str, np.ndarray] = {}
+                landmark_cols: int | None = None
 
-                for idx, (res, counts_aligned, warped) in enumerate(
-                    zip(results, aligned_counts, warped_density)  # type: ignore[misc]
-                ):
-                    res.aligned_counts = np.asarray(counts_aligned, float)
-                    if warped is not None:
-                        xs_w, ys_w = warped
-                        res.aligned_density = (np.asarray(xs_w, float), np.asarray(ys_w, float))
-                    warp_fn = warp_funs[idx] if idx < len(warp_funs) else None
-                    if warp_fn is not None:
-                        if res.peaks:
-                            peaks_arr = np.asarray(res.peaks, float)
-                            res.aligned_peaks = [float(v) for v in warp_fn(peaks_arr)]
-                        else:
-                            res.aligned_peaks = []
-                        if res.valleys:
-                            valleys_arr = np.asarray(res.valleys, float)
-                            res.aligned_valleys = [float(v) for v in warp_fn(valleys_arr)]
-                        else:
-                            res.aligned_valleys = []
-                    if aligned_landmarks is not None and idx < len(aligned_landmarks):
-                        res.aligned_landmark_positions = np.asarray(
-                            aligned_landmarks[idx],
-                            float,
+                for group_results in grouped.values():
+                    if interrupted or not group_results:
+                        continue
+
+                    counts_list = [r.counts for r in group_results]
+                    peaks_list = [r.peaks for r in group_results]
+                    valleys_list = [r.valleys for r in group_results]
+                    density = [(r.xs, r.ys) for r in group_results]
+
+                    try:
+                        alignment = align_distributions(
+                            counts_list,
+                            peaks_list,
+                            valleys_list,
+                            align_type=options.align_mode,
+                            target_landmark=options.target_landmarks,
+                            density_grids=density,
                         )
+                    except KeyboardInterrupt:
+                        interrupted = True
+                        break
+
+                    aligned_counts_grp, aligned_landmarks_grp, warp_funs, warped_density = alignment
+
+                    for idx, (res, counts_aligned, warped) in enumerate(
+                        zip(group_results, aligned_counts_grp, warped_density)  # type: ignore[misc]
+                    ):
+                        res.aligned_counts = np.asarray(counts_aligned, float)
+                        if warped is not None:
+                            xs_w, ys_w = warped
+                            res.aligned_density = (
+                                np.asarray(xs_w, float),
+                                np.asarray(ys_w, float),
+                            )
+                        warp_fn = warp_funs[idx] if idx < len(warp_funs) else None
+                        if warp_fn is not None:
+                            if res.peaks:
+                                peaks_arr = np.asarray(res.peaks, float)
+                                res.aligned_peaks = [float(v) for v in warp_fn(peaks_arr)]
+                            else:
+                                res.aligned_peaks = []
+                            if res.valleys:
+                                valleys_arr = np.asarray(res.valleys, float)
+                                res.aligned_valleys = [float(v) for v in warp_fn(valleys_arr)]
+                            else:
+                                res.aligned_valleys = []
+                        if aligned_landmarks_grp is not None and idx < len(aligned_landmarks_grp):
+                            row = np.asarray(aligned_landmarks_grp[idx], float)
+                            res.aligned_landmark_positions = row
+                            landmark_rows[res.stem] = row
+                            if landmark_cols is None:
+                                landmark_cols = row.shape[0]
+
+                if not interrupted and landmark_cols is not None:
+                    aligned_landmarks = np.full((len(results), landmark_cols), np.nan, float)
+                    for idx, res in enumerate(results):
+                        row = landmark_rows.get(res.stem)
+                        if row is not None and row.shape[0] == landmark_cols:
+                            aligned_landmarks[idx] = row
+            else:
+                counts_list = [r.counts for r in results]
+                peaks_list = [r.peaks for r in results]
+                valleys_list = [r.valleys for r in results]
+                density = [(r.xs, r.ys) for r in results]
+
+                try:
+                    alignment = align_distributions(
+                        counts_list,
+                        peaks_list,
+                        valleys_list,
+                        align_type=options.align_mode,
+                        target_landmark=options.target_landmarks,
+                        density_grids=density,
+                    )
+                except KeyboardInterrupt:
+                    interrupted = True
+                else:
+                    aligned_counts_all, aligned_landmarks_all, warp_funs, warped_density = alignment
+
+                    for idx, (res, counts_aligned, warped) in enumerate(
+                        zip(results, aligned_counts_all, warped_density)  # type: ignore[misc]
+                    ):
+                        res.aligned_counts = np.asarray(counts_aligned, float)
+                        if warped is not None:
+                            xs_w, ys_w = warped
+                            res.aligned_density = (
+                                np.asarray(xs_w, float),
+                                np.asarray(ys_w, float),
+                            )
+                        warp_fn = warp_funs[idx] if idx < len(warp_funs) else None
+                        if warp_fn is not None:
+                            if res.peaks:
+                                peaks_arr = np.asarray(res.peaks, float)
+                                res.aligned_peaks = [float(v) for v in warp_fn(peaks_arr)]
+                            else:
+                                res.aligned_peaks = []
+                            if res.valleys:
+                                valleys_arr = np.asarray(res.valleys, float)
+                                res.aligned_valleys = [float(v) for v in warp_fn(valleys_arr)]
+                            else:
+                                res.aligned_valleys = []
+                        if aligned_landmarks_all is not None and idx < len(aligned_landmarks_all):
+                            res.aligned_landmark_positions = np.asarray(
+                                aligned_landmarks_all[idx],
+                                float,
+                            )
+
+                    aligned_landmarks = aligned_landmarks_all
     finally:
         if progress is not None:
             try:
@@ -701,6 +779,7 @@ def run_batch(
         alignment_mode=options.align_mode if (options.align and not interrupted) else None,
         target_landmarks=options.target_landmarks,
         interrupted=interrupted,
+        group_by_marker=bool(options.group_by_marker),
     )
 
 
@@ -892,12 +971,28 @@ def _jsonify(value: Any) -> Any:
     return value
 
 
+def _sanitize_group_label(label: str | None) -> str:
+    """Return a filesystem-safe label for ridge plot exports."""
+
+    if label is None:
+        return "group"
+
+    text = str(label).strip()
+    if not text:
+        return "group"
+
+    clean = re.sub(r"[^0-9A-Za-z._-]+", "_", text)
+    clean = clean.strip("._-")
+    return clean or "group"
+
+
 def results_to_dict(batch: BatchResults) -> dict[str, Any]:
     """Convert results into a JSON-serialisable structure."""
 
     payload: dict[str, Any] = {
         "samples": [],
     }
+    payload["group_by_marker"] = bool(batch.group_by_marker)
 
     payload["interrupted"] = bool(batch.interrupted)
 
@@ -1041,14 +1136,26 @@ def _write_combined_zip(
     has_after = exports["expr_after"] is not None or exports["aligned_ridge"] is not None
 
     with zipfile.ZipFile(zip_path, "w") as archive:
+        def _write_ridge_entries(base: str, data: bytes | dict[str, bytes] | None) -> None:
+            if data is None:
+                return
+            if isinstance(data, dict):
+                items = sorted(data.items(), key=lambda item: (str(item[0]).lower(), str(item[0])))
+                if len(items) == 1 and str(items[0][0]) in {"Default", "default", "None", ""}:
+                    archive.writestr(f"{base}.png", items[0][1])
+                    return
+                for group, blob in items:
+                    safe = _sanitize_group_label(str(group) if group is not None else "Default")
+                    archive.writestr(f"{base}_{safe}.png", blob)
+                return
+            archive.writestr(f"{base}.png", data)
+
         if before_meta is not None:
             archive.writestr("before_alignment/cell_metadata_combined.csv", before_meta)
         if before_expr is not None:
             archive.writestr("before_alignment/expression_matrix_combined.csv", before_expr)
-        if exports["raw_ridge"] is not None:
-            archive.writestr("before_alignment/before_alignment_ridge.png", exports["raw_ridge"])
-        if exports["aligned_ridge"] is not None:
-            archive.writestr("after_alignment/aligned_ridge.png", exports["aligned_ridge"])
+        _write_ridge_entries("before_alignment/before_alignment_ridge", exports["raw_ridge"])
+        _write_ridge_entries("after_alignment/aligned_ridge", exports["aligned_ridge"])
         if has_after and exports["meta_after"] is not None:
             archive.writestr("after_alignment/cell_metadata_combined.csv", exports["meta_after"])
         if exports["expr_after"] is not None:
@@ -1058,7 +1165,7 @@ def _write_combined_zip(
 def _dataset_exports(
     batch: BatchResults,
     run_metadata: Mapping[str, Any] | None,
-) -> dict[str, bytes | None] | None:
+) -> dict[str, bytes | dict[str, bytes] | None] | None:
     if not run_metadata:
         return None
 
@@ -1136,8 +1243,20 @@ def _dataset_exports(
     if not has_aligned:
         expr_after_csv = None
 
-    raw_ridge = _ridge_plot_png(batch.samples, aligned=False)
-    aligned_ridge = _ridge_plot_png(batch.samples, aligned=True) if has_aligned else None
+    raw_ridge = _ridge_plot_png(
+        batch.samples,
+        aligned=False,
+        group_by_marker=batch.group_by_marker,
+    )
+    aligned_ridge = (
+        _ridge_plot_png(
+            batch.samples,
+            aligned=True,
+            group_by_marker=batch.group_by_marker,
+        )
+        if has_aligned
+        else None
+    )
 
     return {
         "meta": meta_csv,
@@ -1149,7 +1268,30 @@ def _dataset_exports(
     }
 
 
-def _ridge_plot_png(samples: Sequence[SampleResult], *, aligned: bool) -> bytes | None:
+def _ridge_plot_png(
+    samples: Sequence[SampleResult],
+    *,
+    aligned: bool,
+    group_by_marker: bool = False,
+) -> bytes | dict[str, bytes] | None:
+    if group_by_marker:
+        grouped: dict[str, list[SampleResult]] = {}
+        for res in samples:
+            marker = res.metadata.get("marker")
+            key = str(marker) if marker else "Default"
+            grouped.setdefault(key, []).append(res)
+
+        outputs: dict[str, bytes] = {}
+        for group_name in sorted(grouped):
+            png = _ridge_plot_png(
+                grouped[group_name],
+                aligned=aligned,
+                group_by_marker=False,
+            )
+            if isinstance(png, bytes):
+                outputs[group_name] = png
+        return outputs or None
+
     curves: list[tuple[str, np.ndarray, np.ndarray, list[float], list[float], float]] = []
     for res in samples:
         xs: np.ndarray

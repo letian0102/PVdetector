@@ -138,3 +138,24 @@ def test_cli_assign_groups_creates_new_group():
     assert applied
     assert st.session_state.group_assignments["sampleC_marker"] == "MyGroup"
     assert "MyGroup" in st.session_state.group_overrides
+
+
+def test_cli_assign_groups_groups_by_marker():
+    st.session_state.clear()
+    st.session_state.group_assignments = {}
+    st.session_state.group_overrides = {"Default": {}}
+    st.session_state.results = {}
+
+    subset = pd.DataFrame({
+        "stem": ["sampleA_marker", "sampleB_marker", "sampleC_marker"],
+        "marker": ["CD3", "CD4", None],
+    })
+
+    applied = _cli_assign_groups(subset, mode="marker", new_group=None)
+
+    assert applied
+    assert st.session_state.group_assignments["sampleA_marker"] == "CD3"
+    assert st.session_state.group_assignments["sampleB_marker"] == "CD4"
+    assert st.session_state.group_assignments.get("sampleC_marker") == "Default"
+    assert "CD3" in st.session_state.group_overrides
+    assert "CD4" in st.session_state.group_overrides

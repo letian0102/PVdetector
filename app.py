@@ -1673,6 +1673,39 @@ def _cli_assign_groups(
         st.session_state.group_overrides = overrides
         return True
 
+    if mode == "marker":
+        if "marker" not in subset.columns:
+            st.warning("The imported summary does not contain marker names to group by.")
+            return False
+
+        marker_lookup: dict[str, str] = {}
+        for stem, raw_marker in zip(stems, subset["marker"].tolist()):
+            if not stem:
+                continue
+            if raw_marker is None or pd.isna(raw_marker):
+                continue
+            marker_text = str(raw_marker).strip()
+            if not marker_text or marker_text.lower() in {"nan", "none"}:
+                continue
+            marker_lookup[stem] = marker_text
+
+        changed, marker_groups = _apply_marker_grouping(stems, marker_lookup)
+        if not marker_groups:
+            st.warning("No marker information was available to build groups.")
+            return False
+
+        if changed:
+            for stem in changed:
+                if stem in st.session_state.results:
+                    _mark_sample_dirty(stem, "group")
+            st.success(
+                "Assigned samples to marker-based groups. Stems without markers remain in the Default group."
+            )
+        else:
+            st.info("Samples are already grouped by marker names.")
+
+        return True
+
     if mode == "new_group":
         clean = (new_group or "").strip()
         if not clean:
@@ -1903,10 +1936,11 @@ def _render_cli_import_section() -> None:
 
         st.session_state.cli_summary_selection = selection
 
-        group_choices = ["none", "align_sample", "new_group"]
+        group_choices = ["none", "align_sample", "marker", "new_group"]
         group_labels = {
             "none": "No automatic grouping",
             "align_sample": "Align using sample column",
+            "marker": "Group by marker name",
             "new_group": "Group selected together",
         }
         default_mode = st.session_state.get("cli_group_mode", "none")
@@ -2077,12 +2111,102 @@ def _manual_editor(stem: str):
         st.rerun()
 
 
+def _marker_lookup_for_stems(stems: Iterable[str]) -> dict[str, str]:
+    """Return a mapping of stem → marker name when available."""
+
+    generated_meta = st.session_state.get("generated_meta") or {}
+    results_meta = st.session_state.get("results_raw_meta") or {}
+    generated_csvs = st.session_state.get("generated_csvs") or []
+
+    csv_markers: dict[str, str] = {}
+    for stem, bio in generated_csvs:
+        marker = getattr(bio, "marker", None)
+        if marker is None:
+            continue
+        marker_str = str(marker).strip()
+        if marker_str and marker_str.lower() not in {"nan", "none"}:
+            csv_markers[stem] = marker_str
+
+    mapping: dict[str, str] = {}
+    for stem in stems:
+        marker: str | None = None
+
+        meta_entry = generated_meta.get(stem)
+        if isinstance(meta_entry, dict):
+            meta_marker = meta_entry.get("marker") or meta_entry.get("protein_name")
+            if meta_marker is not None:
+                marker_candidate = str(meta_marker).strip()
+                if marker_candidate and marker_candidate.lower() not in {"nan", "none"}:
+                    marker = marker_candidate
+
+        if marker is None:
+            meta_entry = results_meta.get(stem)
+            if isinstance(meta_entry, dict):
+                meta_marker = meta_entry.get("protein_name")
+                if meta_marker is not None:
+                    marker_candidate = str(meta_marker).strip()
+                    if marker_candidate and marker_candidate.lower() not in {"nan", "none"}:
+                        marker = marker_candidate
+
+        if marker is None:
+            marker = csv_markers.get(stem)
+
+        if marker:
+            mapping[stem] = marker
+
+    return mapping
+
+
+def _apply_marker_grouping(stems: list[str], marker_lookup: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Assign stems to groups based on marker names.
+
+    Returns the stems that changed groups and the ordered list of marker groups used.
+    """
+
+    if not marker_lookup:
+        return [], []
+
+    normalized = {
+        stem: marker_lookup.get(stem)
+        for stem in stems
+        if marker_lookup.get(stem)
+    }
+
+    unique_markers = sorted({m for m in normalized.values() if m}, key=str.lower)
+    if not unique_markers:
+        return [], []
+
+    for marker in unique_markers:
+        st.session_state.group_overrides.setdefault(marker, {})
+
+    assignments = st.session_state.group_assignments
+    changed: list[str] = []
+
+    for stem in stems:
+        target_group = normalized.get(stem, "Default")
+        current_group = assignments.get(stem, "Default")
+        if current_group != target_group:
+            assignments[stem] = target_group
+            changed.append(stem)
+        else:
+            assignments.setdefault(stem, target_group)
+
+    for marker in unique_markers:
+        selection_key = f"group_samples__{_keyify(marker)}"
+        st.session_state[selection_key] = [
+            stem for stem in stems if normalized.get(stem) == marker
+        ]
+
+    return changed, unique_markers
+
+
 def _render_group_controls(
     stems: list[str], *,
     bw_label: str,
     prom_mode: str,
     prom_default: float | None,
     run_defaults: dict[str, object],
+    context_key: str = "default",
 ) -> None:
     """Render the group-assignment UI for the given stems."""
 
@@ -2096,12 +2220,13 @@ def _render_group_controls(
     if not stems_unique:
         return
 
-    previous_assignments = dict(st.session_state.group_assignments)
     st.session_state.group_overrides.setdefault("Default", {})
+
+    marker_lookup = _marker_lookup_for_stems(stems_unique)
 
     st.markdown("---\n### Sample groups (optional)")
 
-    col_name, col_add = st.columns([3, 1])
+    col_name, col_add, col_auto = st.columns([3, 1, 1])
 
     if st.session_state.get("group_new_name_reset", False):
         st.session_state.group_new_name = ""
@@ -2120,6 +2245,35 @@ def _render_group_controls(
                 st.session_state.group_overrides[clean] = {}
             st.session_state.group_new_name_reset = True
         st.rerun()
+
+    if marker_lookup:
+        marker_clicked = col_auto.button(
+            "Group by marker",
+            key=f"group_by_marker__{context_key}",
+            help="Automatically assign samples to groups based on marker names.",
+        )
+        if marker_clicked:
+            changed, marker_groups = _apply_marker_grouping(stems_unique, marker_lookup)
+            if marker_groups:
+                if changed:
+                    for stem in changed:
+                        _mark_sample_dirty(stem, "group")
+                    st.success(
+                        "Assigned samples to marker-based groups. Stems without markers remain in the Default group."
+                    )
+                else:
+                    st.info("Samples are already grouped by marker names.")
+            else:
+                st.warning("No marker information was available to build groups.")
+    else:
+        col_auto.button(
+            "Group by marker",
+            key=f"group_by_marker__{context_key}",
+            disabled=True,
+            help="Marker names are not available for the selected samples.",
+        )
+
+    previous_assignments = dict(st.session_state.group_assignments)
 
     group_names = sorted(st.session_state.group_overrides)
     valid_groups = set(group_names)
@@ -3333,6 +3487,7 @@ with st.sidebar:
             prom_mode=prom_mode,
             prom_default=prom_val,
             run_defaults=run_defaults,
+            context_key="counts",
         )
 
         if stems_for_override:
@@ -3395,6 +3550,7 @@ with st.sidebar:
             prom_mode=prom_mode,
             prom_default=prom_val,
             run_defaults=run_defaults,
+            context_key="dataset",
         )
 
         if combos:

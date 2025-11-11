@@ -154,6 +154,52 @@ def test_optional_plot_export(tmp_path):
     assert any(plots_dir.glob("*.png"))
 
 
+def test_group_marker_ridge_exports(tmp_path):
+    expr = pd.DataFrame(
+        {
+            "markerX": [0.5, 0.6, 2.0, 2.2],
+            "markerY": [3.5, 3.6, 5.0, 5.2],
+        }
+    )
+    meta = pd.DataFrame(
+        {
+            "sample": ["S1", "S1", "S2", "S2"],
+            "batch": ["B1"] * 4,
+        }
+    )
+
+    expr_path = tmp_path / "expr.csv"
+    meta_path = tmp_path / "meta.csv"
+    expr.to_csv(expr_path, index=False)
+    meta.to_csv(meta_path, index=False)
+
+    options = BatchOptions(apply_arcsinh=False, align=True, group_by_marker=True, max_peaks=2)
+    samples, meta_info = collect_dataset_samples(
+        expr_path,
+        meta_path,
+        options,
+    )
+
+    batch = run_batch(samples, options)
+    assert batch.group_by_marker
+    assert batch.marker_groups is not None
+    groups = {name for name, _ in batch.marker_groups}
+    assert groups == {"markerX", "markerY"}
+
+    out_dir = tmp_path / "grouped"
+    save_outputs(batch, out_dir, run_metadata=meta_info)
+
+    zip_path = out_dir / "before_after_alignment.zip"
+    assert zip_path.exists()
+
+    with zipfile.ZipFile(zip_path) as archive:
+        names = set(archive.namelist())
+        assert "before_alignment/before_alignment_ridge.png" in names
+        assert "before_alignment/before_alignment_ridge_markerX.png" in names
+        assert "before_alignment/before_alignment_ridge_markerY.png" in names
+        assert "after_alignment/aligned_ridge_markerX.png" in names
+        assert "after_alignment/aligned_ridge_markerY.png" in names
+
 def test_stain_quality_handles_missing_valleys():
     rng = np.random.default_rng(0)
     left = rng.normal(-3.0, 0.2, size=100)

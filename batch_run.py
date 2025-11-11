@@ -166,6 +166,22 @@ def _parse_target(values: str | None) -> list[float] | None:
         raise ValueError("Alignment target must be numeric values") from exc
 
 
+def _parse_bool_text(value: str | None, *, default: bool) -> bool:
+    if value is None:
+        return default
+
+    text = str(value).strip().lower()
+    if not text:
+        return default
+
+    if text in {"true", "1", "yes", "on"}:
+        return True
+    if text in {"false", "0", "no", "off"}:
+        return False
+
+    raise ValueError(f"Cannot interpret boolean value from '{value}'")
+
+
 def _configure_environment() -> None:
     """Silence noisy backend warnings and prefer a headless matplotlib backend."""
 
@@ -327,6 +343,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="OpenAI API key for GPT-assisted suggestions (overrides OPENAI_API_KEY environment variable).",
     )
     parser.add_argument(
+        "--group-marker",
+        metavar="BOOL",
+        default="false",
+        help="Whether to align and report ridge plots per marker (true/false).",
+    )
+    parser.add_argument(
         "--export-plots",
         action="store_true",
         help="Also write per-sample density plots into an output 'plots' folder.",
@@ -365,6 +387,11 @@ def main(argv: list[str] | None = None) -> int:
     options.first_valley = args.first_valley
     options.consistency_tol = args.consistency_tol
     options.apply_consistency = bool(args.apply_consistency)
+
+    try:
+        options.group_by_marker = _parse_bool_text(args.group_marker, default=False)
+    except ValueError:
+        parser.error("--group-marker must be 'true' or 'false'")
 
     options.align = bool(args.align)
     options.align_mode = args.alignment_mode

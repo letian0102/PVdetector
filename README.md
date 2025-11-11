@@ -92,6 +92,7 @@ Key flags:
 | `--align` | Optional | Off | `--align` | Enable landmark alignment and normalisation. |
 | `--alignment-mode` | Optional | `negPeak_valley_posPeak` | `--alignment-mode negPeak_valley` | Alignment template: `negPeak`, `negPeak_valley`, `negPeak_valley_posPeak`, or `valley`. |
 | `--alignment-target` | Optional | Cohort medians | `--alignment-target -1.5,0.0,1.5` | Comma-separated landmark targets; defaults to cohort medians. |
+| `--group-marker` | Optional | `false` | `--group-marker true` | Align markers separately and emit per-marker ridge plots when multiple markers are processed. |
 | `--workers` | Optional | `1` | `--workers 4` | Number of parallel worker threads. |
 | `--override-file` | Optional | _None_ | `--override-file overrides.json` | JSON overrides for global/marker/sample/stem settings. |
 | `--gpt-model` | Optional | Auto (`o4-mini`) | `--gpt-model o4-mini` | Override GPT model name when using automatic suggestions. |

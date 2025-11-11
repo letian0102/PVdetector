@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import re
 import zipfile
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass
@@ -106,6 +107,8 @@ class BatchOptions:
     align_mode: str = "negPeak_valley_posPeak"
     target_landmarks: Optional[Sequence[float]] = None
 
+    group_by_marker: bool = False
+
     workers: int = 1
 
     # GPT integration
@@ -125,10 +128,12 @@ class BatchResults:
     """Return value for a batch run."""
 
     samples: list[SampleResult]
-    aligned_landmarks: Optional[np.ndarray] = None
+    aligned_landmarks: np.ndarray | dict[str, np.ndarray] | None = None
     alignment_mode: Optional[str] = None
     target_landmarks: Optional[Sequence[float]] = None
     interrupted: bool = False
+    group_by_marker: bool = False
+    marker_groups: list[tuple[str, list[str]]] | None = None
 
 
 class BatchProgress(Protocol):
@@ -234,6 +239,43 @@ def _merge_overrides(
             merged.update({k: v for k, v in entry.items() if v is not None})
 
     return merged
+
+
+def _marker_group_name(marker: Any) -> str:
+    if marker is None:
+        return "Default"
+
+    text = str(marker).strip()
+    return text if text else "Default"
+
+
+def _slugify_label(label: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z._-]+", "_", label.strip()) if label else ""
+    return cleaned or "group"
+
+
+def _group_results_by_marker(
+    results: Sequence[SampleResult],
+    order_map: Mapping[str, int],
+) -> list[tuple[str, list[SampleResult]]]:
+    groups: dict[str, list[SampleResult]] = {}
+    for res in results:
+        name = _marker_group_name(res.metadata.get("marker"))
+        bucket = groups.setdefault(name, [])
+        bucket.append(res)
+
+    if not groups:
+        return []
+
+    for subset in groups.values():
+        subset.sort(key=lambda r: order_map.get(r.stem, 0))
+
+    marker_keys = [key for key in groups if key != "Default"]
+    marker_keys.sort(key=lambda k: k.lower())
+    if "Default" in groups:
+        marker_keys.append("Default")
+
+    return [(name, groups[name]) for name in marker_keys]
 
 
 def _resolve_parameters(
@@ -562,7 +604,8 @@ def run_batch(
             except Exception:
                 progress = None
 
-    aligned_landmarks: Optional[np.ndarray] = None
+    aligned_landmarks: np.ndarray | dict[str, np.ndarray] | None = None
+    marker_groups_info: list[tuple[str, list[SampleResult]]] | None = None
 
     try:
         if options.workers and options.workers > 1:
@@ -617,6 +660,11 @@ def run_batch(
 
         results.sort(key=lambda r: order_map.get(r.stem, 0))
 
+        if options.group_by_marker:
+            marker_groups_info = _group_results_by_marker(results, order_map)
+        else:
+            marker_groups_info = None
+
         if not interrupted and options.apply_consistency and len(results) > 1:
             info_map = {
                 r.stem: {
@@ -642,32 +690,58 @@ def run_batch(
                     res.quality = float(stain_quality(res.counts, res.peaks, res.valleys))
 
         if not interrupted and options.align and results:
-            counts_list = [r.counts for r in results]
-            peaks_list = [r.peaks for r in results]
-            valleys_list = [r.valleys for r in results]
-            density = [(r.xs, r.ys) for r in results]
-
-            try:
-                alignment = align_distributions(
-                    counts_list,
-                    peaks_list,
-                    valleys_list,
-                    align_type=options.align_mode,
-                    target_landmark=options.target_landmarks,
-                    density_grids=density,
-                )
-            except KeyboardInterrupt:
-                interrupted = True
+            if marker_groups_info:
+                alignment_groups = marker_groups_info
             else:
-                aligned_counts, aligned_landmarks, _warp_funs, warped_density = alignment
+                alignment_groups = [(None, results)]
 
-                for res, counts_aligned, warped in zip(
-                    results, aligned_counts, warped_density  # type: ignore[misc]
-                ):
-                    res.aligned_counts = np.asarray(counts_aligned, float)
-                    if warped is not None:
-                        xs_w, ys_w = warped
-                        res.aligned_density = (np.asarray(xs_w, float), np.asarray(ys_w, float))
+            grouped_landmarks: dict[str, np.ndarray] = {}
+
+            for group_name, group_samples in alignment_groups:
+                counts_list = [r.counts for r in group_samples]
+                peaks_list = [r.peaks for r in group_samples]
+                valleys_list = [r.valleys for r in group_samples]
+                density = [(r.xs, r.ys) for r in group_samples]
+
+                try:
+                    alignment = align_distributions(
+                        counts_list,
+                        peaks_list,
+                        valleys_list,
+                        align_type=options.align_mode,
+                        target_landmark=options.target_landmarks,
+                        density_grids=density,
+                    )
+                except KeyboardInterrupt:
+                    interrupted = True
+                    break
+                else:
+                    aligned_counts, group_landmarks, _warp_funs, warped_density = alignment
+                    warped_list = (
+                        list(warped_density)
+                        if warped_density is not None
+                        else [None] * len(group_samples)
+                    )
+
+                    for res, counts_aligned, warped in zip(group_samples, aligned_counts, warped_list):
+                        res.aligned_counts = np.asarray(counts_aligned, float)
+                        if warped is not None:
+                            xs_w, ys_w = warped
+                            res.aligned_density = (
+                                np.asarray(xs_w, float),
+                                np.asarray(ys_w, float),
+                            )
+                        else:
+                            res.aligned_density = None
+
+                    if options.group_by_marker:
+                        key = group_name or "Default"
+                        grouped_landmarks[key] = np.asarray(group_landmarks, float)
+                    else:
+                        aligned_landmarks = group_landmarks
+
+            if options.group_by_marker:
+                aligned_landmarks = grouped_landmarks or None
     finally:
         if progress is not None:
             try:
@@ -675,12 +749,21 @@ def run_batch(
             except Exception:
                 pass
 
+    marker_groups_payload: list[tuple[str, list[str]]] | None = None
+    if marker_groups_info:
+        marker_groups_payload = [
+            (name, [res.stem for res in group_samples])
+            for name, group_samples in marker_groups_info
+        ]
+
     return BatchResults(
         samples=results,
         aligned_landmarks=aligned_landmarks,
         alignment_mode=options.align_mode if (options.align and not interrupted) else None,
         target_landmarks=options.target_landmarks,
         interrupted=interrupted,
+        group_by_marker=bool(options.group_by_marker),
+        marker_groups=marker_groups_payload,
     )
 
 
@@ -887,6 +970,13 @@ def results_to_dict(batch: BatchResults) -> dict[str, Any]:
         payload["alignment_mode"] = batch.alignment_mode
     if batch.target_landmarks is not None:
         payload["target_landmarks"] = _jsonify(batch.target_landmarks)
+    if batch.group_by_marker:
+        payload["group_by_marker"] = True
+        if batch.marker_groups:
+            payload["marker_groups"] = [
+                {"name": name, "stems": stems}
+                for name, stems in batch.marker_groups
+            ]
 
     for res in batch.samples:
         sample_payload = {
@@ -1016,10 +1106,53 @@ def _write_combined_zip(
             archive.writestr("before_alignment/cell_metadata_combined.csv", before_meta)
         if before_expr is not None:
             archive.writestr("before_alignment/expression_matrix_combined.csv", before_expr)
-        if exports["raw_ridge"] is not None:
-            archive.writestr("before_alignment/before_alignment_ridge.png", exports["raw_ridge"])
-        if exports["aligned_ridge"] is not None:
-            archive.writestr("after_alignment/aligned_ridge.png", exports["aligned_ridge"])
+        raw_ridge = exports.get("raw_ridge")
+        if isinstance(raw_ridge, (bytes, bytearray)):
+            archive.writestr("before_alignment/before_alignment_ridge.png", raw_ridge)
+        elif raw_ridge:
+            for name, payload in raw_ridge.items():
+                if payload is None:
+                    continue
+                slug = _slugify_label(str(name))
+                archive.writestr(
+                    f"before_alignment/before_alignment_ridge_{slug}.png",
+                    payload,
+                )
+
+        raw_groups = exports.get("raw_ridge_groups")
+        if isinstance(raw_groups, MappingABC):
+            for name, payload in raw_groups.items():
+                if payload is None:
+                    continue
+                slug = _slugify_label(str(name))
+                archive.writestr(
+                    f"before_alignment/before_alignment_ridge_{slug}.png",
+                    payload,
+                )
+
+        aligned_ridge = exports.get("aligned_ridge")
+        if isinstance(aligned_ridge, (bytes, bytearray)):
+            archive.writestr("after_alignment/aligned_ridge.png", aligned_ridge)
+        elif aligned_ridge:
+            for name, payload in aligned_ridge.items():
+                if payload is None:
+                    continue
+                slug = _slugify_label(str(name))
+                archive.writestr(
+                    f"after_alignment/aligned_ridge_{slug}.png",
+                    payload,
+                )
+
+        aligned_groups = exports.get("aligned_ridge_groups")
+        if isinstance(aligned_groups, MappingABC):
+            for name, payload in aligned_groups.items():
+                if payload is None:
+                    continue
+                slug = _slugify_label(str(name))
+                archive.writestr(
+                    f"after_alignment/aligned_ridge_{slug}.png",
+                    payload,
+                )
         if has_after and exports["meta_after"] is not None:
             archive.writestr("after_alignment/cell_metadata_combined.csv", exports["meta_after"])
         if exports["expr_after"] is not None:
@@ -1110,6 +1243,35 @@ def _dataset_exports(
     raw_ridge = _ridge_plot_png(batch.samples, aligned=False)
     aligned_ridge = _ridge_plot_png(batch.samples, aligned=True) if has_aligned else None
 
+    raw_ridge_groups: dict[str, bytes] | None = None
+    aligned_ridge_groups: dict[str, bytes] | None = None
+
+    if batch.group_by_marker and batch.marker_groups:
+        lookup = {res.stem: res for res in dataset_results}
+        grouped_subsets: list[tuple[str, list[SampleResult]]] = []
+        for name, stems in batch.marker_groups:
+            subset = [lookup[stem] for stem in stems if stem in lookup]
+            if subset:
+                grouped_subsets.append((name, subset))
+
+        if len(grouped_subsets) > 1:
+            raw_ridge_groups = {}
+            aligned_ridge_groups = {} if has_aligned else None
+
+            for name, subset in grouped_subsets:
+                raw_png = _ridge_plot_png(subset, aligned=False)
+                if raw_png is not None:
+                    raw_ridge_groups[name] = raw_png
+                if has_aligned and aligned_ridge_groups is not None:
+                    aligned_png = _ridge_plot_png(subset, aligned=True)
+                    if aligned_png is not None:
+                        aligned_ridge_groups[name] = aligned_png
+
+            if raw_ridge_groups == {}:
+                raw_ridge_groups = None
+            if aligned_ridge_groups == {}:
+                aligned_ridge_groups = None
+
     return {
         "meta": meta_csv,
         "meta_after": meta_csv,
@@ -1117,6 +1279,8 @@ def _dataset_exports(
         "expr_after": expr_after_csv,
         "raw_ridge": raw_ridge,
         "aligned_ridge": aligned_ridge,
+        "raw_ridge_groups": raw_ridge_groups,
+        "aligned_ridge_groups": aligned_ridge_groups,
     }
 
 

@@ -83,24 +83,41 @@ def _enforce_min_separation(
 ) -> list[float]:
     """Drop or swap peaks so every pair obeys ``min_x_sep`` spacing."""
 
-    if min_x_sep is None or len(peaks_x) < 2:
+    if (
+        min_x_sep is None
+        or not np.isfinite(min_x_sep)
+        or min_x_sep <= 0
+        or len(peaks_x) < 2
+    ):
         return sorted(peaks_x)
 
-    keep: list[float] = []
-    for px in sorted(peaks_x):
-        if not keep:
-            keep.append(px)
+    keep = sorted(float(px) for px in peaks_x)
+    heights = [_peak_height(xs, ys, px) for px in keep]
+
+    i = 0
+    while i < len(keep) - 1:
+        left_x = keep[i]
+        right_x = keep[i + 1]
+
+        if right_x - left_x >= min_x_sep:
+            i += 1
             continue
 
-        prev = keep[-1]
-        if px - prev >= min_x_sep:
-            keep.append(px)
+        left_height = heights[i]
+        right_height = heights[i + 1]
+
+        if left_height >= right_height:
+            del keep[i + 1]
+            del heights[i + 1]
+        else:
+            del keep[i]
+            del heights[i]
+            if i > 0:
+                i -= 1
             continue
 
-        prev_height = _peak_height(xs, ys, prev)
-        curr_height = _peak_height(xs, ys, px)
-        if curr_height > prev_height:
-            keep[-1] = px
+        if i > 0:
+            i -= 1
 
     return keep
 

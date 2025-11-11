@@ -25,42 +25,43 @@ def _merge_close_peaks(
     min_valley_drop: float = 0.15,
 ) -> np.ndarray:
     """
-    Collapse spurious twin-peaks produced by flat tops / wiggles.
+    Collapse peaks that violate the minimum separation rule.
 
-    A pair (i,j) is merged if
-      • xs[j] − xs[i]  <  min_x_sep        AND
-      • the deepest point between them is higher than
-        (1 − min_valley_drop) × min(ys[i], ys[j]).
+    Whenever two peaks lie closer than ``min_x_sep`` we keep only the taller
+    one, regardless of how deep the valley between them is.  This matches the
+    user expectation that "too-close" peaks should always be reduced to their
+    single dominant representative.
     """
+
+    _ = min_valley_drop  # kept for API compatibility with previous heuristic
+
     if p_idx.size < 2:
         return p_idx
 
-    keep = []
+    if not np.isfinite(min_x_sep) or min_x_sep <= 0:
+        return np.sort(p_idx)
+
+    # Work on a mutable copy so that we can drop indices in-place while
+    # scanning through the sorted peak list.
+    keep = list(np.sort(p_idx))
+
     i = 0
-    while i < len(p_idx):
-        j = i + 1
-        winner = p_idx[i]
-        while j < len(p_idx):
-            # break if they are already far enough apart
-            if xs[p_idx[j]] - xs[winner] >= min_x_sep:
-                break
+    while i < len(keep) - 1:
+        left = keep[i]
+        right = keep[i + 1]
+        if xs[right] - xs[left] >= min_x_sep:
+            i += 1
+            continue
 
-            # valley height between the two candidates
-            lo, hi = p_idx[j - 1], p_idx[j]
-            valley_h = ys[lo:hi + 1].min()
+        if ys[left] >= ys[right]:
+            del keep[i + 1]
+        else:
+            del keep[i]
 
-            # if the dip is shallow → keep the taller one only
-            if valley_h > (1 - min_valley_drop) * min(ys[winner], ys[p_idx[j]]):
-                if ys[p_idx[j]] > ys[winner]:
-                    winner = p_idx[j]
-                j += 1             # look at the next neighbour
-            else:
-                break              # real valley – stop merging chain
+        if i > 0:
+            i -= 1
 
-        keep.append(winner)
-        i = j
-
-    return np.asarray(sorted(keep), dtype=int)
+    return np.asarray(keep, dtype=int)
 
 
 def _peak_height(xs: np.ndarray, ys: np.ndarray, peak_x: float) -> float:

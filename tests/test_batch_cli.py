@@ -9,11 +9,13 @@ import pytest
 
 from peak_valley.batch import (
     BatchOptions,
+    SampleInput,
     collect_counts_files,
     collect_dataset_samples,
     run_batch,
     save_outputs,
 )
+from peak_valley.alignment import build_warp_function
 from peak_valley.quality import stain_quality
 
 
@@ -245,3 +247,66 @@ def test_run_batch_handles_keyboard_interrupt(tmp_path, monkeypatch):
         manifest = json.load(fh)
     assert manifest.get("interrupted") is True
     assert manifest["samples"], "Partial samples should still be exported"
+
+
+def test_alignment_normalizes_landmarks(monkeypatch):
+    import peak_valley.batch as batch_mod
+
+    def fake_kde(
+        counts,
+        n_peaks,
+        prominence,
+        bandwidth,
+        min_width,
+        grid_size,
+        drop_frac,
+        min_x_sep,
+        curvature_thresh,
+        turning_peak,
+        first_valley,
+    ):
+        xs = np.linspace(-4.0, 4.0, 81)
+        gauss_left = np.exp(-0.5 * ((xs + 3.0) / 0.4) ** 2)
+        gauss_right = np.exp(-0.5 * ((xs - 3.0) / 0.4) ** 2)
+        ys = gauss_left + gauss_right
+        return np.array([-3.0, 3.0]), np.array([0.0]), xs, ys
+
+    monkeypatch.setattr(batch_mod, "kde_peaks_valleys", fake_kde)
+
+    options = BatchOptions(
+        apply_arcsinh=False,
+        align=True,
+        target_landmarks=[-2.0, 0.0, 2.0],
+    )
+
+    sample = SampleInput(
+        stem="Sample1",
+        counts=np.linspace(-4.0, 4.0, 81),
+        metadata={"sample": "S1", "marker": "CD3"},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+
+    batch = run_batch([sample], options)
+    assert not batch.interrupted
+    assert batch.aligned_landmarks is not None
+
+    result = batch.samples[0]
+    assert result.aligned_counts is not None
+    assert result.aligned_peaks is not None
+    assert result.aligned_valleys is not None
+    assert result.aligned_landmark_positions is not None
+
+    warp = build_warp_function(np.array([-3.0, 0.0, 3.0]), np.array([-2.0, 0.0, 2.0]))
+    expected_counts = warp(np.asarray(sample.counts, float))
+    expected_peaks = warp(np.array([-3.0, 3.0]))
+    expected_valleys = warp(np.array([0.0]))
+
+    np.testing.assert_allclose(result.aligned_counts, expected_counts, atol=1e-9)
+    np.testing.assert_allclose(result.aligned_peaks, expected_peaks, atol=1e-9)
+    np.testing.assert_allclose(result.aligned_valleys, expected_valleys, atol=1e-9)
+    np.testing.assert_allclose(
+        result.aligned_landmark_positions,
+        np.array([-2.0, 0.0, 2.0]),
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(batch.aligned_landmarks[0], [-2.0, 0.0, 2.0], atol=1e-9)

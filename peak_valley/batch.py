@@ -70,6 +70,9 @@ class SampleResult:
     arcsinh_signature: tuple[bool, float, float, float] = (True, 1.0, 0.2, 0.0)
     aligned_counts: Optional[np.ndarray] = None
     aligned_density: Optional[tuple[np.ndarray, np.ndarray]] = None
+    aligned_peaks: Optional[list[float]] = None
+    aligned_valleys: Optional[list[float]] = None
+    aligned_landmark_positions: Optional[np.ndarray] = None
     cell_indices: Optional[np.ndarray] = None
 
 
@@ -659,15 +662,32 @@ def run_batch(
             except KeyboardInterrupt:
                 interrupted = True
             else:
-                aligned_counts, aligned_landmarks, _warp_funs, warped_density = alignment
+                aligned_counts, aligned_landmarks, warp_funs, warped_density = alignment
 
-                for res, counts_aligned, warped in zip(
-                    results, aligned_counts, warped_density  # type: ignore[misc]
+                for idx, (res, counts_aligned, warped) in enumerate(
+                    zip(results, aligned_counts, warped_density)  # type: ignore[misc]
                 ):
                     res.aligned_counts = np.asarray(counts_aligned, float)
                     if warped is not None:
                         xs_w, ys_w = warped
                         res.aligned_density = (np.asarray(xs_w, float), np.asarray(ys_w, float))
+                    warp_fn = warp_funs[idx] if idx < len(warp_funs) else None
+                    if warp_fn is not None:
+                        if res.peaks:
+                            peaks_arr = np.asarray(res.peaks, float)
+                            res.aligned_peaks = [float(v) for v in warp_fn(peaks_arr)]
+                        else:
+                            res.aligned_peaks = []
+                        if res.valleys:
+                            valleys_arr = np.asarray(res.valleys, float)
+                            res.aligned_valleys = [float(v) for v in warp_fn(valleys_arr)]
+                        else:
+                            res.aligned_valleys = []
+                    if aligned_landmarks is not None and idx < len(aligned_landmarks):
+                        res.aligned_landmark_positions = np.asarray(
+                            aligned_landmarks[idx],
+                            float,
+                        )
     finally:
         if progress is not None:
             try:
@@ -909,6 +929,15 @@ def results_to_dict(batch: BatchResults) -> dict[str, Any]:
                 float(x) if math.isfinite(float(x)) else None
                 for x in res.aligned_counts
             ]
+        if res.aligned_peaks is not None:
+            sample_payload["aligned_peaks"] = [float(p) for p in res.aligned_peaks]
+        if res.aligned_valleys is not None:
+            sample_payload["aligned_valleys"] = [float(v) for v in res.aligned_valleys]
+        if res.aligned_landmark_positions is not None:
+            sample_payload["aligned_landmarks"] = [
+                float(x) if np.isfinite(float(x)) else None
+                for x in np.asarray(res.aligned_landmark_positions, float)
+            ]
         payload["samples"].append(sample_payload)
 
     return payload
@@ -1130,13 +1159,28 @@ def _ridge_plot_png(samples: Sequence[SampleResult], *, aligned: bool) -> bytes 
                 continue
             xs = np.asarray(res.aligned_density[0], float)
             ys = np.asarray(res.aligned_density[1], float)
+            peaks_for_plot = res.aligned_peaks if res.aligned_peaks is not None else res.peaks
+            valleys_for_plot = (
+                res.aligned_valleys if res.aligned_valleys is not None else res.valleys
+            )
         else:
             xs = np.asarray(res.xs, float)
             ys = np.asarray(res.ys, float)
+            peaks_for_plot = res.peaks
+            valleys_for_plot = res.valleys
         if xs.size == 0 or ys.size == 0:
             continue
         height = max(float(np.nanmax(ys)), 1e-6)
-        curves.append((res.stem, xs, ys, list(res.peaks), list(res.valleys), height))
+        curves.append(
+            (
+                res.stem,
+                xs,
+                ys,
+                list(peaks_for_plot),
+                list(valleys_for_plot),
+                height,
+            )
+        )
 
     if not curves:
         return None

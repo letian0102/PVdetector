@@ -85,6 +85,7 @@ for key, default in {
     "group_overrides": {"Default": {}},
     "group_new_name": "",
     "group_new_name_reset": False,
+    "group_assignments_mode": "Manual selection",
     "cached_uploads": [],
     "generated_csvs": [],
     "generated_meta": {},
@@ -943,6 +944,43 @@ def _sample_metadata(stem: str) -> dict[str, str]:
         "marker": _clean(meta.get("marker", "")),
         "batch": _clean(batch_val),
     }
+
+
+def _stem_marker(stem: str) -> str | None:
+    """Best-effort lookup of the marker associated with ``stem``."""
+
+    meta_map = st.session_state.get("generated_meta", {}) or {}
+    meta = meta_map.get(stem)
+    if isinstance(meta, dict):
+        marker = meta.get("marker") or meta.get("protein_name")
+        if marker:
+            marker_str = str(marker).strip()
+            if marker_str:
+                return marker_str
+
+    raw_meta_map = st.session_state.get("results_raw_meta", {}) or {}
+    raw_meta = raw_meta_map.get(stem)
+    if isinstance(raw_meta, dict):
+        marker = raw_meta.get("marker") or raw_meta.get("protein_name")
+        if marker:
+            marker_str = str(marker).strip()
+            if marker_str:
+                return marker_str
+
+    summary_df = st.session_state.get("cli_summary_df")
+    if isinstance(summary_df, pd.DataFrame) and "marker" in summary_df.columns:
+        try:
+            mask = summary_df.get("stem").astype(str).eq(str(stem))
+            if mask.any():
+                marker_val = summary_df.loc[mask, "marker"].iloc[0]
+                if isinstance(marker_val, str):
+                    marker_str = marker_val.strip()
+                    if marker_str:
+                        return marker_str
+        except Exception:
+            pass
+
+    return None
 
 
 def _processed_counts_csv() -> bytes:
@@ -2101,6 +2139,27 @@ def _render_group_controls(
 
     st.markdown("---\n### Sample groups (optional)")
 
+    marker_map = {stem: _stem_marker(stem) for stem in stems_unique}
+    has_marker_groups = any(marker for marker in marker_map.values())
+
+    mode_options = ["Manual selection"]
+    if has_marker_groups:
+        mode_options.append("By marker name")
+
+    prev_mode = st.session_state.get("group_assignments_mode", "Manual selection")
+    if prev_mode not in mode_options:
+        prev_mode = "Manual selection"
+
+    selection_index = mode_options.index(prev_mode)
+    selected_mode = st.radio(
+        "Grouping mode",
+        mode_options,
+        index=selection_index,
+        key="group_assignments_mode",
+        help="Choose whether to assign samples manually or group them automatically by marker name.",
+    )
+    auto_mode = selected_mode == "By marker name"
+
     col_name, col_add = st.columns([3, 1])
 
     if st.session_state.get("group_new_name_reset", False):
@@ -2112,8 +2171,9 @@ def _render_group_controls(
         key="group_new_name",
         placeholder="e.g. Treatment A",
         help="Groups let you tune detector settings once and apply them to multiple samples.",
+        disabled=auto_mode,
     )
-    if col_add.button("Add group", key="group_add_btn"):
+    if col_add.button("Add group", key="group_add_btn", disabled=auto_mode):
         clean = new_group_name.strip()
         if clean:
             if clean not in st.session_state.group_overrides:
@@ -2121,15 +2181,38 @@ def _render_group_controls(
             st.session_state.group_new_name_reset = True
         st.rerun()
 
+    if auto_mode:
+        for marker in marker_map.values():
+            if marker:
+                st.session_state.group_overrides.setdefault(str(marker), {})
+
     group_names = sorted(st.session_state.group_overrides)
     valid_groups = set(group_names)
 
     current_assignments: dict[str, str] = {}
+    auto_defaulted: list[str] = []
     for stem in stems_unique:
-        group = st.session_state.group_assignments.get(stem, "Default")
+        if auto_mode:
+            marker = marker_map.get(stem)
+            if marker:
+                group = str(marker)
+            else:
+                group = "Default"
+                auto_defaulted.append(stem)
+        else:
+            group = st.session_state.group_assignments.get(stem, "Default")
         if group not in valid_groups:
             group = "Default"
         current_assignments[stem] = group
+
+    if auto_mode:
+        st.info(
+            "Samples are automatically grouped by their marker names. Manual assignment controls are disabled."
+        )
+        if auto_defaulted:
+            st.caption(
+                "Markers not found for: " + ", ".join(auto_defaulted) + " (kept in Default group)."
+            )
 
     if len(group_names) > 1:
         st.caption(
@@ -2144,14 +2227,18 @@ def _render_group_controls(
         default_selection = [
             stem for stem, grp in current_assignments.items() if grp == group_name
         ]
-        existing_selection = st.session_state.get(selection_key)
-        if isinstance(existing_selection, list):
-            sanitized_existing = [stem for stem in existing_selection if stem in stems_unique]
-            if sanitized_existing != existing_selection:
-                st.session_state[selection_key] = sanitized_existing
-            default_values = sanitized_existing
-        else:
+        if auto_mode:
+            st.session_state[selection_key] = default_selection
             default_values = default_selection
+        else:
+            existing_selection = st.session_state.get(selection_key)
+            if isinstance(existing_selection, list):
+                sanitized_existing = [stem for stem in existing_selection if stem in stems_unique]
+                if sanitized_existing != existing_selection:
+                    st.session_state[selection_key] = sanitized_existing
+                default_values = sanitized_existing
+            else:
+                default_values = default_selection
 
         selection = st.multiselect(
             f"Samples in {group_name}",
@@ -2159,6 +2246,7 @@ def _render_group_controls(
             default=default_values,
             key=selection_key,
             help="Choose the samples that should inherit this group's overrides.",
+            disabled=auto_mode,
         )
         group_selections[group_name] = selection
 
@@ -2213,7 +2301,7 @@ def _render_group_controls(
             continue
 
         with st.expander(f"Group: {group_name}", expanded=False):
-            if st.button("Remove group", key=f"group_remove__{group_name}"):
+            if st.button("Remove group", key=f"group_remove__{group_name}", disabled=auto_mode):
                 affected = [
                     stem
                     for stem, grp in st.session_state.group_assignments.items()

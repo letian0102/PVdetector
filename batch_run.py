@@ -166,6 +166,15 @@ def _parse_target(values: str | None) -> list[float] | None:
         raise ValueError("Alignment target must be numeric values") from exc
 
 
+def _parse_bool_flag(value: str) -> bool:
+    text = str(value).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError("Expected a boolean value (true/false)")
+
+
 def _configure_environment() -> None:
     """Silence noisy backend warnings and prefer a headless matplotlib backend."""
 
@@ -317,6 +326,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--alignment-target",
         help="Comma-separated landmark targets (otherwise cohort median is used).",
     )
+    parser.add_argument(
+        "--group-marker",
+        metavar="BOOL",
+        default=None,
+        help="Automatically group samples by marker name for alignment and ridge plots (true/false).",
+    )
 
     parser.add_argument("--workers", type=int, default=1, help="Number of parallel worker threads.")
     parser.add_argument("--override-file", help="JSON file with per-sample or per-marker overrides.")
@@ -369,6 +384,13 @@ def main(argv: list[str] | None = None) -> int:
     options.align = bool(args.align)
     options.align_mode = args.alignment_mode
     options.target_landmarks = target_landmarks
+    group_marker_flag = False
+    if args.group_marker is not None:
+        try:
+            group_marker_flag = _parse_bool_flag(str(args.group_marker))
+        except argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
+    options.group_by_marker = group_marker_flag
     options.workers = max(1, args.workers)
 
     if args.gpt_model:

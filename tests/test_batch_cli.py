@@ -137,6 +137,44 @@ def test_combined_zip_has_expected_exports(tmp_path):
     assert not (out_dir / "aligned_landmarks.csv").exists()
 
 
+def test_group_marker_exports_multiple_ridges(tmp_path):
+    expr = pd.DataFrame(
+        {
+            "CD3": [1.0, 1.2, 1.1, 4.0, 4.2, 4.1],
+            "CD19": [3.0, 3.3, 3.1, 6.5, 6.7, 6.6],
+        }
+    )
+    meta = pd.DataFrame(
+        {
+            "sample": ["S1"] * 3 + ["S2"] * 3,
+        }
+    )
+
+    expr_path = tmp_path / "expr.csv"
+    meta_path = tmp_path / "meta.csv"
+    expr.to_csv(expr_path, index=False)
+    meta.to_csv(meta_path, index=False)
+
+    options = BatchOptions(apply_arcsinh=False, align=True, max_peaks=2, group_by_marker=True)
+    samples, meta_info = collect_dataset_samples(expr_path, meta_path, options)
+
+    batch = run_batch(samples, options)
+    assert not batch.interrupted
+    assert batch.group_by_marker is True
+
+    out_dir = tmp_path / "grouped_outputs"
+    save_outputs(batch, out_dir, run_metadata=meta_info)
+
+    zip_path = out_dir / "before_after_alignment.zip"
+    assert zip_path.exists()
+
+    with zipfile.ZipFile(zip_path) as archive:
+        names = set(archive.namelist())
+        assert "before_alignment/before_alignment_ridge_CD19.png" in names
+        assert "before_alignment/before_alignment_ridge_CD3.png" in names
+        assert "after_alignment/aligned_ridge_CD19.png" in names
+        assert "after_alignment/aligned_ridge_CD3.png" in names
+        assert "before_alignment/before_alignment_ridge.png" not in names
 def test_optional_plot_export(tmp_path):
     rng = np.random.default_rng(123)
     values = rng.normal(size=400)

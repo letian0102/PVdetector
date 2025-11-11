@@ -671,18 +671,14 @@ def run_batch(
                     if warped is not None:
                         xs_w, ys_w = warped
                         res.aligned_density = (np.asarray(xs_w, float), np.asarray(ys_w, float))
-                    warp_fn = warp_funs[idx] if idx < len(warp_funs) else None
-                    if warp_fn is not None:
-                        if res.peaks:
-                            peaks_arr = np.asarray(res.peaks, float)
-                            res.aligned_peaks = [float(v) for v in warp_fn(peaks_arr)]
-                        else:
-                            res.aligned_peaks = []
-                        if res.valleys:
-                            valleys_arr = np.asarray(res.valleys, float)
-                            res.aligned_valleys = [float(v) for v in warp_fn(valleys_arr)]
-                        else:
-                            res.aligned_valleys = []
+                    if res.peaks:
+                        res.aligned_peaks = [float(v) for v in res.peaks]
+                    else:
+                        res.aligned_peaks = []
+                    if res.valleys:
+                        res.aligned_valleys = [float(v) for v in res.valleys]
+                    else:
+                        res.aligned_valleys = []
                     if aligned_landmarks is not None and idx < len(aligned_landmarks):
                         res.aligned_landmark_positions = np.asarray(
                             aligned_landmarks[idx],

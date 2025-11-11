@@ -664,25 +664,33 @@ def run_batch(
             else:
                 aligned_counts, aligned_landmarks, warp_funs, warped_density = alignment
 
-                for idx, (res, counts_aligned, warped) in enumerate(
-                    zip(results, aligned_counts, warped_density)  # type: ignore[misc]
-                ):
+                for idx, res in enumerate(results):
+                    counts_aligned = aligned_counts[idx]
+                    warped = warped_density[idx]
+                    warp_fun = warp_funs[idx]
+
                     res.aligned_counts = np.asarray(counts_aligned, float)
                     if warped is not None:
                         xs_w, ys_w = warped
-                        res.aligned_density = (np.asarray(xs_w, float), np.asarray(ys_w, float))
-                    warp_fn = warp_funs[idx] if idx < len(warp_funs) else None
-                    if warp_fn is not None:
-                        if res.peaks:
-                            peaks_arr = np.asarray(res.peaks, float)
-                            res.aligned_peaks = [float(v) for v in warp_fn(peaks_arr)]
-                        else:
-                            res.aligned_peaks = []
-                        if res.valleys:
-                            valleys_arr = np.asarray(res.valleys, float)
-                            res.aligned_valleys = [float(v) for v in warp_fn(valleys_arr)]
-                        else:
-                            res.aligned_valleys = []
+                        res.aligned_density = (
+                            np.asarray(xs_w, float),
+                            np.asarray(ys_w, float),
+                        )
+                    else:
+                        res.aligned_density = None
+
+                    if res.peaks:
+                        warped_peaks = warp_fun(np.asarray(res.peaks, float))
+                        res.aligned_peaks = [float(v) for v in warped_peaks]
+                    else:
+                        res.aligned_peaks = []
+
+                    if res.valleys:
+                        warped_valleys = warp_fun(np.asarray(res.valleys, float))
+                        res.aligned_valleys = [float(v) for v in warped_valleys]
+                    else:
+                        res.aligned_valleys = []
+
                     if aligned_landmarks is not None and idx < len(aligned_landmarks):
                         res.aligned_landmark_positions = np.asarray(
                             aligned_landmarks[idx],

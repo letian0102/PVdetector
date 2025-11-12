@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
+from matplotlib.text import Text
 import streamlit as st
 from openai import OpenAI, AuthenticationError
 
@@ -856,12 +857,10 @@ def _ridge_plot_for_stems(
 
     label_lengths = [len(stem) for stem, *_ in scaled_curves]
     max_label_len = max(label_lengths) if label_lengths else 0
-    # Reserve a little extra breathing room for long sample names so they never
-    # collide with the plotted densities.
-    left_margin = min(0.5, 0.08 + 0.015 * max_label_len)
-
     text_transform = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
-    label_pad_axes = min(0.25, 0.06 + 0.0025 * max_label_len)
+    label_pad_axes = min(0.35, 0.08 + 0.003 * max_label_len)
+
+    label_artists: list[Text] = []
 
     for offset, (stem, xs, ys, peaks, valleys, height) in zip(offsets, scaled_curves):
         ax.plot(xs, ys + offset, color="black", lw=1)
@@ -892,7 +891,7 @@ def _ridge_plot_for_stems(
                     linestyles=":",
                 )
 
-        ax.text(
+        label = ax.text(
             -label_pad_axes,
             offset + 0.5 * ymax,
             stem,
@@ -900,41 +899,69 @@ def _ridge_plot_for_stems(
             ha="right",
             va="center",
             fontsize=7,
-            bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none", "pad": 0.2},
+            bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "none", "pad": 0.25},
             clip_on=False,
         )
+        label_artists.append(label)
 
     ax.set_yticks([])
     ax.set_xlim(x_min - pad, x_max + pad)
-    positive_heights = np.asarray(
-        [height for *_, height in scaled_curves], dtype=float
-    )
-    positive_heights = positive_heights[np.isfinite(positive_heights) & (positive_heights > 0)]
-    if positive_heights.size:
-        typical_height = float(np.median(positive_heights))
-    else:
-        typical_height = 1.0
-
     if offsets:
         first_offset = offsets[0]
-        first_height = scaled_curves[0][-1]
         last_offset = offsets[-1]
-        last_height = scaled_curves[-1][-1]
+        full_height = np.asarray([height for *_, height in scaled_curves], dtype=float)
+        full_height[~np.isfinite(full_height)] = 0.0
+        first_height = full_height[0] if full_height.size else 1.0
+        last_height = full_height[-1] if full_height.size else 1.0
         offset_array = np.asarray(offsets, dtype=float)
         if offset_array.size > 1:
-            typical_step = float(np.median(np.diff(offset_array)))
+            step_samples = np.diff(offset_array)
+            typical_step = float(np.median(step_samples[np.isfinite(step_samples)]))
+            if not np.isfinite(typical_step) or typical_step <= 0:
+                typical_step = float(np.median(full_height[full_height > 0])) if np.any(full_height > 0) else 1.0
+            first_gap = float(offset_array[1] - offset_array[0])
+            last_gap = float(offset_array[-1] - offset_array[-2])
         else:
-            typical_step = float(first_height)
-        base_pad = max(typical_height * 0.05, typical_step * 0.1, 1e-6)
-        y_bottom = first_offset - max(base_pad, first_height * 0.05)
-        y_top = last_offset + last_height + max(base_pad, last_height * 0.05)
+            positive = full_height[full_height > 0]
+            typical_step = float(np.median(positive)) if positive.size else 1.0
+            first_gap = last_gap = typical_step
+
+        if not np.isfinite(first_gap) or first_gap <= 0:
+            first_gap = max(first_height, typical_step)
+        if not np.isfinite(last_gap) or last_gap <= 0:
+            last_gap = max(last_height, typical_step)
+
+        lower_pad = max(1e-6, min(first_gap * 0.08, first_height * 0.3, typical_step * 0.1))
+        upper_pad = max(1e-6, min(last_gap * 0.08, last_height * 0.3, typical_step * 0.1))
+
+        y_bottom = first_offset - lower_pad
+        y_top = last_offset + last_height + upper_pad
     else:
         y_bottom = 0.0
-        y_top = typical_height
+        y_top = 1.0
 
     ax.set_ylim(y_bottom, y_top)
     ax.margins(y=0)
-    fig.subplots_adjust(left=left_margin, right=0.98, top=0.98, bottom=0.02)
+
+    # After configuring axes limits, draw once so we can measure label extents
+    fig.canvas.draw()
+    desired_gap = 0.01
+    left_margin = 0.12
+    if label_artists:
+        renderer = fig.canvas.get_renderer()
+        label_right = 0.0
+        for artist in label_artists:
+            try:
+                bbox = artist.get_window_extent(renderer)
+            except RuntimeError:
+                continue
+            bbox_fig = bbox.transformed(fig.transFigure.inverted())
+            label_right = max(label_right, float(bbox_fig.x1))
+        axis_pos = ax.get_position()
+        left_margin = max(axis_pos.x0, label_right + desired_gap)
+        left_margin = min(left_margin, 0.6)
+
+    fig.subplots_adjust(left=left_margin, right=0.98, top=0.995, bottom=0.005)
 
     png = fig_to_png(fig)
     plt.close(fig)

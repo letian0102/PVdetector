@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import math
 import re
@@ -1564,6 +1565,8 @@ def _default_priors(marker_name: Optional[str]) -> dict[str, Any]:
 
 def _build_feature_payload(
     counts_full: Optional[np.ndarray],
+    *,
+    kde_bandwidth: float | str | None = None,
 ) -> dict[str, Any]:
     """Construct histogram + analytic features for GPT."""
 
@@ -1575,6 +1578,20 @@ def _build_feature_payload(
     lo, hi = _robust_limits(values)
     if hi <= lo:
         hi = lo + 1.0
+
+    provided_bandwidth_value: float | None = None
+    provided_bandwidth_label: str | None = None
+    bandwidth_source = "estimated"
+    if isinstance(kde_bandwidth, (int, float)):
+        numeric = float(kde_bandwidth)
+        if np.isfinite(numeric) and numeric > 0:
+            provided_bandwidth_value = numeric
+            bandwidth_source = "provided_value"
+    elif isinstance(kde_bandwidth, str):
+        label = kde_bandwidth.strip()
+        if label:
+            provided_bandwidth_label = label
+            bandwidth_source = "provided_rule"
 
     bins, adaptive_info = _adaptive_bin_count(values, lo, hi)
     if bins <= 0:
@@ -1623,6 +1640,11 @@ def _build_feature_payload(
             "x": [],
             "density": [],
         }
+
+    if provided_bandwidth_value is not None:
+        kde_section["bandwidth"] = provided_bandwidth_value
+    if provided_bandwidth_label is not None:
+        kde_section["bandwidth_rule"] = provided_bandwidth_label
 
     if base_factor is not None and base_factor > 0:
         multiscale_section = _multiscale_kde_profiles(
@@ -1688,6 +1710,10 @@ def _build_feature_payload(
         "second_derivative_summary": _second_derivative_summary(smoothed),
         "range": {"lo": float(lo), "hi": float(hi)},
     }
+
+    histogram_payload["kde_bandwidth_source"] = bandwidth_source
+    if provided_bandwidth_label is not None:
+        histogram_payload["kde_bandwidth_rule"] = provided_bandwidth_label
 
     histogram_payload["bin_centers"] = [float(round(c, 4)) for c in bin_centers.tolist()]
     histogram_payload["cumulative_counts"] = [
@@ -2052,6 +2078,8 @@ def ask_gpt_peak_count(
     batch_id: str | None = None,
     features: Optional[dict[str, Any]] = None,
     priors: Optional[dict[str, Any]] = None,
+    distribution_image: Optional[bytes] = None,
+    kde_bandwidth: float | str | None = None,
 ) -> int | None:
     """Query GPT for the number of visible density peaks using structured output."""
 
@@ -2093,7 +2121,10 @@ def ask_gpt_peak_count(
     if features is not None:
         feature_payload = dict(features)
     else:
-        feature_payload = _build_feature_payload(counts_full)
+        feature_payload = _build_feature_payload(
+            counts_full,
+            kde_bandwidth=kde_bandwidth,
+        )
 
     safe_max, heuristic_info = _apply_peak_caps(feature_payload, marker_name, requested_max)
     payload["meta"]["allowed_peaks_max"] = safe_max
@@ -2169,6 +2200,28 @@ def ask_gpt_peak_count(
         },
     }
 
+    if distribution_image:
+        try:
+            image_b64 = base64.b64encode(distribution_image).decode("ascii")
+        except Exception:
+            image_b64 = ""
+    else:
+        image_b64 = ""
+
+    if image_b64:
+        user_content: Any = [
+            {"type": "text", "text": json.dumps(payload)},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{image_b64}",
+                    "detail": "high",
+                },
+            },
+        ]
+    else:
+        user_content = json.dumps(payload)
+
     try:
         rsp = client.chat.completions.create(
             model=model_name,
@@ -2177,7 +2230,7 @@ def ask_gpt_peak_count(
             timeout=45,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user", "content": json.dumps(payload)},
+                {"role": "user", "content": user_content},
             ],
             response_format=response_format,
         )

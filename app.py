@@ -875,15 +875,23 @@ def _ridge_plot_for_stems(
 
     if x_max == x_min:
         span = abs(x_min) if x_min != 0 else 1.0
-        pad = 0.01 * span
+        pad = 0.005 * span
     else:
         span = max(x_max - x_min, 1e-9)
-        pad_candidates = [1e-6, 0.0025 * span]
+        base_pad = span * 0.003
+        if not np.isfinite(base_pad) or base_pad <= 0:
+            base_pad = 1e-6
+
+        pad = base_pad
         if dx_samples:
             typical_dx = float(np.median(dx_samples))
-            if np.isfinite(typical_dx) and typical_dx > 0:
-                pad_candidates.append(min(typical_dx, 0.02 * span))
-        pad = max(pad_candidates)
+        else:
+            typical_dx = float("nan")
+
+        if np.isfinite(typical_dx) and typical_dx > 0:
+            pad = min(pad, max(typical_dx * 0.5, 1e-6))
+
+        pad = max(pad, 1e-6)
 
     fig, ax = plt.subplots(
         figsize=(6, 0.6 * max(len(scaled_curves), 1)),
@@ -894,7 +902,7 @@ def _ridge_plot_for_stems(
     label_lengths = [len(stem) for stem, *_ in scaled_curves]
     max_label_len = max(label_lengths) if label_lengths else 0
     text_transform = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
-    label_pad_axes = min(0.5, 0.1 + 0.0045 * max_label_len)
+    label_pad_axes = min(0.65, 0.16 + 0.006 * max_label_len)
 
     label_artists: list[Text] = []
 
@@ -981,7 +989,7 @@ def _ridge_plot_for_stems(
 
     # After configuring axes limits, draw once so we can measure label extents
     fig.canvas.draw()
-    desired_gap = 0.01
+    desired_gap = 0.015
     left_margin = 0.12
     if label_artists:
         axis_pos = ax.get_position()

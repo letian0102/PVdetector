@@ -9,7 +9,9 @@ import pytest
 
 from peak_valley.batch import (
     BatchOptions,
+    BatchResults,
     SampleInput,
+    SampleResult,
     collect_counts_files,
     collect_dataset_samples,
     run_batch,
@@ -23,6 +25,57 @@ def _write_counts(path: Path, values: np.ndarray) -> None:
     with path.open("w", encoding="utf-8") as fh:
         for val in values:
             fh.write(f"{val}\n")
+
+
+def test_collect_counts_files_sanitizes_and_deduplicates(tmp_path):
+    path_one = tmp_path / "Sample !.csv"
+    path_two = tmp_path / "Sample @.csv"
+    _write_counts(path_one, np.array([1.0, 2.0]))
+    _write_counts(path_two, np.array([3.0, 4.0]))
+
+    options = BatchOptions(apply_arcsinh=False)
+    samples = collect_counts_files(
+        [path_one, path_two],
+        options,
+        header_row=-1,
+        skip_rows=0,
+    )
+
+    stems = [sample.stem for sample in samples]
+    assert stems == ["Sample", "Sample_2"]
+    assert samples[0].metadata["source_stem"] == "Sample !"
+    assert samples[1].metadata["source_stem"] == "Sample @"
+
+
+def test_collect_dataset_samples_sanitizes_stems(tmp_path):
+    expr = pd.DataFrame(
+        {
+            "CD3+": [0.2, 0.5, 0.8, 1.0],
+            "CD3*": [1.2, 1.5, 1.8, 2.0],
+        }
+    )
+    meta = pd.DataFrame(
+        {
+            "sample": ["Alpha/Beta"] * 4,
+        }
+    )
+
+    expr_path = tmp_path / "expr.csv"
+    meta_path = tmp_path / "meta.csv"
+    expr.to_csv(expr_path, index=False)
+    meta.to_csv(meta_path, index=False)
+
+    options = BatchOptions(apply_arcsinh=False)
+    samples, _ = collect_dataset_samples(
+        expr_path,
+        meta_path,
+        options,
+    )
+
+    stems = [sample.stem for sample in samples]
+    assert stems == ["Alpha_Beta_CD3_raw_counts", "Alpha_Beta_CD3_raw_counts_2"]
+    assert samples[0].metadata["source_stem"] == "Alpha/Beta_CD3+_raw_counts"
+    assert samples[1].metadata["source_stem"] == "Alpha/Beta_CD3*_raw_counts"
 
 
 def test_run_batch_on_counts(tmp_path):
@@ -48,8 +101,9 @@ def test_run_batch_on_counts(tmp_path):
     out_dir = tmp_path / "outputs"
     save_outputs(batch, out_dir)
 
-    summary_path = out_dir / "summary.csv"
-    assert summary_path.exists()
+    summary_files = list(out_dir.glob("summary_*.csv"))
+    assert summary_files, "Expected a sanitised summary export"
+    summary_path = summary_files[0]
     summary_df = pd.read_csv(summary_path)
     assert counts_path.stem in summary_df["stem"].tolist()
 
@@ -58,8 +112,9 @@ def test_run_batch_on_counts(tmp_path):
     assert not (out_dir / "curves").exists()
     assert not (out_dir / "aligned_curves").exists()
 
-    results_path = out_dir / "results.json"
-    assert results_path.exists()
+    results_files = list(out_dir.glob("results_*.json"))
+    assert results_files, "Expected a sanitised results manifest"
+    results_path = results_files[0]
     with results_path.open("r", encoding="utf-8") as fh:
         manifest = json.load(fh)
     assert manifest["samples"], "Manifest should include sample entries"
@@ -115,8 +170,9 @@ def test_combined_zip_has_expected_exports(tmp_path):
     out_dir = tmp_path / "outputs"
     save_outputs(batch, out_dir, run_metadata=meta_info)
 
-    zip_path = out_dir / "before_after_alignment.zip"
-    assert zip_path.exists(), "Expected combined zip export"
+    zip_candidates = list(out_dir.glob("before_after_alignment_*.zip"))
+    assert zip_candidates, "Expected sanitised combined zip export"
+    zip_path = zip_candidates[0]
 
     with zipfile.ZipFile(zip_path) as archive:
         names = set(archive.namelist())
@@ -165,8 +221,9 @@ def test_group_marker_exports_multiple_ridges(tmp_path):
     out_dir = tmp_path / "grouped_outputs"
     save_outputs(batch, out_dir, run_metadata=meta_info)
 
-    zip_path = out_dir / "before_after_alignment.zip"
-    assert zip_path.exists()
+    zip_candidates = list(out_dir.glob("before_after_alignment_*.zip"))
+    assert zip_candidates
+    zip_path = zip_candidates[0]
 
     with zipfile.ZipFile(zip_path) as archive:
         names = set(archive.namelist())
@@ -278,9 +335,12 @@ def test_run_batch_handles_keyboard_interrupt(tmp_path, monkeypatch):
     out_dir = tmp_path / "partial"
     save_outputs(batch, out_dir)
 
-    summary_path = out_dir / "summary.csv"
-    assert summary_path.exists()
-    results_path = out_dir / "results.json"
+    summary_candidates = list(out_dir.glob("summary_*.csv"))
+    assert summary_candidates
+    summary_path = summary_candidates[0]
+    results_candidates = list(out_dir.glob("results_*.json"))
+    assert results_candidates
+    results_path = results_candidates[0]
     with results_path.open("r", encoding="utf-8") as fh:
         manifest = json.load(fh)
     assert manifest.get("interrupted") is True
@@ -346,3 +406,51 @@ def test_alignment_normalizes_landmarks(monkeypatch):
         atol=1e-9,
     )
     np.testing.assert_allclose(batch.aligned_landmarks[0], [-2.0, 0.0, 2.0], atol=1e-9)
+
+
+def _dummy_result(marker: str, sample: str) -> SampleResult:
+    return SampleResult(
+        stem=f"{sample}_{marker}",
+        peaks=[0.5],
+        valleys=[0.2],
+        xs=np.array([0.0, 1.0]),
+        ys=np.array([0.4, 0.6]),
+        counts=np.array([0.1, 0.9]),
+        params={"bw": 0.1, "prom": 0.05},
+        quality=0.95,
+        metadata={"sample": sample, "marker": marker},
+    )
+
+
+def test_save_outputs_uses_marker_slug(tmp_path):
+    batch = BatchResults(samples=[_dummy_result("CD3", "S1")])
+    save_outputs(batch, tmp_path)
+
+    summary_files = {p.name for p in tmp_path.glob("summary_*.csv")}
+    results_files = {p.name for p in tmp_path.glob("results_*.json")}
+
+    assert "summary_CD3.csv" in summary_files
+    assert "results_CD3.json" in results_files
+
+
+def test_save_outputs_dedupes_marker_slugs(tmp_path):
+    batch = BatchResults(
+        samples=[
+            _dummy_result("CD3", "S1"),
+            _dummy_result("CD19", "S2"),
+            _dummy_result("CD45", "S3"),
+        ]
+    )
+
+    save_outputs(batch, tmp_path)
+    first_summary = tmp_path / "summary_CD3-p2.csv"
+    assert first_summary.exists()
+
+    save_outputs(batch, tmp_path)
+    second_summary = tmp_path / "summary_CD3_CD19-p1.csv"
+    assert second_summary.exists()
+
+    first_results = tmp_path / "results_CD3-p2.json"
+    second_results = tmp_path / "results_CD3_CD19-p1.json"
+    assert first_results.exists()
+    assert second_results.exists()

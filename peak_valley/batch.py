@@ -8,6 +8,7 @@ distributions, and export all intermediate and final artefacts.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import math
@@ -819,6 +820,7 @@ def collect_counts_files(
 
     samples: list[SampleInput] = []
     arcsinh_sig = options.arcsinh_signature()
+    used_stems: set[str] = set()
 
     for order, path in enumerate(paths):
         path_obj = Path(path)
@@ -838,9 +840,13 @@ def collect_counts_files(
             "protein_name": meta.get("protein_name"),
         }
 
+        raw_stem = meta.get("stem") or path_obj.stem
+        safe_stem = _unique_stem(raw_stem, used=used_stems)
+        metadata.setdefault("source_stem", raw_stem)
+
         samples.append(
             SampleInput(
-                stem=path_obj.stem,
+                stem=safe_stem,
                 counts=np.asarray(counts, float),
                 metadata=metadata,
                 arcsinh_signature=arcsinh_sig,
@@ -884,6 +890,7 @@ def collect_dataset_samples(
     arcsinh_sig = options.arcsinh_signature()
 
     prepared: list[SampleInput] = []
+    used_stems: set[str] = set()
 
     order = 0
     for sample_name in sample_sel:
@@ -933,12 +940,14 @@ def collect_dataset_samples(
                     stem_parts.append(str(batch_value))
                 stem_parts.append(str(marker))
                 stem_parts.append("raw_counts")
-                stem = "_".join(stem_parts)
+                raw_stem = "_".join(stem_parts)
+                stem = _unique_stem(raw_stem, used=used_stems)
 
                 metadata = {
                     "sample": sample_name,
                     "marker": marker,
                     "batch": batch_value,
+                    "source_stem": raw_stem,
                 }
 
                 prepared.append(
@@ -999,6 +1008,123 @@ def _sanitize_group_label(label: str | None) -> str:
     clean = re.sub(r"[^0-9A-Za-z._-]+", "_", text)
     clean = clean.strip("._-")
     return clean or "group"
+
+
+def _sanitize_stem_value(value: str) -> str:
+    """Return a filesystem-safe value suitable for sample stems."""
+
+    text = str(value).strip()
+    if not text:
+        return "sample"
+
+    clean = re.sub(r"[^0-9A-Za-z._-]+", "_", text)
+    clean = re.sub(r"_{2,}", "_", clean)
+    clean = clean.strip("._-")
+    return clean or "sample"
+
+
+def _unique_stem(raw_value: str, *, used: set[str]) -> str:
+    """Sanitise ``raw_value`` and ensure the resulting stem is unique."""
+
+    base = _sanitize_stem_value(raw_value)
+    candidate = base
+    suffix = 2
+    while candidate in used:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
+
+
+def _export_slug(
+    batch: BatchResults,
+    manifest: Mapping[str, Any],
+    output_dir: Path,
+) -> str:
+    """Build a concise, filesystem-safe slug describing this batch run."""
+
+    out = Path(output_dir)
+
+    markers: list[str] = []
+    fallbacks: list[str] = []
+    seen: set[str] = set()
+
+    for res in batch.samples:
+        meta = res.metadata
+
+        marker = meta.get("marker")
+        if marker not in (None, ""):
+            safe_marker = _sanitize_stem_value(str(marker))
+            if safe_marker and safe_marker not in seen:
+                seen.add(safe_marker)
+                markers.append(safe_marker)
+                continue
+
+        sample = meta.get("sample")
+        if sample not in (None, ""):
+            safe_sample = _sanitize_stem_value(str(sample))
+            if safe_sample and safe_sample not in seen:
+                seen.add(safe_sample)
+                fallbacks.append(safe_sample)
+                continue
+
+        stem = _sanitize_stem_value(res.stem)
+        if stem and stem not in seen:
+            seen.add(stem)
+            fallbacks.append(stem)
+
+    descriptors = markers or fallbacks or ["batch"]
+
+    def _candidates() -> Iterable[str]:
+        base = descriptors[0]
+        if len(descriptors) == 1:
+            yield base
+        else:
+            second = descriptors[1]
+            if len(descriptors) == 2:
+                yield f"{base}-p1"
+                yield f"{base}_{second}"
+            else:
+                yield f"{base}-p{len(descriptors) - 1}"
+                yield f"{base}_{second}-p{len(descriptors) - 2}"
+                yield f"{base}_{second}"
+            yield base
+
+        combined = "_".join(descriptors[:3])
+        combined_safe = _sanitize_stem_value(combined)
+        if combined_safe:
+            yield combined_safe
+
+        digest_source = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha1(digest_source.encode("utf-8")).hexdigest()[:6]
+        digest_base = combined_safe or base or "batch"
+        yield f"{digest_base}_{digest}"
+
+    def _slug_available(slug: str) -> bool:
+        targets = [
+            out / f"summary_{slug}.csv",
+            out / f"results_{slug}.json",
+            out / f"before_after_alignment_{slug}.zip",
+        ]
+        return not any(target.exists() for target in targets)
+
+    tried: set[str] = set()
+    for candidate in _candidates():
+        slug = _sanitize_stem_value(candidate)
+        if not slug or slug in tried:
+            continue
+        tried.add(slug)
+        if _slug_available(slug):
+            return slug
+
+    fallback_base = _sanitize_stem_value(descriptors[0]) or "batch"
+    suffix = 2
+    while True:
+        slug = f"{fallback_base}-{suffix}"
+        if slug not in tried and _slug_available(slug):
+            return slug
+        tried.add(slug)
+        suffix += 1
 
 
 def results_to_dict(batch: BatchResults) -> dict[str, Any]:
@@ -1091,7 +1217,15 @@ def save_outputs(
     out.mkdir(parents=True, exist_ok=True)
 
     summary_df = export_summary(batch)
-    summary_df.to_csv(out / "summary.csv", index=False)
+
+    manifest = results_to_dict(batch)
+    if run_metadata:
+        manifest["run_metadata"] = _jsonify(run_metadata)
+
+    slug = _export_slug(batch, manifest, out)
+
+    summary_name = f"summary_{slug}.csv"
+    summary_df.to_csv(out / summary_name, index=False)
 
     if export_plots:
         plots_dir = out / "plots"
@@ -1119,15 +1253,13 @@ def save_outputs(
             fig.savefig(plots_dir / f"{res.stem}.png")
             plt.close(fig)
 
-    manifest = results_to_dict(batch)
-    if run_metadata:
-        manifest["run_metadata"] = _jsonify(run_metadata)
-    with open(out / "results.json", "w", encoding="utf-8") as fh:
+    with open(out / f"results_{slug}.json", "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
 
     _write_combined_zip(
         batch,
         out,
+        slug=slug,
         run_metadata=run_metadata,
     )
 
@@ -1136,6 +1268,7 @@ def _write_combined_zip(
     batch: BatchResults,
     output_dir: Path,
     *,
+    slug: str,
     run_metadata: Mapping[str, Any] | None,
 ) -> None:
     exports = _dataset_exports(batch, run_metadata)
@@ -1147,7 +1280,7 @@ def _write_combined_zip(
     if before_meta is None and before_expr is None and exports["raw_ridge"] is None:
         return
 
-    zip_path = output_dir / "before_after_alignment.zip"
+    zip_path = output_dir / f"before_after_alignment_{slug}.zip"
     has_after = exports["expr_after"] is not None or exports["aligned_ridge"] is not None
 
     with zipfile.ZipFile(zip_path, "w") as archive:

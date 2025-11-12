@@ -9,6 +9,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.transforms as mtransforms
 import streamlit as st
 from openai import OpenAI, AuthenticationError
 
@@ -802,25 +803,60 @@ def _ridge_plot_for_stems(
     if not np.isfinite(x_min) or not np.isfinite(x_max):
         return None
 
-    if x_max == x_min:
-        span = abs(x_min) if x_min != 0 else 1.0
-        pad = 0.05 * span
-    else:
-        pad = 0.05 * (x_max - x_min)
+    dx_samples: list[float] = []
+    for _, xs, _, _, _, _ in curve_info:
+        xs_finite = np.asarray(xs[np.isfinite(xs)], float)
+        if xs_finite.size < 2:
+            continue
 
+        diffs = np.diff(np.sort(xs_finite))
+        finite_diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+        if finite_diffs.size:
+            dx_samples.append(float(np.quantile(finite_diffs, 0.2)))
+
+    heights = np.array([height for *_, height in curve_info], dtype=float)
+    finite_heights = heights[np.isfinite(heights) & (heights > 0)]
+    if finite_heights.size:
+        height_cap = float(np.quantile(finite_heights, 0.9))
+        height_cap = max(height_cap, 1e-6)
+    else:
+        height_cap = 1.0
+
+    scaled_curves: list[
+        tuple[str, np.ndarray, np.ndarray, list[float], list[float], float]
+    ] = []
     offsets: list[float] = []
     current_offset = 0.0
-    for _, _, _, _, _, height in curve_info:
+    for stem, xs, ys, peaks, valleys, height in curve_info:
+        scale = 1.0
+        if height > 0 and np.isfinite(height_cap) and height_cap > 0:
+            scale = min(1.0, height_cap / height)
+        ys_scaled = ys * scale
+        scaled_height = max(float(np.nanmax(ys_scaled)), 1e-6)
         offsets.append(current_offset)
-        current_offset += max(height, 1e-6) * 1.2
+        scaled_curves.append((stem, xs, ys_scaled, peaks, valleys, scaled_height))
+        current_offset += scaled_height * 1.1
+
+    if x_max == x_min:
+        span = abs(x_min) if x_min != 0 else 1.0
+        pad = 0.02 * span
+    else:
+        pad = 0.02 * max(x_max - x_min, 1e-9)
+
+    if dx_samples:
+        typical_dx = float(np.median(dx_samples))
+        pad = max(pad, 3.0 * typical_dx)
+    pad = max(pad, 1e-6)
 
     fig, ax = plt.subplots(
-        figsize=(6, 0.8 * max(len(curve_info), 1)),
+        figsize=(6, 0.6 * max(len(scaled_curves), 1)),
         dpi=150,
         sharex=True,
     )
 
-    for offset, (stem, xs, ys, peaks, valleys, height) in zip(offsets, curve_info):
+    text_transform = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
+
+    for offset, (stem, xs, ys, peaks, valleys, height) in zip(offsets, scaled_curves):
         ax.plot(xs, ys + offset, color="black", lw=1)
         ax.fill_between(xs, offset, ys + offset, color="#FFA50088", lw=0)
 
@@ -850,12 +886,15 @@ def _ridge_plot_for_stems(
                 )
 
         ax.text(
-            x_min,
+            -0.02,
             offset + 0.5 * ymax,
             stem,
+            transform=text_transform,
             ha="right",
             va="center",
             fontsize=7,
+            bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none", "pad": 0.2},
+            clip_on=False,
         )
 
     ax.set_yticks([])

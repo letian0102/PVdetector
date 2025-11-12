@@ -1036,45 +1036,95 @@ def _unique_stem(raw_value: str, *, used: set[str]) -> str:
     return candidate
 
 
-def _export_slug(batch: BatchResults, manifest: Mapping[str, Any]) -> str:
-    """Build a filesystem-safe slug describing this batch run."""
+def _export_slug(
+    batch: BatchResults,
+    manifest: Mapping[str, Any],
+    output_dir: Path,
+) -> str:
+    """Build a concise, filesystem-safe slug describing this batch run."""
 
-    descriptors: list[str] = []
+    out = Path(output_dir)
+
+    markers: list[str] = []
+    fallbacks: list[str] = []
     seen: set[str] = set()
 
     for res in batch.samples:
         meta = res.metadata
-        parts: list[str] = []
-        sample = meta.get("sample")
+
         marker = meta.get("marker")
-        batch_label = meta.get("batch")
-        if sample not in (None, ""):
-            parts.append(str(sample))
         if marker not in (None, ""):
-            parts.append(str(marker))
-        if batch_label not in (None, ""):
-            parts.append(str(batch_label))
-        if not parts:
-            parts.append(res.stem)
-        descriptor = _sanitize_stem_value("_".join(parts))
-        if descriptor and descriptor not in seen:
-            seen.add(descriptor)
-            descriptors.append(descriptor)
+            safe_marker = _sanitize_stem_value(str(marker))
+            if safe_marker and safe_marker not in seen:
+                seen.add(safe_marker)
+                markers.append(safe_marker)
+                continue
 
-    if not descriptors:
-        descriptors.append("batch")
+        sample = meta.get("sample")
+        if sample not in (None, ""):
+            safe_sample = _sanitize_stem_value(str(sample))
+            if safe_sample and safe_sample not in seen:
+                seen.add(safe_sample)
+                fallbacks.append(safe_sample)
+                continue
 
-    if len(descriptors) == 1:
+        stem = _sanitize_stem_value(res.stem)
+        if stem and stem not in seen:
+            seen.add(stem)
+            fallbacks.append(stem)
+
+    descriptors = markers or fallbacks or ["batch"]
+
+    def _candidates() -> Iterable[str]:
         base = descriptors[0]
-    elif len(descriptors) == 2:
-        base = "__".join(descriptors)
-    else:
-        base = "__".join(descriptors[:2]) + f"__plus{len(descriptors) - 2}"
+        if len(descriptors) == 1:
+            yield base
+        else:
+            second = descriptors[1]
+            if len(descriptors) == 2:
+                yield f"{base}-p1"
+                yield f"{base}_{second}"
+            else:
+                yield f"{base}-p{len(descriptors) - 1}"
+                yield f"{base}_{second}-p{len(descriptors) - 2}"
+                yield f"{base}_{second}"
+            yield base
 
-    digest_source = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
-    digest = hashlib.sha1(digest_source.encode("utf-8")).hexdigest()[:8]
-    slug = _sanitize_stem_value(f"{base}_{digest}")
-    return slug or "batch"
+        combined = "_".join(descriptors[:3])
+        combined_safe = _sanitize_stem_value(combined)
+        if combined_safe:
+            yield combined_safe
+
+        digest_source = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha1(digest_source.encode("utf-8")).hexdigest()[:6]
+        digest_base = combined_safe or base or "batch"
+        yield f"{digest_base}_{digest}"
+
+    def _slug_available(slug: str) -> bool:
+        targets = [
+            out / f"summary_{slug}.csv",
+            out / f"results_{slug}.json",
+            out / f"before_after_alignment_{slug}.zip",
+        ]
+        return not any(target.exists() for target in targets)
+
+    tried: set[str] = set()
+    for candidate in _candidates():
+        slug = _sanitize_stem_value(candidate)
+        if not slug or slug in tried:
+            continue
+        tried.add(slug)
+        if _slug_available(slug):
+            return slug
+
+    fallback_base = _sanitize_stem_value(descriptors[0]) or "batch"
+    suffix = 2
+    while True:
+        slug = f"{fallback_base}-{suffix}"
+        if slug not in tried and _slug_available(slug):
+            return slug
+        tried.add(slug)
+        suffix += 1
 
 
 def results_to_dict(batch: BatchResults) -> dict[str, Any]:
@@ -1172,7 +1222,7 @@ def save_outputs(
     if run_metadata:
         manifest["run_metadata"] = _jsonify(run_metadata)
 
-    slug = _export_slug(batch, manifest)
+    slug = _export_slug(batch, manifest, out)
 
     summary_name = f"summary_{slug}.csv"
     summary_df.to_csv(out / summary_name, index=False)

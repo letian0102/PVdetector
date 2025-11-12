@@ -9,7 +9,9 @@ import pytest
 
 from peak_valley.batch import (
     BatchOptions,
+    BatchResults,
     SampleInput,
+    SampleResult,
     collect_counts_files,
     collect_dataset_samples,
     run_batch,
@@ -404,3 +406,51 @@ def test_alignment_normalizes_landmarks(monkeypatch):
         atol=1e-9,
     )
     np.testing.assert_allclose(batch.aligned_landmarks[0], [-2.0, 0.0, 2.0], atol=1e-9)
+
+
+def _dummy_result(marker: str, sample: str) -> SampleResult:
+    return SampleResult(
+        stem=f"{sample}_{marker}",
+        peaks=[0.5],
+        valleys=[0.2],
+        xs=np.array([0.0, 1.0]),
+        ys=np.array([0.4, 0.6]),
+        counts=np.array([0.1, 0.9]),
+        params={"bw": 0.1, "prom": 0.05},
+        quality=0.95,
+        metadata={"sample": sample, "marker": marker},
+    )
+
+
+def test_save_outputs_uses_marker_slug(tmp_path):
+    batch = BatchResults(samples=[_dummy_result("CD3", "S1")])
+    save_outputs(batch, tmp_path)
+
+    summary_files = {p.name for p in tmp_path.glob("summary_*.csv")}
+    results_files = {p.name for p in tmp_path.glob("results_*.json")}
+
+    assert "summary_CD3.csv" in summary_files
+    assert "results_CD3.json" in results_files
+
+
+def test_save_outputs_dedupes_marker_slugs(tmp_path):
+    batch = BatchResults(
+        samples=[
+            _dummy_result("CD3", "S1"),
+            _dummy_result("CD19", "S2"),
+            _dummy_result("CD45", "S3"),
+        ]
+    )
+
+    save_outputs(batch, tmp_path)
+    first_summary = tmp_path / "summary_CD3-p2.csv"
+    assert first_summary.exists()
+
+    save_outputs(batch, tmp_path)
+    second_summary = tmp_path / "summary_CD3_CD19-p1.csv"
+    assert second_summary.exists()
+
+    first_results = tmp_path / "results_CD3-p2.json"
+    second_results = tmp_path / "results_CD3_CD19-p1.json"
+    assert first_results.exists()
+    assert second_results.exists()

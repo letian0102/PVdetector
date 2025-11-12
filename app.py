@@ -856,9 +856,12 @@ def _ridge_plot_for_stems(
 
     label_lengths = [len(stem) for stem, *_ in scaled_curves]
     max_label_len = max(label_lengths) if label_lengths else 0
-    left_margin = min(0.35, 0.12 + 0.012 * max_label_len)
+    # Reserve a little extra breathing room for long sample names so they never
+    # collide with the plotted densities.
+    left_margin = min(0.5, 0.08 + 0.015 * max_label_len)
 
     text_transform = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
+    label_pad_axes = min(0.25, 0.06 + 0.0025 * max_label_len)
 
     for offset, (stem, xs, ys, peaks, valleys, height) in zip(offsets, scaled_curves):
         ax.plot(xs, ys + offset, color="black", lw=1)
@@ -890,7 +893,7 @@ def _ridge_plot_for_stems(
                 )
 
         ax.text(
-            -0.05,
+            -label_pad_axes,
             offset + 0.5 * ymax,
             stem,
             transform=text_transform,
@@ -912,14 +915,24 @@ def _ridge_plot_for_stems(
     else:
         typical_height = 1.0
 
-    y_bottom = min(offsets) if offsets else 0.0
-    y_top = max(
-        (offset + height)
-        for offset, (*_, height) in zip(offsets, scaled_curves)
-    ) if offsets else typical_height
-    vertical_span = max(y_top - y_bottom, 1e-6)
-    margin = max(typical_height * 0.2, vertical_span * 0.02, 1e-6)
-    ax.set_ylim(y_bottom - margin, y_top + margin)
+    if offsets:
+        first_offset = offsets[0]
+        first_height = scaled_curves[0][-1]
+        last_offset = offsets[-1]
+        last_height = scaled_curves[-1][-1]
+        offset_array = np.asarray(offsets, dtype=float)
+        if offset_array.size > 1:
+            typical_step = float(np.median(np.diff(offset_array)))
+        else:
+            typical_step = float(first_height)
+        base_pad = max(typical_height * 0.05, typical_step * 0.1, 1e-6)
+        y_bottom = first_offset - max(base_pad, first_height * 0.05)
+        y_top = last_offset + last_height + max(base_pad, last_height * 0.05)
+    else:
+        y_bottom = 0.0
+        y_top = typical_height
+
+    ax.set_ylim(y_bottom, y_top)
     ax.margins(y=0)
     fig.subplots_adjust(left=left_margin, right=0.98, top=0.98, bottom=0.02)
 

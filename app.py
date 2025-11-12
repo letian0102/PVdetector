@@ -9,8 +9,6 @@ import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.transforms as mtransforms
-from matplotlib.text import Text
 import streamlit as st
 from openai import OpenAI, AuthenticationError
 
@@ -861,17 +859,13 @@ def _ridge_plot_for_stems(
     scaled_curves: list[
         tuple[str, np.ndarray, np.ndarray, list[float], list[float], float]
     ] = []
-    offsets: list[float] = []
-    current_offset = 0.0
     for stem, xs, ys, peaks, valleys, height in curve_info:
         scale = 1.0
         if height > 0 and np.isfinite(height_cap) and height_cap > 0:
             scale = min(1.0, height_cap / height)
         ys_scaled = ys * scale
         scaled_height = max(float(np.nanmax(ys_scaled)), 1e-6)
-        offsets.append(current_offset)
         scaled_curves.append((stem, xs, ys_scaled, peaks, valleys, scaled_height))
-        current_offset += scaled_height * 1.1
 
     if x_max == x_min:
         span = abs(x_min) if x_min != 0 else 1.0
@@ -899,12 +893,20 @@ def _ridge_plot_for_stems(
         sharex=True,
     )
 
-    label_lengths = [len(stem) for stem, *_ in scaled_curves]
-    max_label_len = max(label_lengths) if label_lengths else 0
-    text_transform = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
-    label_pad_axes = min(0.65, 0.16 + 0.006 * max_label_len)
+    height_values = np.asarray([height for *_, height in scaled_curves], dtype=float)
+    finite_height_values = height_values[np.isfinite(height_values) & (height_values > 0)]
+    if finite_height_values.size:
+        max_height_val = float(finite_height_values.max())
+    else:
+        max_height_val = 1.0
 
-    label_artists: list[Text] = []
+    if not np.isfinite(max_height_val) or max_height_val <= 0:
+        max_height_val = 1.0
+
+    vertical_step = max(max_height_val * 1.15, 1e-3)
+    offsets = np.arange(len(scaled_curves), dtype=float) * vertical_step
+
+    label_positions: list[float] = []
 
     for offset, (stem, xs, ys, peaks, valleys, height) in zip(offsets, scaled_curves):
         ax.plot(xs, ys + offset, color="black", lw=1)
@@ -935,34 +937,29 @@ def _ridge_plot_for_stems(
                     linestyles=":",
                 )
 
-        label = ax.text(
-            -label_pad_axes,
-            offset + 0.5 * ymax,
-            stem,
-            transform=text_transform,
-            ha="right",
-            va="center",
-            fontsize=7,
-            bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "none", "pad": 0.25},
-            clip_on=False,
-        )
-        label_artists.append(label)
+        label_positions.append(offset + 0.5 * ymax)
 
-    ax.set_yticks([])
+    if label_positions:
+        ax.set_yticks(label_positions)
+        ax.set_yticklabels([stem for stem, *_ in scaled_curves], fontsize=8)
+        ax.tick_params(axis="y", which="both", length=0, pad=8)
+    else:
+        ax.set_yticks([])
+
+    ax.spines["left"].set_visible(False)
     ax.set_xlim(x_min - pad, x_max + pad)
-    if offsets:
+    if offsets.size:
         height_array = np.asarray([height for *_, height in scaled_curves], dtype=float)
         if height_array.size:
             height_array[~np.isfinite(height_array)] = 0.0
-            first_height = float(height_array[0])
             last_height = float(height_array[-1])
         else:
-            first_height = last_height = 0.0
+            last_height = 0.0
         y_bottom = float(offsets[0])
         y_top = float(offsets[-1] + last_height)
     else:
         height_array = np.array([], dtype=float)
-        first_height = last_height = 0.0
+        last_height = 0.0
         y_bottom = 0.0
         y_top = 1.0
 
@@ -971,80 +968,17 @@ def _ridge_plot_for_stems(
     if not np.isfinite(y_top) or y_top <= y_bottom:
         y_top = y_bottom + 1.0
 
+    y_margin = max(max_height_val * 0.08, vertical_step * 0.05, 1e-3)
+    y_bottom -= y_margin
+    y_top += y_margin
+
     ax.set_ylim(y_bottom, y_top)
+    ax.invert_yaxis()
     ax.margins(y=0)
+    ax.tick_params(axis="x", labelsize=8)
+    ax.grid(False)
 
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
-
-    pad_pixels = 2.0
-    pixel_pad = 0.0
-    try:
-        axis_bbox = ax.get_window_extent(renderer)
-    except Exception:
-        axis_bbox = None
-
-    data_span = y_top - y_bottom
-    if axis_bbox is not None and axis_bbox.height > 0 and np.isfinite(data_span) and data_span > 0:
-        data_per_pixel = data_span / axis_bbox.height
-        pixel_pad = float(data_per_pixel * pad_pixels)
-
-    if offsets:
-        lower_pad = max(pixel_pad, first_height * 0.02, 1e-6)
-        upper_pad = max(pixel_pad, last_height * 0.02, 1e-6)
-        if lower_pad > 0 or upper_pad > 0:
-            y_bottom -= lower_pad
-            y_top += upper_pad
-            ax.set_ylim(y_bottom, y_top)
-            fig.canvas.draw()
-            renderer = fig.canvas.get_renderer()
-    elif pixel_pad > 0:
-        y_bottom -= pixel_pad
-        y_top += pixel_pad
-        ax.set_ylim(y_bottom, y_top)
-        fig.canvas.draw()
-        renderer = fig.canvas.get_renderer()
-    else:
-        renderer = fig.canvas.get_renderer()
-
-    # After configuring axes limits, measure label extents
-    desired_gap = 0.015
-    left_margin = 0.12
-    if label_artists:
-        axis_pos = ax.get_position()
-        axis_left = float(axis_pos.x0)
-        axis_width = float(axis_pos.width) if axis_pos.width > 0 else 1.0
-
-        for artist in label_artists:
-            try:
-                bbox = artist.get_window_extent(renderer)
-            except RuntimeError:
-                continue
-            bbox_fig = bbox.transformed(fig.transFigure.inverted())
-            overlap = axis_left - float(bbox_fig.x1)
-            if overlap < desired_gap:
-                shift_needed = desired_gap - overlap
-                shift_axes = shift_needed / axis_width if axis_width > 0 else 0.0
-                x_pos, y_pos = artist.get_position()
-                artist.set_position((x_pos - shift_axes, y_pos))
-
-        fig.canvas.draw()
-        renderer = fig.canvas.get_renderer()
-
-        label_right = 0.0
-        for artist in label_artists:
-            try:
-                bbox = artist.get_window_extent(renderer)
-            except RuntimeError:
-                continue
-            bbox_fig = bbox.transformed(fig.transFigure.inverted())
-            label_right = max(label_right, float(bbox_fig.x1))
-
-        axis_pos = ax.get_position()
-        left_margin = max(float(axis_pos.x0), label_right + desired_gap)
-        left_margin = min(left_margin, 0.6)
-
-    fig.subplots_adjust(left=left_margin, right=0.98, top=0.995, bottom=0.005)
+    fig.tight_layout(pad=0.2)
 
     png = fig_to_png(fig)
     plt.close(fig)

@@ -854,6 +854,10 @@ def _ridge_plot_for_stems(
         sharex=True,
     )
 
+    label_lengths = [len(stem) for stem, *_ in scaled_curves]
+    max_label_len = max(label_lengths) if label_lengths else 0
+    left_margin = min(0.35, 0.12 + 0.012 * max_label_len)
+
     text_transform = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
 
     for offset, (stem, xs, ys, peaks, valleys, height) in zip(offsets, scaled_curves):
@@ -886,7 +890,7 @@ def _ridge_plot_for_stems(
                 )
 
         ax.text(
-            -0.02,
+            -0.05,
             offset + 0.5 * ymax,
             stem,
             transform=text_transform,
@@ -899,7 +903,25 @@ def _ridge_plot_for_stems(
 
     ax.set_yticks([])
     ax.set_xlim(x_min - pad, x_max + pad)
-    fig.tight_layout()
+    positive_heights = np.asarray(
+        [height for *_, height in scaled_curves], dtype=float
+    )
+    positive_heights = positive_heights[np.isfinite(positive_heights) & (positive_heights > 0)]
+    if positive_heights.size:
+        typical_height = float(np.median(positive_heights))
+    else:
+        typical_height = 1.0
+
+    y_bottom = min(offsets) if offsets else 0.0
+    y_top = max(
+        (offset + height)
+        for offset, (*_, height) in zip(offsets, scaled_curves)
+    ) if offsets else typical_height
+    vertical_span = max(y_top - y_bottom, 1e-6)
+    margin = max(typical_height * 0.2, vertical_span * 0.02, 1e-6)
+    ax.set_ylim(y_bottom - margin, y_top + margin)
+    ax.margins(y=0)
+    fig.subplots_adjust(left=left_margin, right=0.98, top=0.98, bottom=0.02)
 
     png = fig_to_png(fig)
     plt.close(fig)

@@ -951,51 +951,69 @@ def _ridge_plot_for_stems(
     ax.set_yticks([])
     ax.set_xlim(x_min - pad, x_max + pad)
     if offsets:
-        first_offset = offsets[0]
-        last_offset = offsets[-1]
-        full_height = np.asarray([height for *_, height in scaled_curves], dtype=float)
-        full_height[~np.isfinite(full_height)] = 0.0
-        first_height = full_height[0] if full_height.size else 1.0
-        last_height = full_height[-1] if full_height.size else 1.0
-        offset_array = np.asarray(offsets, dtype=float)
-        if offset_array.size > 1:
-            step_samples = np.diff(offset_array)
-            typical_step = float(np.median(step_samples[np.isfinite(step_samples)]))
-            if not np.isfinite(typical_step) or typical_step <= 0:
-                typical_step = float(np.median(full_height[full_height > 0])) if np.any(full_height > 0) else 1.0
-            first_gap = float(offset_array[1] - offset_array[0])
-            last_gap = float(offset_array[-1] - offset_array[-2])
+        height_array = np.asarray([height for *_, height in scaled_curves], dtype=float)
+        if height_array.size:
+            height_array[~np.isfinite(height_array)] = 0.0
+            first_height = float(height_array[0])
+            last_height = float(height_array[-1])
         else:
-            positive = full_height[full_height > 0]
-            typical_step = float(np.median(positive)) if positive.size else 1.0
-            first_gap = last_gap = typical_step
-
-        if not np.isfinite(first_gap) or first_gap <= 0:
-            first_gap = max(first_height, typical_step)
-        if not np.isfinite(last_gap) or last_gap <= 0:
-            last_gap = max(last_height, typical_step)
-
-        lower_pad = max(1e-6, min(first_gap * 0.08, first_height * 0.3, typical_step * 0.1))
-        upper_pad = max(1e-6, min(last_gap * 0.08, last_height * 0.3, typical_step * 0.1))
-
-        y_bottom = first_offset - lower_pad
-        y_top = last_offset + last_height + upper_pad
+            first_height = last_height = 0.0
+        y_bottom = float(offsets[0])
+        y_top = float(offsets[-1] + last_height)
     else:
+        height_array = np.array([], dtype=float)
+        first_height = last_height = 0.0
         y_bottom = 0.0
         y_top = 1.0
+
+    if not np.isfinite(y_bottom):
+        y_bottom = 0.0
+    if not np.isfinite(y_top) or y_top <= y_bottom:
+        y_top = y_bottom + 1.0
 
     ax.set_ylim(y_bottom, y_top)
     ax.margins(y=0)
 
-    # After configuring axes limits, draw once so we can measure label extents
     fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    pad_pixels = 2.0
+    pixel_pad = 0.0
+    try:
+        axis_bbox = ax.get_window_extent(renderer)
+    except Exception:
+        axis_bbox = None
+
+    data_span = y_top - y_bottom
+    if axis_bbox is not None and axis_bbox.height > 0 and np.isfinite(data_span) and data_span > 0:
+        data_per_pixel = data_span / axis_bbox.height
+        pixel_pad = float(data_per_pixel * pad_pixels)
+
+    if offsets:
+        lower_pad = max(pixel_pad, first_height * 0.02, 1e-6)
+        upper_pad = max(pixel_pad, last_height * 0.02, 1e-6)
+        if lower_pad > 0 or upper_pad > 0:
+            y_bottom -= lower_pad
+            y_top += upper_pad
+            ax.set_ylim(y_bottom, y_top)
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+    elif pixel_pad > 0:
+        y_bottom -= pixel_pad
+        y_top += pixel_pad
+        ax.set_ylim(y_bottom, y_top)
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+    else:
+        renderer = fig.canvas.get_renderer()
+
+    # After configuring axes limits, measure label extents
     desired_gap = 0.015
     left_margin = 0.12
     if label_artists:
         axis_pos = ax.get_position()
         axis_left = float(axis_pos.x0)
         axis_width = float(axis_pos.width) if axis_pos.width > 0 else 1.0
-        renderer = fig.canvas.get_renderer()
 
         for artist in label_artists:
             try:

@@ -8,6 +8,7 @@ distributions, and export all intermediate and final artefacts.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import math
@@ -1035,6 +1036,47 @@ def _unique_stem(raw_value: str, *, used: set[str]) -> str:
     return candidate
 
 
+def _export_slug(batch: BatchResults, manifest: Mapping[str, Any]) -> str:
+    """Build a filesystem-safe slug describing this batch run."""
+
+    descriptors: list[str] = []
+    seen: set[str] = set()
+
+    for res in batch.samples:
+        meta = res.metadata
+        parts: list[str] = []
+        sample = meta.get("sample")
+        marker = meta.get("marker")
+        batch_label = meta.get("batch")
+        if sample not in (None, ""):
+            parts.append(str(sample))
+        if marker not in (None, ""):
+            parts.append(str(marker))
+        if batch_label not in (None, ""):
+            parts.append(str(batch_label))
+        if not parts:
+            parts.append(res.stem)
+        descriptor = _sanitize_stem_value("_".join(parts))
+        if descriptor and descriptor not in seen:
+            seen.add(descriptor)
+            descriptors.append(descriptor)
+
+    if not descriptors:
+        descriptors.append("batch")
+
+    if len(descriptors) == 1:
+        base = descriptors[0]
+    elif len(descriptors) == 2:
+        base = "__".join(descriptors)
+    else:
+        base = "__".join(descriptors[:2]) + f"__plus{len(descriptors) - 2}"
+
+    digest_source = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha1(digest_source.encode("utf-8")).hexdigest()[:8]
+    slug = _sanitize_stem_value(f"{base}_{digest}")
+    return slug or "batch"
+
+
 def results_to_dict(batch: BatchResults) -> dict[str, Any]:
     """Convert results into a JSON-serialisable structure."""
 
@@ -1125,7 +1167,15 @@ def save_outputs(
     out.mkdir(parents=True, exist_ok=True)
 
     summary_df = export_summary(batch)
-    summary_df.to_csv(out / "summary.csv", index=False)
+
+    manifest = results_to_dict(batch)
+    if run_metadata:
+        manifest["run_metadata"] = _jsonify(run_metadata)
+
+    slug = _export_slug(batch, manifest)
+
+    summary_name = f"summary_{slug}.csv"
+    summary_df.to_csv(out / summary_name, index=False)
 
     if export_plots:
         plots_dir = out / "plots"
@@ -1153,15 +1203,13 @@ def save_outputs(
             fig.savefig(plots_dir / f"{res.stem}.png")
             plt.close(fig)
 
-    manifest = results_to_dict(batch)
-    if run_metadata:
-        manifest["run_metadata"] = _jsonify(run_metadata)
-    with open(out / "results.json", "w", encoding="utf-8") as fh:
+    with open(out / f"results_{slug}.json", "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
 
     _write_combined_zip(
         batch,
         out,
+        slug=slug,
         run_metadata=run_metadata,
     )
 
@@ -1170,6 +1218,7 @@ def _write_combined_zip(
     batch: BatchResults,
     output_dir: Path,
     *,
+    slug: str,
     run_metadata: Mapping[str, Any] | None,
 ) -> None:
     exports = _dataset_exports(batch, run_metadata)
@@ -1181,7 +1230,7 @@ def _write_combined_zip(
     if before_meta is None and before_expr is None and exports["raw_ridge"] is None:
         return
 
-    zip_path = output_dir / "before_after_alignment.zip"
+    zip_path = output_dir / f"before_after_alignment_{slug}.zip"
     has_after = exports["expr_after"] is not None or exports["aligned_ridge"] is not None
 
     with zipfile.ZipFile(zip_path, "w") as archive:

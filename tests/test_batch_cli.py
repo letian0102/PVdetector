@@ -99,8 +99,9 @@ def test_run_batch_on_counts(tmp_path):
     out_dir = tmp_path / "outputs"
     save_outputs(batch, out_dir)
 
-    summary_path = out_dir / "summary.csv"
-    assert summary_path.exists()
+    summary_files = list(out_dir.glob("summary_*.csv"))
+    assert summary_files, "Expected a sanitised summary export"
+    summary_path = summary_files[0]
     summary_df = pd.read_csv(summary_path)
     assert counts_path.stem in summary_df["stem"].tolist()
 
@@ -109,8 +110,9 @@ def test_run_batch_on_counts(tmp_path):
     assert not (out_dir / "curves").exists()
     assert not (out_dir / "aligned_curves").exists()
 
-    results_path = out_dir / "results.json"
-    assert results_path.exists()
+    results_files = list(out_dir.glob("results_*.json"))
+    assert results_files, "Expected a sanitised results manifest"
+    results_path = results_files[0]
     with results_path.open("r", encoding="utf-8") as fh:
         manifest = json.load(fh)
     assert manifest["samples"], "Manifest should include sample entries"
@@ -166,8 +168,9 @@ def test_combined_zip_has_expected_exports(tmp_path):
     out_dir = tmp_path / "outputs"
     save_outputs(batch, out_dir, run_metadata=meta_info)
 
-    zip_path = out_dir / "before_after_alignment.zip"
-    assert zip_path.exists(), "Expected combined zip export"
+    zip_candidates = list(out_dir.glob("before_after_alignment_*.zip"))
+    assert zip_candidates, "Expected sanitised combined zip export"
+    zip_path = zip_candidates[0]
 
     with zipfile.ZipFile(zip_path) as archive:
         names = set(archive.namelist())
@@ -216,8 +219,9 @@ def test_group_marker_exports_multiple_ridges(tmp_path):
     out_dir = tmp_path / "grouped_outputs"
     save_outputs(batch, out_dir, run_metadata=meta_info)
 
-    zip_path = out_dir / "before_after_alignment.zip"
-    assert zip_path.exists()
+    zip_candidates = list(out_dir.glob("before_after_alignment_*.zip"))
+    assert zip_candidates
+    zip_path = zip_candidates[0]
 
     with zipfile.ZipFile(zip_path) as archive:
         names = set(archive.namelist())
@@ -329,9 +333,12 @@ def test_run_batch_handles_keyboard_interrupt(tmp_path, monkeypatch):
     out_dir = tmp_path / "partial"
     save_outputs(batch, out_dir)
 
-    summary_path = out_dir / "summary.csv"
-    assert summary_path.exists()
-    results_path = out_dir / "results.json"
+    summary_candidates = list(out_dir.glob("summary_*.csv"))
+    assert summary_candidates
+    summary_path = summary_candidates[0]
+    results_candidates = list(out_dir.glob("results_*.json"))
+    assert results_candidates
+    results_path = results_candidates[0]
     with results_path.open("r", encoding="utf-8") as fh:
         manifest = json.load(fh)
     assert manifest.get("interrupted") is True

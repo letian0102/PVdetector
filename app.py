@@ -805,15 +805,50 @@ def _ridge_plot_for_stems(
         return None
 
     dx_samples: list[float] = []
-    for _, xs, _, _, _, _ in curve_info:
-        xs_finite = np.asarray(xs[np.isfinite(xs)], float)
+    trimmed_lows: list[float] = []
+    trimmed_highs: list[float] = []
+    for _, xs, ys, _, _, _ in curve_info:
+        finite_mask = np.isfinite(xs) & np.isfinite(ys)
+        xs_finite = np.asarray(xs[finite_mask], float)
+        ys_finite = np.asarray(ys[finite_mask], float)
         if xs_finite.size < 2:
             continue
 
-        diffs = np.diff(np.sort(xs_finite))
+        order = np.argsort(xs_finite)
+        xs_sorted = xs_finite[order]
+        ys_sorted = np.clip(ys_finite[order], 0.0, None)
+
+        diffs = np.diff(xs_sorted)
         finite_diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
         if finite_diffs.size:
             dx_samples.append(float(np.quantile(finite_diffs, 0.2)))
+
+        avg_heights = 0.5 * (ys_sorted[:-1] + ys_sorted[1:])
+        contributions = diffs * avg_heights
+        cumulative = np.concatenate(([0.0], np.cumsum(contributions)))
+        total_area = float(cumulative[-1]) if cumulative.size else 0.0
+        if total_area <= 0:
+            trimmed_lows.append(float(xs_sorted[0]))
+            trimmed_highs.append(float(xs_sorted[-1]))
+            continue
+
+        low_quantile = total_area * 0.001
+        high_quantile = total_area * (1 - 0.001)
+        try:
+            x_low = float(np.interp(low_quantile, cumulative, xs_sorted))
+            x_high = float(np.interp(high_quantile, cumulative, xs_sorted))
+        except ValueError:
+            x_low = float(xs_sorted[0])
+            x_high = float(xs_sorted[-1])
+
+        trimmed_lows.append(x_low)
+        trimmed_highs.append(x_high)
+
+    if trimmed_lows and trimmed_highs:
+        trimmed_min = min(trimmed_lows)
+        trimmed_max = max(trimmed_highs)
+        if np.isfinite(trimmed_min) and np.isfinite(trimmed_max) and trimmed_max > trimmed_min:
+            x_min, x_max = trimmed_min, trimmed_max
 
     heights = np.array([height for *_, height in curve_info], dtype=float)
     finite_heights = heights[np.isfinite(heights) & (heights > 0)]
@@ -840,14 +875,15 @@ def _ridge_plot_for_stems(
 
     if x_max == x_min:
         span = abs(x_min) if x_min != 0 else 1.0
-        pad = 0.02 * span
+        pad = 0.01 * span
     else:
-        pad = 0.02 * max(x_max - x_min, 1e-9)
-
-    if dx_samples:
-        typical_dx = float(np.median(dx_samples))
-        pad = max(pad, 3.0 * typical_dx)
-    pad = max(pad, 1e-6)
+        span = max(x_max - x_min, 1e-9)
+        pad_candidates = [1e-6, 0.0025 * span]
+        if dx_samples:
+            typical_dx = float(np.median(dx_samples))
+            if np.isfinite(typical_dx) and typical_dx > 0:
+                pad_candidates.append(min(typical_dx, 0.02 * span))
+        pad = max(pad_candidates)
 
     fig, ax = plt.subplots(
         figsize=(6, 0.6 * max(len(scaled_curves), 1)),
@@ -858,7 +894,7 @@ def _ridge_plot_for_stems(
     label_lengths = [len(stem) for stem, *_ in scaled_curves]
     max_label_len = max(label_lengths) if label_lengths else 0
     text_transform = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
-    label_pad_axes = min(0.35, 0.08 + 0.003 * max_label_len)
+    label_pad_axes = min(0.5, 0.1 + 0.0045 * max_label_len)
 
     label_artists: list[Text] = []
 
@@ -948,7 +984,27 @@ def _ridge_plot_for_stems(
     desired_gap = 0.01
     left_margin = 0.12
     if label_artists:
+        axis_pos = ax.get_position()
+        axis_left = float(axis_pos.x0)
+        axis_width = float(axis_pos.width) if axis_pos.width > 0 else 1.0
         renderer = fig.canvas.get_renderer()
+
+        for artist in label_artists:
+            try:
+                bbox = artist.get_window_extent(renderer)
+            except RuntimeError:
+                continue
+            bbox_fig = bbox.transformed(fig.transFigure.inverted())
+            overlap = axis_left - float(bbox_fig.x1)
+            if overlap < desired_gap:
+                shift_needed = desired_gap - overlap
+                shift_axes = shift_needed / axis_width if axis_width > 0 else 0.0
+                x_pos, y_pos = artist.get_position()
+                artist.set_position((x_pos - shift_axes, y_pos))
+
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+
         label_right = 0.0
         for artist in label_artists:
             try:
@@ -957,8 +1013,9 @@ def _ridge_plot_for_stems(
                 continue
             bbox_fig = bbox.transformed(fig.transFigure.inverted())
             label_right = max(label_right, float(bbox_fig.x1))
+
         axis_pos = ax.get_position()
-        left_margin = max(axis_pos.x0, label_right + desired_gap)
+        left_margin = max(float(axis_pos.x0), label_right + desired_gap)
         left_margin = min(left_margin, 0.6)
 
     fig.subplots_adjust(left=left_margin, right=0.98, top=0.995, bottom=0.005)

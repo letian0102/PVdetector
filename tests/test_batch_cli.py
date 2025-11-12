@@ -25,6 +25,57 @@ def _write_counts(path: Path, values: np.ndarray) -> None:
             fh.write(f"{val}\n")
 
 
+def test_collect_counts_files_sanitizes_and_deduplicates(tmp_path):
+    path_one = tmp_path / "Sample !.csv"
+    path_two = tmp_path / "Sample @.csv"
+    _write_counts(path_one, np.array([1.0, 2.0]))
+    _write_counts(path_two, np.array([3.0, 4.0]))
+
+    options = BatchOptions(apply_arcsinh=False)
+    samples = collect_counts_files(
+        [path_one, path_two],
+        options,
+        header_row=-1,
+        skip_rows=0,
+    )
+
+    stems = [sample.stem for sample in samples]
+    assert stems == ["Sample", "Sample_2"]
+    assert samples[0].metadata["source_stem"] == "Sample !"
+    assert samples[1].metadata["source_stem"] == "Sample @"
+
+
+def test_collect_dataset_samples_sanitizes_stems(tmp_path):
+    expr = pd.DataFrame(
+        {
+            "CD3+": [0.2, 0.5, 0.8, 1.0],
+            "CD3*": [1.2, 1.5, 1.8, 2.0],
+        }
+    )
+    meta = pd.DataFrame(
+        {
+            "sample": ["Alpha/Beta"] * 4,
+        }
+    )
+
+    expr_path = tmp_path / "expr.csv"
+    meta_path = tmp_path / "meta.csv"
+    expr.to_csv(expr_path, index=False)
+    meta.to_csv(meta_path, index=False)
+
+    options = BatchOptions(apply_arcsinh=False)
+    samples, _ = collect_dataset_samples(
+        expr_path,
+        meta_path,
+        options,
+    )
+
+    stems = [sample.stem for sample in samples]
+    assert stems == ["Alpha_Beta_CD3_raw_counts", "Alpha_Beta_CD3_raw_counts_2"]
+    assert samples[0].metadata["source_stem"] == "Alpha/Beta_CD3+_raw_counts"
+    assert samples[1].metadata["source_stem"] == "Alpha/Beta_CD3*_raw_counts"
+
+
 def test_run_batch_on_counts(tmp_path):
     rng = np.random.default_rng(42)
     low = rng.normal(loc=-2.0, scale=0.2, size=200)

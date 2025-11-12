@@ -819,6 +819,7 @@ def collect_counts_files(
 
     samples: list[SampleInput] = []
     arcsinh_sig = options.arcsinh_signature()
+    used_stems: set[str] = set()
 
     for order, path in enumerate(paths):
         path_obj = Path(path)
@@ -838,9 +839,13 @@ def collect_counts_files(
             "protein_name": meta.get("protein_name"),
         }
 
+        raw_stem = meta.get("stem") or path_obj.stem
+        safe_stem = _unique_stem(raw_stem, used=used_stems)
+        metadata.setdefault("source_stem", raw_stem)
+
         samples.append(
             SampleInput(
-                stem=path_obj.stem,
+                stem=safe_stem,
                 counts=np.asarray(counts, float),
                 metadata=metadata,
                 arcsinh_signature=arcsinh_sig,
@@ -884,6 +889,7 @@ def collect_dataset_samples(
     arcsinh_sig = options.arcsinh_signature()
 
     prepared: list[SampleInput] = []
+    used_stems: set[str] = set()
 
     order = 0
     for sample_name in sample_sel:
@@ -933,12 +939,14 @@ def collect_dataset_samples(
                     stem_parts.append(str(batch_value))
                 stem_parts.append(str(marker))
                 stem_parts.append("raw_counts")
-                stem = "_".join(stem_parts)
+                raw_stem = "_".join(stem_parts)
+                stem = _unique_stem(raw_stem, used=used_stems)
 
                 metadata = {
                     "sample": sample_name,
                     "marker": marker,
                     "batch": batch_value,
+                    "source_stem": raw_stem,
                 }
 
                 prepared.append(
@@ -999,6 +1007,32 @@ def _sanitize_group_label(label: str | None) -> str:
     clean = re.sub(r"[^0-9A-Za-z._-]+", "_", text)
     clean = clean.strip("._-")
     return clean or "group"
+
+
+def _sanitize_stem_value(value: str) -> str:
+    """Return a filesystem-safe value suitable for sample stems."""
+
+    text = str(value).strip()
+    if not text:
+        return "sample"
+
+    clean = re.sub(r"[^0-9A-Za-z._-]+", "_", text)
+    clean = re.sub(r"_{2,}", "_", clean)
+    clean = clean.strip("._-")
+    return clean or "sample"
+
+
+def _unique_stem(raw_value: str, *, used: set[str]) -> str:
+    """Sanitise ``raw_value`` and ensure the resulting stem is unique."""
+
+    base = _sanitize_stem_value(raw_value)
+    candidate = base
+    suffix = 2
+    while candidate in used:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
 
 
 def results_to_dict(batch: BatchResults) -> dict[str, Any]:

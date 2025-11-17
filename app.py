@@ -2690,83 +2690,91 @@ def _render_dataset_overrides(
 
     df_table = pd.DataFrame(rows).set_index("stem")
 
-    data_editor = getattr(st, "data_editor", None) or st.experimental_data_editor
+    data_editor = getattr(st, "data_editor", None) or getattr(st, "experimental_data_editor", None)
 
-    edited = data_editor(
-        df_table,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        column_config={
-            "Marker": st.column_config.TextColumn("Marker", disabled=True),
-            "Batch": st.column_config.TextColumn("Batch", disabled=True),
-            "Peaks": st.column_config.NumberColumn(
-                "Peaks", min_value=1, max_value=6, step=1,
-                help="Override the expected peak count (leave blank for run setting).",
-            ),
-            "Max peaks": st.column_config.NumberColumn(
-                "Max peaks", min_value=1, max_value=6, step=1,
-                help="Override the GPT automatic peak cap (leave blank for run setting).",
-            ),
-            "Bandwidth": st.column_config.TextColumn(
-                "Bandwidth",
-                help="Enter a preset (scott, silverman, 0.5, …) or numeric bandwidth.",
-            ),
-            "Prominence": st.column_config.NumberColumn(
-                "Prominence",
-                min_value=0.0,
-                max_value=1.0,
-                step=0.01,
-                format="%.2f",
-                help="Minimum relative drop from peak to valley.",
-            ),
-            "Min width": st.column_config.NumberColumn(
-                "Min peak width", min_value=0, max_value=6, step=1,
-                help="Override the minimum width for detected peaks.",
-            ),
-            "Curvature": st.column_config.NumberColumn(
-                "Curvature threshold",
-                min_value=0.0,
-                max_value=0.005,
-                step=0.0001,
-                format="%.4f",
-                help="Override the curvature requirement for peaks (0 disables).",
-            ),
-            "Turning points": st.column_config.SelectboxColumn(
-                "Treat turning points",
-                options=["", "Yes", "No"],
-                help="Treat concave-down turning points as peaks (Yes/No).",
-            ),
-            "Min separation": st.column_config.NumberColumn(
-                "Min peak separation",
-                min_value=0.0,
-                max_value=10.0,
-                step=0.1,
-                format="%.1f",
-                help="Override the minimum distance between peaks.",
-            ),
-            "Max grid": st.column_config.NumberColumn(
-                "Max KDE grid",
-                min_value=4_000,
-                max_value=40_000,
-                step=1_000,
-                help="Override the KDE grid resolution (higher is finer but slower).",
-            ),
-            "Valley drop": st.column_config.NumberColumn(
-                "Valley drop (%)",
-                min_value=1,
-                max_value=50,
-                step=1,
-                help="Override the required drop from peak to valley in percent.",
-            ),
-            "First valley": st.column_config.SelectboxColumn(
-                "First valley method",
-                options=["", "Slope change", "Valley drop"],
-                help="Override how to identify the first valley after a peak.",
-            ),
-        },
-        key=f"dataset_override_editor__{selected_sample}",
-    )
+    if data_editor is None:
+        st.info(
+            "Streamlit is too old to edit overrides inline. Upgrade Streamlit to enable "
+            "editing; showing a read-only table instead."
+        )
+        edited = df_table
+        st.dataframe(df_table, use_container_width=True)
+    else:
+        edited = data_editor(
+            df_table,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            column_config={
+                "Marker": st.column_config.TextColumn("Marker", disabled=True),
+                "Batch": st.column_config.TextColumn("Batch", disabled=True),
+                "Peaks": st.column_config.NumberColumn(
+                    "Peaks", min_value=1, max_value=6, step=1,
+                    help="Override the expected peak count (leave blank for run setting).",
+                ),
+                "Max peaks": st.column_config.NumberColumn(
+                    "Max peaks", min_value=1, max_value=6, step=1,
+                    help="Override the GPT automatic peak cap (leave blank for run setting).",
+                ),
+                "Bandwidth": st.column_config.TextColumn(
+                    "Bandwidth",
+                    help="Enter a preset (scott, silverman, 0.5, …) or numeric bandwidth.",
+                ),
+                "Prominence": st.column_config.NumberColumn(
+                    "Prominence",
+                    min_value=0.0,
+                    max_value=1.0,
+                    step=0.01,
+                    format="%.2f",
+                    help="Minimum relative drop from peak to valley.",
+                ),
+                "Min width": st.column_config.NumberColumn(
+                    "Min peak width", min_value=0, max_value=6, step=1,
+                    help="Override the minimum width for detected peaks.",
+                ),
+                "Curvature": st.column_config.NumberColumn(
+                    "Curvature threshold",
+                    min_value=0.0,
+                    max_value=0.005,
+                    step=0.0001,
+                    format="%.4f",
+                    help="Override the curvature requirement for peaks (0 disables).",
+                ),
+                "Turning points": st.column_config.SelectboxColumn(
+                    "Treat turning points",
+                    options=["", "Yes", "No"],
+                    help="Treat concave-down turning points as peaks (Yes/No).",
+                ),
+                "Min separation": st.column_config.NumberColumn(
+                    "Min peak separation",
+                    min_value=0.0,
+                    max_value=10.0,
+                    step=0.1,
+                    format="%.1f",
+                    help="Override the minimum distance between peaks.",
+                ),
+                "Max grid": st.column_config.NumberColumn(
+                    "Max KDE grid",
+                    min_value=4_000,
+                    max_value=40_000,
+                    step=1_000,
+                    help="Override the KDE grid resolution (higher is finer but slower).",
+                ),
+                "Valley drop": st.column_config.NumberColumn(
+                    "Valley drop (%)",
+                    min_value=1,
+                    max_value=50,
+                    step=1,
+                    help="Override the required drop from peak to valley in percent.",
+                ),
+                "First valley": st.column_config.SelectboxColumn(
+                    "First valley method",
+                    options=["", "Slope change", "Valley drop"],
+                    help="Override how to identify the first valley after a peak.",
+                ),
+            },
+            key=f"dataset_override_editor__{selected_sample}",
+        )
 
     for stem, row in edited.iterrows():
         overrides: dict[str, object] = {}

@@ -865,6 +865,8 @@ def collect_dataset_samples(
     *,
     markers: Sequence[str] | None = None,
     samples_filter: Sequence[str] | None = None,
+    exclude_markers: Sequence[str] | None = None,
+    exclude_samples: Sequence[str] | None = None,
     batches: Sequence[str | None] | None = None,
 ) -> tuple[list[SampleInput], dict[str, Any]]:
     """Prepare samples from an expression + metadata dataset."""
@@ -877,9 +879,15 @@ def collect_dataset_samples(
 
     available_markers = [c for c in expr_df.columns if c not in meta_df.columns]
     markers_sel = markers if markers else available_markers
+    if exclude_markers:
+        marker_excludes = {str(m).lower() for m in exclude_markers}
+        markers_sel = [m for m in markers_sel if str(m).lower() not in marker_excludes]
 
     sample_values = meta_df["sample"].astype(str).tolist()
     sample_sel = samples_filter if samples_filter else sorted(set(sample_values))
+    if exclude_samples:
+        sample_excludes = {str(s).lower() for s in exclude_samples}
+        sample_sel = [s for s in sample_sel if str(s).lower() not in sample_excludes]
 
     batch_column = "batch" if "batch" in meta_df.columns else None
     if batches is not None:

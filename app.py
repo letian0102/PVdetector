@@ -125,6 +125,8 @@ for key, default in {
     "aligned_ridge_png":    None,
     "apply_consistency": False,  # enforce marker consistency across samples
     "raw_ridge_png": None,
+    "excluded_markers": [],
+    "excluded_samples": [],
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -3215,14 +3217,35 @@ with st.sidebar:
                 "All samples", False, key="chk_s",
                 help="Include every sample without selecting individually."
             )
-            sel_m = markers if all_m else st.multiselect(
+            if all_m:
+                excl_m = st.multiselect(
+                    "Exclude marker(s)", markers,
+                    key="excluded_markers",
+                    help="Select markers to leave out while processing all markers.",
+                )
+            else:
+                excl_m = st.session_state.get("excluded_markers", [])
+            sel_m_base = markers if all_m else st.multiselect(
                 "Marker(s)", markers,
                 help="Choose specific markers to process."
             )
-            sel_s = samples if all_s else st.multiselect(
+            excl_m_set = {str(m).casefold() for m in excl_m}
+            sel_m = [m for m in sel_m_base if str(m).casefold() not in excl_m_set]
+
+            if all_s:
+                excl_s = st.multiselect(
+                    "Exclude sample(s)", samples,
+                    key="excluded_samples",
+                    help="Select samples to leave out while processing all samples.",
+                )
+            else:
+                excl_s = st.session_state.get("excluded_samples", [])
+            sel_s_base = samples if all_s else st.multiselect(
                 "Sample(s)", samples,
                 help="Choose specific samples to process."
             )
+            excl_s_set = {str(s).casefold() for s in excl_s}
+            sel_s = [s for s in sel_s_base if str(s).casefold() not in excl_s_set]
             st.session_state.sel_markers = sel_m
             st.session_state.sel_samples = sel_s
 

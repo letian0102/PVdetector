@@ -225,10 +225,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Marker(s) to analyse (comma separated or repeated).",
     )
     parser.add_argument(
+        "--exclude-marker",
+        action="append",
+        dest="exclude_markers",
+        help="Marker(s) to exclude when analysing all markers (comma separated or repeated).",
+    )
+    parser.add_argument(
         "--sample",
         action="append",
         dest="samples",
         help="Sample(s) to analyse (comma separated or repeated).",
+    )
+    parser.add_argument(
+        "--exclude-sample",
+        action="append",
+        dest="exclude_samples",
+        help="Sample(s) to exclude when analysing all samples (comma separated or repeated).",
     )
     parser.add_argument(
         "--batch",
@@ -358,7 +370,9 @@ def main(argv: list[str] | None = None) -> int:
 
     counts_paths = args.counts or []
     markers = _normalize_all(_parse_multi(args.markers))
+    exclude_markers = _parse_multi(args.exclude_markers)
     samples = _normalize_all(_parse_multi(args.samples))
+    exclude_samples = _parse_multi(args.exclude_samples)
     batches = _parse_batches(args.batches)
     target_landmarks = _parse_target(args.alignment_target)
     overrides = _load_overrides(args.override_file)
@@ -450,6 +464,8 @@ def main(argv: list[str] | None = None) -> int:
             options,
             markers=markers or None,
             samples_filter=samples or None,
+            exclude_markers=exclude_markers or None,
+            exclude_samples=exclude_samples or None,
             batches=batches,
         )
         run_metadata.update(dataset_meta)

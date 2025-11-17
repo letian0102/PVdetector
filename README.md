@@ -10,6 +10,7 @@ PVdetector is a Streamlit application for detecting density peaks and valleys in
 - Optional enforcement of marker consistency across samples (disabled by default for batch runs).
 - Landmark alignment and piece-wise linear normalization across samples.
 - Downloadable outputs: per-sample curves, aligned data, stain-quality scores, and summary tables.
+- When selecting all markers or all samples (in the app or CLI), you can exclude specific markers/samples from processing.
 
 ## Installation
 1. **Clone the repository**
@@ -49,7 +50,7 @@ python batch_run.py \
 Key flags:
 
 - `--counts`: process individual `*_raw_counts.csv` files (repeatable).
-- `--expression-file` / `--metadata-file`: analyse a whole dataset; combine with `--marker`, `--sample`, and `--batch` to filter selections. Pass `--marker all` or `--sample all` to process every marker/sample without enumerating them.
+- `--expression-file` / `--metadata-file`: analyse a whole dataset; combine with `--marker`, `--sample`, and `--batch` to filter selections. Pass `--marker all` or `--sample all` to process every marker/sample without enumerating them; combine with the exclude flags below when needed.
 - `--override-file`: JSON mapping of global/marker/sample/stem overrides, e.g.
   ```json
   {
@@ -67,6 +68,8 @@ Key flags:
 | `--metadata-file` | Optional¹ | _None_ | `--metadata-file cell_metadata_combined.csv` | Metadata CSV for dataset mode; required when `--expression-file` is supplied. |
 | `--marker` | Optional | All markers | `--marker CD3` | Comma-separated or repeatable marker list; use `--marker all`/`*` for every marker. |
 | `--sample` | Optional | All samples | `--sample SampleA,SampleB` | Comma-separated or repeatable sample list; use `--sample all`/`*` for every sample. |
+| `--exclude-marker` | Optional | _None_ | `--marker all --exclude-marker CD3,CD4` | Marker(s) to skip when processing all markers; comma-separated or repeatable. |
+| `--exclude-sample` | Optional | _None_ | `--sample all --exclude-sample SampleX` | Sample(s) to skip when processing all samples; comma-separated or repeatable. |
 | `--batch` | Optional | No batch filter | `--batch B1 --batch none` | Comma-separated or repeatable batch filters; `none`/`null` selects missing batches. |
 | `--output-dir` | **Required** | — | `--output-dir results_batch` | Destination folder; created if absent. |
 | `--header-row` | Optional | `-1` | `--header-row -1` | Header row index for raw counts (`-1` = no header). |
@@ -116,7 +119,7 @@ finalises partial results if an analysis is interrupted.
 
 ### B. Upload whole dataset
 - Upload `expression_matrix_combined.csv` and `cell_metadata_combined.csv`.
-- Choose markers, samples, and optional batches; the app generates per-sample counts files for analysis.
+- Choose markers, samples, and optional batches; the app generates per-sample counts files for analysis. Selecting “all markers” or “all samples” reveals exclude pickers so you can omit specific markers/samples without enumerating the rest.
 - The **Preprocessing** section controls whether these counts are arcsinh-transformed and allows customization of \(a, b, c\).
 
 ### Detection settings

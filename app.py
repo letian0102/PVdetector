@@ -3087,7 +3087,9 @@ with st.sidebar:
                     )
                 else:
                     try:
-                        def _combine_uploaded_files(files: list[tuple[str, bytes]]):
+                        def _combine_uploaded_files(
+                            files: list[tuple[str, bytes]], *, allow_column_union: bool = False
+                        ):
                             if not files:
                                 raise ValueError("No files were uploaded.")
 
@@ -3102,6 +3104,10 @@ with st.sidebar:
                                 frame, srcs = load_combined_csv(buffer, low_memory=False)
                                 if columns is None:
                                     columns = list(frame.columns)
+                                elif allow_column_union:
+                                    for col in frame.columns:
+                                        if col not in columns:
+                                            columns.append(col)
                                 elif list(frame.columns) != columns:
                                     raise ValueError(
                                         "CSV files have inconsistent columns across uploads."
@@ -3113,10 +3119,15 @@ with st.sidebar:
                                 else:
                                     sources.append(name)
 
+                            if allow_column_union and columns is not None:
+                                frames = [frame.reindex(columns=columns) for frame in frames]
+
                             combined = pd.concat(frames, ignore_index=True)
                             return combined, sources
 
-                        expr_df_combo, expr_sources = _combine_uploaded_files(expr_combo_file)
+                        expr_df_combo, expr_sources = _combine_uploaded_files(
+                            expr_combo_file, allow_column_union=True
+                        )
                         meta_df_combo, meta_sources = _combine_uploaded_files(meta_combo_file)
                     except ValueError as exc:
                         st.error(f"Unable to combine files: {exc}")

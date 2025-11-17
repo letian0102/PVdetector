@@ -74,6 +74,10 @@ class ConsoleProgress:
             self._last_len = 0
             self._last_plain = None
 
+    def result(self, result) -> None:
+        # CLI mode does not stream per-sample payloads.
+        return
+
     def _format(
         self,
         label: str | None,

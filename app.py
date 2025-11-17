@@ -191,11 +191,22 @@ def _read_csv_fast(file_obj, *, low_memory: bool = False) -> pd.DataFrame:
     """Read CSV uploads quickly, preferring the PyArrow engine when available."""
 
     engine = "pyarrow" if importlib.util.find_spec("pyarrow") else "c"
+    kwargs = {"engine": engine}
+    if engine != "pyarrow":
+        kwargs["low_memory"] = low_memory
     try:
         file_obj.seek(0)
     except Exception:
         pass
-    return pd.read_csv(file_obj, low_memory=low_memory, engine=engine)
+    try:
+        return pd.read_csv(file_obj, **kwargs)
+    except Exception:
+        if engine == "pyarrow":
+            # Retry with the default C engine if PyArrow rejects the options.
+            kwargs = {"engine": "c", "low_memory": low_memory}
+            file_obj.seek(0)
+            return pd.read_csv(file_obj, **kwargs)
+        raise
 
 
 def _build_expr_marker_lookup(expr_df: pd.DataFrame) -> dict[str, object]:

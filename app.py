@@ -100,6 +100,8 @@ for key, default in {
     "combined_meta_sources": [],
     "combined_expr_name": None,
     "combined_meta_name": None,
+    "combine_expr_upload": None,
+    "combine_meta_upload": None,
     "cli_summary_df": None,
     "cli_summary_name": None,
     "cli_summary_selection": [],
@@ -3057,20 +3059,41 @@ with st.sidebar:
                     help="Provide a single CSV or a ZIP archive containing metadata parts.",
                     key="combine_meta_file",
                 )
+                if expr_combo is not None:
+                    st.session_state.combine_expr_upload = (
+                        expr_combo.name,
+                        expr_combo.getbuffer().tobytes(),
+                    )
+                if meta_combo is not None:
+                    st.session_state.combine_meta_upload = (
+                        meta_combo.name,
+                        meta_combo.getbuffer().tobytes(),
+                    )
                 submitted = st.form_submit_button("Combine files")
 
+            expr_combo_file = st.session_state.get("combine_expr_upload")
+            meta_combo_file = st.session_state.get("combine_meta_upload")
+
             if submitted:
-                if not expr_combo or not meta_combo:
+                if not expr_combo_file or not meta_combo_file:
                     st.warning(
                         "Upload both an expression file and a cell metadata file before combining."
                     )
                 else:
                     try:
+                        expr_name, expr_bytes = expr_combo_file
+                        meta_name, meta_bytes = meta_combo_file
+
+                        expr_buf = io.BytesIO(expr_bytes)
+                        expr_buf.name = expr_name
+                        meta_buf = io.BytesIO(meta_bytes)
+                        meta_buf.name = meta_name
+
                         expr_df_combo, expr_sources = load_combined_csv(
-                            expr_combo, low_memory=False
+                            expr_buf, low_memory=False
                         )
                         meta_df_combo, meta_sources = load_combined_csv(
-                            meta_combo, low_memory=False
+                            meta_buf, low_memory=False
                         )
                     except ValueError as exc:
                         st.error(f"Unable to combine files: {exc}")
@@ -3162,6 +3185,8 @@ with st.sidebar:
                         "combined_meta_sources",
                         "combined_expr_name",
                         "combined_meta_name",
+                        "combine_expr_upload",
+                        "combine_meta_upload",
                     ):
                         if isinstance(st.session_state.get(key), list):
                             st.session_state[key] = []

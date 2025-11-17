@@ -2690,7 +2690,9 @@ def _render_dataset_overrides(
 
     df_table = pd.DataFrame(rows).set_index("stem")
 
-    edited = st.data_editor(
+    data_editor = getattr(st, "data_editor", None) or st.experimental_data_editor
+
+    edited = data_editor(
         df_table,
         use_container_width=True,
         hide_index=True,

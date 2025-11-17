@@ -3050,25 +3050,31 @@ with st.sidebar:
                 expr_combo = st.file_uploader(
                     "Expression CSV or ZIP",
                     type=["csv", "zip"],
-                    help="Provide a single CSV or a ZIP archive containing expression parts.",
+                    accept_multiple_files=True,
+                    help=(
+                        "Upload one or more CSVs/ZIPs containing expression data; all parts "
+                        "will be concatenated."
+                    ),
                     key="combine_expr_file",
                 )
                 meta_combo = st.file_uploader(
                     "Cell metadata CSV or ZIP",
                     type=["csv", "zip"],
-                    help="Provide a single CSV or a ZIP archive containing metadata parts.",
+                    accept_multiple_files=True,
+                    help=(
+                        "Upload one or more CSVs/ZIPs containing cell metadata; all parts "
+                        "will be concatenated."
+                    ),
                     key="combine_meta_file",
                 )
                 if expr_combo is not None:
-                    st.session_state.combine_expr_upload = (
-                        expr_combo.name,
-                        expr_combo.getbuffer().tobytes(),
-                    )
+                    st.session_state.combine_expr_upload = [
+                        (file.name, file.getbuffer().tobytes()) for file in expr_combo
+                    ]
                 if meta_combo is not None:
-                    st.session_state.combine_meta_upload = (
-                        meta_combo.name,
-                        meta_combo.getbuffer().tobytes(),
-                    )
+                    st.session_state.combine_meta_upload = [
+                        (file.name, file.getbuffer().tobytes()) for file in meta_combo
+                    ]
                 submitted = st.form_submit_button("Combine files")
 
             expr_combo_file = st.session_state.get("combine_expr_upload")
@@ -3081,20 +3087,37 @@ with st.sidebar:
                     )
                 else:
                     try:
-                        expr_name, expr_bytes = expr_combo_file
-                        meta_name, meta_bytes = meta_combo_file
+                        def _combine_uploaded_files(files: list[tuple[str, bytes]]):
+                            if not files:
+                                raise ValueError("No files were uploaded.")
 
-                        expr_buf = io.BytesIO(expr_bytes)
-                        expr_buf.name = expr_name
-                        meta_buf = io.BytesIO(meta_bytes)
-                        meta_buf.name = meta_name
+                            frames: list[pd.DataFrame] = []
+                            sources: list[str] = []
+                            columns: list[str] | None = None
 
-                        expr_df_combo, expr_sources = load_combined_csv(
-                            expr_buf, low_memory=False
-                        )
-                        meta_df_combo, meta_sources = load_combined_csv(
-                            meta_buf, low_memory=False
-                        )
+                            for name, payload in files:
+                                buffer = io.BytesIO(payload)
+                                buffer.name = name
+
+                                frame, srcs = load_combined_csv(buffer, low_memory=False)
+                                if columns is None:
+                                    columns = list(frame.columns)
+                                elif list(frame.columns) != columns:
+                                    raise ValueError(
+                                        "CSV files have inconsistent columns across uploads."
+                                    )
+
+                                frames.append(frame)
+                                if srcs:
+                                    sources.extend([f"{name}:{part}" for part in srcs])
+                                else:
+                                    sources.append(name)
+
+                            combined = pd.concat(frames, ignore_index=True)
+                            return combined, sources
+
+                        expr_df_combo, expr_sources = _combine_uploaded_files(expr_combo_file)
+                        meta_df_combo, meta_sources = _combine_uploaded_files(meta_combo_file)
                     except ValueError as exc:
                         st.error(f"Unable to combine files: {exc}")
                     else:

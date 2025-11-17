@@ -1,7 +1,7 @@
 # app.py  – GPT-assisted bandwidth detector with
 #           live incremental results + per-sample overrides
 from __future__ import annotations
-import io, zipfile, re, math
+import io, zipfile, re, math, importlib.util
 from collections.abc import Iterable
 from pathlib import Path
 import warnings
@@ -185,6 +185,28 @@ def _marker_lookup_variants(value) -> list[str]:
     _add(canonical)
 
     return [variant for variant in variants if variant]
+
+
+def _read_csv_fast(file_obj, *, low_memory: bool = False) -> pd.DataFrame:
+    """Read CSV uploads quickly, preferring the PyArrow engine when available."""
+
+    engine = "pyarrow" if importlib.util.find_spec("pyarrow") else "c"
+    kwargs = {"engine": engine}
+    if engine != "pyarrow":
+        kwargs["low_memory"] = low_memory
+    try:
+        file_obj.seek(0)
+    except Exception:
+        pass
+    try:
+        return pd.read_csv(file_obj, **kwargs)
+    except Exception:
+        if engine == "pyarrow":
+            # Retry with the default C engine if PyArrow rejects the options.
+            kwargs = {"engine": "c", "low_memory": low_memory}
+            file_obj.seek(0)
+            return pd.read_csv(file_obj, **kwargs)
+        raise
 
 
 def _build_expr_marker_lookup(expr_df: pd.DataFrame) -> dict[str, object]:
@@ -1867,9 +1889,9 @@ def _render_cli_import_section() -> None:
         with load_col:
             if st.button("Load files", disabled=not (summary_file and expr_file and meta_file)):
                 try:
-                    summary_df = pd.read_csv(summary_file)
-                    expr_df = pd.read_csv(expr_file, low_memory=False)
-                    meta_df = pd.read_csv(meta_file, low_memory=False)
+                    summary_df = _read_csv_fast(summary_file)
+                    expr_df = _read_csv_fast(expr_file, low_memory=False)
+                    meta_df = _read_csv_fast(meta_file, low_memory=False)
                 except Exception as exc:
                     st.error(f"Failed to read uploaded files: {exc}")
                 else:
@@ -3246,8 +3268,8 @@ with st.sidebar:
                     meta_file.name != st.session_state.meta_name)
             if need:
                 with st.spinner("Parsing expression / metadata …"):
-                    st.session_state.expr_df = pd.read_csv(expr_file, low_memory=False)
-                    st.session_state.meta_df = pd.read_csv(meta_file, low_memory=False)
+                    st.session_state.expr_df = _read_csv_fast(expr_file, low_memory=False)
+                    st.session_state.meta_df = _read_csv_fast(meta_file, low_memory=False)
                     st.session_state.expr_name, st.session_state.meta_name = (
                         expr_file.name, meta_file.name
                     )

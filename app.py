@@ -2784,10 +2784,19 @@ def _schedule_batch_rerun(poll_interval: float = 0.5) -> None:
     """Keep the Streamlit script polling for batch events while work runs."""
 
     thread: Thread | None = st.session_state.get("batch_thread")
-    if not (st.session_state.get("run_active") and thread and thread.is_alive()):
+    queue_obj: Queue | None = st.session_state.get("batch_queue")
+    queue_pending = bool(queue_obj and not queue_obj.empty())
+    run_active = bool(st.session_state.get("run_active"))
+
+    if not (run_active or queue_pending):
         return
 
-    time.sleep(max(poll_interval, 0.05))
+    if thread and thread.is_alive():
+        time.sleep(max(poll_interval, 0.05))
+    else:
+        # Thread already finished or never started, but pending events might
+        # still need to be drained.
+        time.sleep(0.05)
     st.rerun()
 
 

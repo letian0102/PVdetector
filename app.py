@@ -1,10 +1,12 @@
 # app.py  – GPT-assisted bandwidth detector with
 #           live incremental results + per-sample overrides
 from __future__ import annotations
-import io, zipfile, re, math
+import io, zipfile, re, math, time
 from collections.abc import Iterable
 from pathlib import Path
 import warnings
+from queue import Empty, Queue
+from threading import Thread
 
 import numpy as np
 import pandas as pd
@@ -38,6 +40,13 @@ from peak_valley.cli_import import (
 )
 from peak_valley.gpt_adapter import (
     ask_gpt_peak_count, ask_gpt_prominence, ask_gpt_bandwidth,
+)
+from peak_valley.batch import (
+    BatchOptions,
+    BatchResults,
+    SampleInput,
+    SampleResult,
+    run_batch,
 )
 from peak_valley.alignment import align_distributions, fill_landmark_matrix
 
@@ -81,9 +90,9 @@ for key, default in {
     "dirty":       {},         # stem → True if user edited params *or* positions
     "dirty_reason": {},        # stem → set[str] recording why a sample is dirty
     "pre_overrides": {},       # stem → per-sample overrides (persistent)
-    "group_assignments": {},   # stem → group name
-    "group_overrides": {"Default": {}},
-    "group_new_name": "",
+      "group_assignments": {},   # stem → group name
+      "group_overrides": {"Default": {}},
+      "group_new_name": "",
     "group_new_name_reset": False,
     "group_assignments_mode": "Manual selection",
     "cached_uploads": [],
@@ -116,10 +125,16 @@ for key, default in {
     "cli_group_new_name": "",
     "mode_selector": "Counts CSV files",
     "mode_selector_target": None,
-    # incremental‑run machinery
-    "pending":     [],         # list[io.BytesIO] still to process
-    "total_todo":  0,
-    "run_active":  False,
+      # incremental‑run machinery
+      "pending":     [],         # list[io.BytesIO] still to process
+      "total_todo":  0,
+      "run_active":  False,
+      "batch_queue": None,
+      "batch_thread": None,
+      "batch_run_id": 0,
+      "batch_error": None,
+      "batch_progress": {"completed": 0, "total": 0},
+      "workers": 1,
     "aligned_counts":    None,
     "aligned_landmarks": None,
     "aligned_results": {},   # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
@@ -2477,6 +2492,314 @@ def _coerce_float(value) -> float | None:
     return None
 
 
+def _prepare_batch_overrides(stems: list[str]) -> dict[str, dict[str, object]]:
+    """Collect combined overrides for each stem keyed by ``stems`` bucket."""
+
+    overrides: dict[str, dict[str, object]] = {}
+    for stem in stems:
+        per_sample_over = dict(st.session_state.pre_overrides.get(stem, {}))
+        reason_raw = st.session_state.dirty_reason.get(stem)
+        reasons = set(reason_raw) if reason_raw else set()
+
+        if st.session_state.dirty.get(stem, False) and (not reasons or "manual" in reasons):
+            for key, value in st.session_state.params.get(stem, {}).items():
+                if value is not None:
+                    per_sample_over[key] = value
+
+        overrides[stem] = _combined_overrides(stem, per_sample_over)
+
+    return {"stems": overrides}
+
+
+def _prepare_sample_inputs(
+    files: list[io.BytesIO],
+    arcsinh_sig: tuple[bool, float, float, float],
+    header_row: int,
+    skip_rows: int,
+) -> list[SampleInput]:
+    samples: list[SampleInput] = []
+
+    for order, f in enumerate(files):
+        f.seek(0)
+        stem = Path(f.name).stem
+        marker = getattr(f, "marker", None)
+        cached_cnts = st.session_state.results_raw.get(stem)
+        meta_entry_raw = st.session_state.results_raw_meta.get(stem) or {}
+        if isinstance(meta_entry_raw, tuple):
+            cached_sig = meta_entry_raw
+            meta_entry = {"arcsinh": meta_entry_raw}
+        else:
+            meta_entry = dict(meta_entry_raw)
+            cached_sig = meta_entry.get("arcsinh")
+
+        if cached_cnts is not None and cached_sig == arcsinh_sig:
+            cnts = cached_cnts
+        else:
+            cnts, meta = read_counts(f, header_row, skip_rows)
+            if arcsinh_sig[0] and not getattr(f, "arcsinh", False):
+                cnts = arcsinh_transform(
+                    cnts,
+                    a=arcsinh_sig[1],
+                    b=arcsinh_sig[2],
+                    c=arcsinh_sig[3],
+                )
+            meta_entry = {
+                "arcsinh": arcsinh_sig,
+                "protein_name": meta.get("protein_name"),
+                "source_name": meta.get("source_name") or getattr(f, "name", None),
+                "marker": meta.get("marker") or meta.get("protein_name"),
+                "batch": meta.get("batch"),
+            }
+            st.session_state.results_raw[stem] = cnts
+            st.session_state.results_raw_meta[stem] = meta_entry
+
+        dataset_meta = st.session_state.generated_meta.get(stem) or {}
+
+        metadata = {
+            "sample": dataset_meta.get("sample") or stem,
+            "marker": marker or dataset_meta.get("marker") or meta_entry.get("marker"),
+            "batch": getattr(f, "batch", None) or dataset_meta.get("batch"),
+            "protein_name": meta_entry.get("protein_name"),
+        }
+
+        samples.append(
+            SampleInput(
+                stem=stem,
+                counts=np.asarray(cnts, float),
+                metadata=metadata,
+                arcsinh_signature=arcsinh_sig,
+                source_name=getattr(f, "name", None),
+                order=order,
+                cell_indices=getattr(f, "cell_indices", None),
+            )
+        )
+
+    return samples
+
+
+def _apply_sample_result(res: SampleResult, *, aligned: bool = False) -> None:
+    stem = res.stem
+    xs = np.asarray(res.aligned_density[0] if aligned and res.aligned_density else res.xs, float)
+    ys = np.asarray(res.aligned_density[1] if aligned and res.aligned_density else res.ys, float)
+    peaks = (
+        list(map(float, res.aligned_peaks))
+        if aligned and res.aligned_peaks is not None
+        else list(map(float, res.peaks))
+    )
+    valleys = (
+        list(map(float, res.aligned_valleys))
+        if aligned and res.aligned_valleys is not None
+        else list(map(float, res.valleys))
+    )
+
+    meta_entry = {
+        "arcsinh": res.arcsinh_signature,
+        "protein_name": res.metadata.get("protein_name"),
+        "source_name": res.source_name,
+        "marker": res.metadata.get("marker"),
+        "batch": res.metadata.get("batch"),
+    }
+
+    st.session_state.results_raw[stem] = res.counts
+    st.session_state.results_raw_meta[stem] = meta_entry
+
+    target = st.session_state.aligned_results if aligned else st.session_state.results
+    target[stem] = {
+        "peaks": peaks,
+        "valleys": valleys,
+        "quality": float(res.quality),
+        "xs": xs.tolist(),
+        "ys": ys.tolist(),
+        "marker": res.metadata.get("marker"),
+    }
+
+    png_key = f"{stem}_aligned.png" if aligned else f"{stem}.png"
+    plotter = _plot_png_fixed if aligned else _plot_png
+    if xs.size and ys.size:
+        if aligned:
+            xlim = (float(xs.min()), float(xs.max())) if xs.size else None
+            ylim = float(np.nanmax(ys)) if ys.size else None
+            st.session_state.aligned_fig_pngs[png_key] = plotter(
+                stem if aligned else stem,
+                xs,
+                ys,
+                peaks,
+                valleys,
+                xlim,
+                (0, ylim) if ylim is not None else None,
+            )
+        else:
+            st.session_state.fig_pngs[png_key] = plotter(stem, xs, ys, peaks, valleys)
+
+    params = {
+        "bw": res.params.get("bw"),
+        "prom": res.params.get("prom"),
+        "n_peaks": res.params.get("n_peaks"),
+    }
+    st.session_state.params[stem] = params
+    st.session_state.dirty[stem] = False
+    st.session_state.dirty_reason.pop(stem, None)
+    st.session_state[f"{stem}__pk_list"] = peaks.copy()
+    st.session_state[f"{stem}__vl_list"] = valleys.copy()
+    _mark_raw_ridge_stale()
+
+
+def _apply_aligned_outputs(batch: BatchResults) -> None:
+    if not batch.alignment_mode:
+        st.session_state.aligned_counts = None
+        st.session_state.aligned_landmarks = None
+        st.session_state.aligned_results = {}
+        st.session_state.aligned_fig_pngs = {}
+        st.session_state.aligned_ridge_png = None
+        return
+
+    st.session_state.aligned_landmarks = batch.aligned_landmarks
+    st.session_state.aligned_results = {}
+    st.session_state.aligned_fig_pngs = {}
+    st.session_state.aligned_counts = {}
+    st.session_state.aligned_ridge_png = None
+
+    for res in batch.samples:
+        if res.aligned_counts is not None:
+            st.session_state.aligned_counts[res.stem] = res.aligned_counts
+        _apply_sample_result(res, aligned=True)
+
+
+def _run_batch_async(
+    run_id: int,
+    samples: list[SampleInput],
+    options: BatchOptions,
+    overrides: dict[str, dict[str, object]],
+    gpt_client: OpenAI | None,
+    queue_obj: Queue,
+) -> None:
+    class QueueProgress:
+        def start(self, total: int) -> None:
+            queue_obj.put({"type": "start", "total": total, "run_id": run_id})
+
+        def advance(self, stem: str, completed: int, total: int) -> None:
+            queue_obj.put(
+                {
+                    "type": "progress",
+                    "stem": stem,
+                    "completed": completed,
+                    "total": total,
+                    "run_id": run_id,
+                }
+            )
+
+        def finish(self, completed: int, total: int, interrupted: bool) -> None:
+            queue_obj.put(
+                {
+                    "type": "finish",
+                    "completed": completed,
+                    "total": total,
+                    "interrupted": interrupted,
+                    "run_id": run_id,
+                }
+            )
+
+        def result(self, sample: SampleResult) -> None:
+            queue_obj.put({"type": "result", "sample": sample, "run_id": run_id})
+
+    try:
+        batch = run_batch(
+            samples,
+            options,
+            overrides=overrides,
+            gpt_client=gpt_client,
+            progress=QueueProgress(),
+        )
+        queue_obj.put({"type": "batch_complete", "batch": batch, "run_id": run_id})
+    except Exception as exc:  # pragma: no cover - depends on runtime/API
+        queue_obj.put({"type": "error", "error": exc, "run_id": run_id})
+
+
+def _process_batch_events() -> None:
+    queue_obj: Queue | None = st.session_state.get("batch_queue")
+    if queue_obj is None:
+        return
+
+    while True:
+        try:
+            event = queue_obj.get_nowait()
+        except Empty:
+            break
+
+        if event.get("run_id") != st.session_state.batch_run_id:
+            continue
+
+        etype = event.get("type")
+        if etype == "start":
+            total = int(event.get("total", 0))
+            st.session_state.batch_progress = {"completed": 0, "total": total}
+            st.session_state.total_todo = total
+        elif etype == "progress":
+            completed = int(event.get("completed", 0))
+            total = int(event.get("total", 0))
+            st.session_state.batch_progress = {"completed": completed, "total": total}
+        elif etype == "result":
+            res = event.get("sample")
+            if isinstance(res, SampleResult):
+                _apply_sample_result(res)
+                st.session_state.batch_progress["completed"] = max(
+                    st.session_state.batch_progress.get("completed", 0),
+                    len(st.session_state.results),
+                )
+        elif etype == "batch_complete":
+            batch = event.get("batch")
+            if isinstance(batch, BatchResults):
+                for res in batch.samples:
+                    _apply_sample_result(res)
+                _apply_aligned_outputs(batch)
+                st.session_state.run_active = False
+                st.session_state.pending = []
+                st.session_state.batch_thread = None
+                st.session_state.batch_progress["completed"] = len(batch.samples)
+                st.session_state.batch_progress["total"] = max(
+                    st.session_state.batch_progress.get("total", len(batch.samples)),
+                    len(batch.samples),
+                )
+                if st.session_state.results and st.session_state.get("raw_ridge_png") is None:
+                    _refresh_raw_ridge()
+                if batch.interrupted:
+                    st.warning(
+                        "Batch interrupted before completing all samples. Partial results are available."
+                    )
+                else:
+                    st.success("All files processed!")
+        elif etype == "finish":
+            interrupted = bool(event.get("interrupted", False))
+            if interrupted:
+                st.session_state.run_active = False
+                st.session_state.batch_thread = None
+        elif etype == "error":
+            exc = event.get("error")
+            st.session_state.batch_error = exc
+            st.session_state.run_active = False
+            st.session_state.batch_thread = None
+
+
+def _schedule_batch_rerun(poll_interval: float = 0.5) -> None:
+    """Keep the Streamlit script polling for batch events while work runs."""
+
+    thread: Thread | None = st.session_state.get("batch_thread")
+    queue_obj: Queue | None = st.session_state.get("batch_queue")
+    queue_pending = bool(queue_obj and not queue_obj.empty())
+    run_active = bool(st.session_state.get("run_active"))
+
+    if not (run_active or queue_pending):
+        return
+
+    if thread and thread.is_alive():
+        time.sleep(max(poll_interval, 0.05))
+    else:
+        # Thread already finished or never started, but pending events might
+        # still need to be drained.
+        time.sleep(0.05)
+    st.rerun()
+
+
 def _format_batch_label(batch_val) -> str:
     """Return a human-friendly label for batch values, handling NaNs."""
     if pd.isna(batch_val):
@@ -3656,6 +3979,20 @@ with st.sidebar:
         help="Key for accessing the OpenAI API."
     )
 
+    workers = st.slider(
+        "Workers",
+        1,
+        8,
+        int(st.session_state.get("workers", 1)),
+        help="Number of parallel workers to use during batch processing.",
+    )
+    st.session_state.workers = workers
+    gpt_features_selected = (n_fixed is None) or prom_mode == "GPT automatic" or bw_mode == "GPT automatic"
+    if workers > 1 and gpt_features_selected:
+        st.caption(
+            "Multiple workers will send concurrent GPT requests. Reduce workers if you encounter API rate limits."
+        )
+
 
 
 _render_cli_import_section()
@@ -3682,36 +4019,127 @@ if clear_col.button("Clear results"):
     st.session_state.pending.clear()
     st.session_state.total_todo = 0
     st.session_state.run_active = False
+    st.session_state.batch_thread = None
+    st.session_state.batch_queue = None
+    st.session_state.batch_progress = {"completed": 0, "total": 0}
     st.rerun()
 
 run_clicked = run_col.button("Run detector")
 
-# pause button (if run is active)
-pause_label = "Pause" if st.session_state.run_active else "Resume"
-pause_disabled = not bool(st.session_state.pending)
+pause_label = "Stop" if st.session_state.run_active else "Resume"
+pause_disabled = not bool(
+    st.session_state.run_active
+    and st.session_state.batch_thread
+    and st.session_state.batch_thread.is_alive()
+)
 pause_clicked = pause_col.button(pause_label, disabled=pause_disabled)
 
-if pause_clicked:
-    if st.session_state.run_active:
-        # Pause mid-batch
-        st.session_state.run_active = False
-        st.session_state.paused     = True
-        st.rerun()
-    elif st.session_state.paused:
-        # Resume where you left off
-        st.session_state.run_active = True
-        st.session_state.paused     = False
-        st.rerun()
-
-# progress bar placeholder (top-level, reused)
-prog_placeholder = st.empty()
-if st.session_state.total_todo:
-    done = st.session_state.total_todo - len(st.session_state.pending)
-    prog_placeholder.progress(done / st.session_state.total_todo,
-                              f"Processing… {done}/{st.session_state.total_todo}")
-
+if pause_clicked and st.session_state.run_active:
+    st.session_state.batch_run_id += 1
+    st.session_state.run_active = False
+    st.session_state.paused = False
+    st.session_state.pending = []
+    st.session_state.total_todo = 0
+    st.session_state.batch_progress = {"completed": 0, "total": 0}
+    st.session_state.batch_thread = None
+    st.session_state.batch_queue = None
+    st.rerun()
 
 # ───────────────────────────── incremental processing ───────────────────────
+prog_placeholder = st.empty()
+_process_batch_events()
+progress_state = st.session_state.get("batch_progress", {"completed": 0, "total": 0})
+total_now = progress_state.get("total", 0)
+completed_now = progress_state.get("completed", 0)
+if total_now:
+    prog_placeholder.progress(
+        completed_now / total_now if total_now else 0,
+        f"Processing… {completed_now}/{total_now}",
+    )
+
+def _start_batch_run(csv_files: list[io.BytesIO]) -> None:
+    if not csv_files:
+        st.error("No CSV files selected.")
+        st.stop()
+
+    arcsinh_sig = _current_arcsinh_signature()
+    samples = _prepare_sample_inputs(csv_files, arcsinh_sig, header_row, skip_rows)
+    if not samples:
+        st.error("No samples available to process.")
+        st.stop()
+
+    overrides = _prepare_batch_overrides([s.stem for s in samples])
+
+    options = BatchOptions(
+        apply_arcsinh=bool(st.session_state.get("apply_arcsinh", True)),
+        arcsinh_a=float(st.session_state.get("arcsinh_a", 1.0)),
+        arcsinh_b=float(st.session_state.get("arcsinh_b", 1 / 5)),
+        arcsinh_c=float(st.session_state.get("arcsinh_c", 0.0)),
+        n_peaks=n_fixed,
+        n_peaks_auto=n_fixed is None,
+        max_peaks=int(max_peaks),
+        bandwidth=bw_val if bw_mode == "Manual" else "scott",
+        bandwidth_auto=bw_mode != "Manual",
+        prominence=prom_val if prom_val is not None else 0.05,
+        prominence_auto=prom_mode != "Manual",
+        min_width=int(min_w),
+        curvature=float(curv),
+        turning_points=bool(tp),
+        min_separation=float(min_sep),
+        grid_size=int(grid_sz),
+        valley_drop=float(val_drop),
+        first_valley="drop" if val_mode == "Valley drop" else "slope",
+        apply_consistency=bool(st.session_state.get("apply_consistency", False)),
+        align=False,
+        align_mode=align_mode,
+        target_landmarks=target_vec,
+        workers=int(st.session_state.get("workers", 1)),
+        gpt_model=gpt_model,
+    )
+
+    gpt_needed = options.bandwidth_auto or options.prominence_auto or options.n_peaks_auto
+    gpt_client = None
+    if gpt_needed:
+        if not api_key:
+            st.error("GPT-based options need an OpenAI key.")
+            st.stop()
+        try:
+            gpt_client = OpenAI(api_key=api_key)
+        except AuthenticationError:
+            if not st.session_state.invalid_api_key:
+                st.warning(
+                    "Invalid OpenAI API key; please update it to enable GPT features."
+                )
+                st.session_state.invalid_api_key = True
+            st.stop()
+        except Exception as exc:
+            st.error(f"Failed to initialise OpenAI client: {exc}")
+            st.stop()
+
+    st.session_state.batch_run_id += 1
+    st.session_state.batch_progress = {"completed": 0, "total": len(samples)}
+    st.session_state.total_todo = len(samples)
+    st.session_state.pending = csv_files
+    st.session_state.run_active = True
+    st.session_state.batch_error = None
+    queue_obj = Queue()
+    st.session_state.batch_queue = queue_obj
+    thread = Thread(
+        target=_run_batch_async,
+        args=(
+            st.session_state.batch_run_id,
+            samples,
+            options,
+            overrides,
+            gpt_client,
+            queue_obj,
+        ),
+        daemon=True,
+    )
+    st.session_state.batch_thread = thread
+    thread.start()
+    st.rerun()
+
 # 1 User clicked RUN: prepare pending queue
 if run_clicked and not st.session_state.run_active:
     st.session_state.raw_ridge_png = None
@@ -3726,304 +4154,36 @@ if run_clicked and not st.session_state.run_active:
         use_generated = [bio for _, bio in st.session_state.generated_csvs]
         csv_files = use_uploads + use_generated
 
-    if not csv_files:
-        st.error("No CSV files selected."); st.stop()
+    todo = [
+        f
+        for f in csv_files
+        if (stem := Path(f.name).stem) not in st.session_state.results
+        or st.session_state.dirty.get(stem, False)
+    ]
 
-    need_gpt = ((n_fixed is None) or prom_mode == "GPT automatic"
-                or bw_mode == "GPT automatic")
-    if need_gpt and not api_key:
-        st.error("GPT-based options need an OpenAI key."); st.stop()
+    _start_batch_run(todo)
 
-    todo = [f for f in csv_files
-            if (stem := Path(f.name).stem) not in st.session_state.results
-               or st.session_state.dirty.get(stem, False)]
+if (
+  st.session_state.run_active
+  and st.session_state.pending
+  and st.session_state.batch_thread is None
+):
+  _start_batch_run(list(st.session_state.pending))
 
-    st.session_state.pending    = todo
-    st.session_state.total_todo = len(todo)
-    st.session_state.run_active = bool(todo)
-    st.rerun()
+if st.session_state.batch_error:
+    msg = str(st.session_state.batch_error)
+    if "rate limit" in msg.lower():
+        msg += " — try reducing the number of workers."
+    st.error(msg)
 
-# 2 Queue active → process ONE file then rerun
-if st.session_state.run_active and st.session_state.pending:
-    f      = st.session_state.pending.pop(0)
-    stem   = Path(f.name).stem
-    marker = getattr(f, "marker", None)
-    arcsinh_sig = _current_arcsinh_signature()
-    cached_cnts = st.session_state.results_raw.get(stem)
-    meta_entry_raw = st.session_state.results_raw_meta.get(stem) or {}
-    if isinstance(meta_entry_raw, tuple):
-        cached_sig = meta_entry_raw
-        meta_entry = {"arcsinh": meta_entry_raw}
-        st.session_state.results_raw_meta[stem] = meta_entry
-    else:
-        meta_entry = dict(meta_entry_raw)
-        cached_sig = meta_entry.get("arcsinh")
+if st.session_state.run_active:
+    results_container = st.container()
+    render_results(results_container)
+    _schedule_batch_rerun()
+    st.stop()
 
-    if cached_cnts is not None and cached_sig == arcsinh_sig:
-        cnts = cached_cnts
-        # ensure legacy caches gain the richer metadata
-        if "source_name" not in meta_entry:
-            meta_entry["source_name"] = getattr(f, "name", None)
-            st.session_state.results_raw_meta[stem] = meta_entry
-    else:
-        cnts, meta = read_counts(f, header_row, skip_rows)
-        if arcsinh_sig[0] and not getattr(f, "arcsinh", False):
-            cnts = arcsinh_transform(
-                cnts,
-                a=arcsinh_sig[1],
-                b=arcsinh_sig[2],
-                c=arcsinh_sig[3],
-            )
-        st.session_state.results_raw[stem] = cnts
-        protein_name = meta.get("protein_name") or meta_entry.get("protein_name")
-        meta_entry = {
-            "arcsinh": arcsinh_sig,
-            "protein_name": protein_name,
-            "source_name": meta.get("source_name") or getattr(f, "name", None),
-        }
-        st.session_state.results_raw_meta[stem] = meta_entry
-
-    per_sample_over = dict(st.session_state.pre_overrides.get(stem, {}))
-    reason_raw = st.session_state.dirty_reason.get(stem)
-    reasons = set(reason_raw) if reason_raw else set()
-
-    if st.session_state.dirty.get(stem, False) and (not reasons or "manual" in reasons):
-        for key, value in st.session_state.params.get(stem, {}).items():
-            if value is not None:
-                per_sample_over[key] = value
-
-    over = _combined_overrides(stem, per_sample_over)
-
-    bw_raw = over.get("bw")
-    bw_over: float | None
-    bw_rule: str | None
-    if isinstance(bw_raw, (int, float)) and not np.isnan(bw_raw):
-        bw_over = float(bw_raw)
-        bw_rule = None
-    elif isinstance(bw_raw, str) and bw_raw:
-        try:
-            bw_over = float(bw_raw)
-            bw_rule = None
-        except ValueError:
-            bw_over = None
-            bw_rule = bw_raw
-    else:
-        bw_over = None
-        bw_rule = None
-
-    prom_raw = over.get("prom", "")
-    try:
-        pr_over = float(prom_raw) if prom_raw not in ("", None) else None
-    except Exception:
-        pr_over = None
-
-    k_over = over.get("n_peaks")
-    if k_over in ("", None):
-        k_over = None
-    elif isinstance(k_over, str):
-        k_over = int(k_over) if k_over.isdigit() else None
-    elif isinstance(k_over, (int, float)):
-        k_over = int(k_over)
-
-    max_override = _coerce_int(over.get("max_peaks"))
-    max_peaks_use = max_override if max_override is not None else max_peaks
-    max_peaks_use = max(1, int(max_peaks_use))
-
-    min_width_override = _coerce_int(over.get("min_width"))
-    min_w_use = min_width_override if min_width_override is not None else min_w
-
-    curv_override = _coerce_float(over.get("curvature"))
-    curv_use = curv_override if curv_override is not None else curv
-
-    turning_override = over.get("turning_points")
-    if isinstance(turning_override, str):
-        turning_use = turning_override.lower().startswith("y")
-    elif isinstance(turning_override, bool):
-        turning_use = turning_override
-    else:
-        turning_use = tp
-
-    min_sep_override = _coerce_float(over.get("min_separation"))
-    min_sep_use = (
-        max(0.0, float(min_sep_override))
-        if min_sep_override is not None
-        else float(min_sep)
-    )
-
-    grid_override = _coerce_int(over.get("max_grid"))
-    grid_use = grid_override if grid_override is not None else grid_sz
-
-    drop_override = _coerce_float(over.get("valley_drop"))
-    drop_use = drop_override if drop_override is not None else float(val_drop)
-
-    first_override = over.get("first_valley")
-    if isinstance(first_override, str) and first_override in ("Slope change", "Valley drop"):
-        val_mode_use = first_override
-    else:
-        val_mode_use = val_mode
-
-    client = OpenAI(api_key=api_key) if api_key else None
-
-    # bandwidth
-    if bw_over is not None:
-        bw_use = bw_over
-    elif bw_rule is not None:
-        bw_use = bw_rule
-    elif bw_val is not None:
-        bw_use = bw_val
-    else:
-        expected = (k_over if k_over is not None else
-                    n_fixed if n_fixed is not None else max_peaks_use)
-        if client is None:
-            bw_use = 'scott'
-        else:
-            try:
-                bw_use = ask_gpt_bandwidth(
-                    client, gpt_model, cnts, peak_amount=expected, default='scott'
-                )
-            except AuthenticationError:
-                if not st.session_state.invalid_api_key:
-                    st.warning("Invalid OpenAI API key; please update it to enable GPT features.")
-                    st.session_state.invalid_api_key = True
-                st.stop()
-
-    # prominence
-    if pr_over is not None:
-        prom_use = pr_over
-    elif prom_val is not None:
-        prom_use = prom_val
-    else:
-        if client is None:
-            prom_use = 0.05
-        else:
-            try:
-                prom_use = ask_gpt_prominence(
-                    client, gpt_model, cnts, default=0.05
-                )
-            except AuthenticationError:
-                if not st.session_state.invalid_api_key:
-                    st.warning("Invalid OpenAI API key; please update it to enable GPT features.")
-                    st.session_state.invalid_api_key = True
-                st.stop()
-
-    # peak count
-    if k_over is not None:                  # manual override from per-file form
-        n_use = int(k_over)
-    elif n_fixed is not None:               # fixed via sidebar selector
-        n_use = n_fixed
-    else:                                   # GPT automatic
-        if client is None:
-            n_use = None
-        else:
-            try:
-                n_use = ask_gpt_peak_count(
-                    client, gpt_model, max_peaks_use, counts_full=cnts,
-                    marker_name=marker
-                )
-            except AuthenticationError:
-                if not st.session_state.invalid_api_key:
-                    st.warning("Invalid OpenAI API key; please update it to enable GPT features.")
-                    st.session_state.invalid_api_key = True
-                st.stop()
-        if n_use is None:                   # fallback to heuristic
-            n_est, confident = quick_peak_estimate(
-                cnts, prom_use, bw_use, min_w_use or None, grid_use
-            )
-            n_use = n_est if confident else None
-
-    if n_use is None:
-        n_use = max_peaks_use
-    elif k_over is None and n_fixed is None:
-        n_use = min(n_use, max_peaks_use)
-
-    peaks, valleys, xs, ys = kde_peaks_valleys(
-        cnts, n_use, prom_use, bw_use, min_w_use or None, grid_use,
-        drop_frac=drop_use / 100.0,
-        min_x_sep=min_sep_use,
-        curvature_thresh = curv_use if (curv_use and curv_use > 0) else None,
-        turning_peak     = turning_use,
-        first_valley     = "drop" if val_mode_use == "Valley drop" else "slope",
-    )
-
-    if len(peaks) == 1 and not valleys:
-        p_idx = np.searchsorted(xs, peaks[0])
-        y_pk  = ys[p_idx]
-        drop  = np.where(ys[p_idx:] < (drop_use / 100) * y_pk)[0]
-        if drop.size:
-            valleys = [float(xs[p_idx + drop[0]])]
-
-    peaks, valleys, cli_applied = _apply_cli_positions(stem, peaks, valleys)
-
-    # quality
-    qual = stain_quality(cnts, peaks, valleys)
-
-    st.session_state.results[stem] = {
-        "peaks": peaks,
-        "valleys": valleys,
-        "quality": qual,                             #  store it
-        "xs": xs.tolist(),
-        "ys": ys.tolist(),
-        "marker": marker,
-    }
-    st.session_state.dirty[stem] = False
-
-    # draw only this sample for now; full consistency applied later
-    info1 = st.session_state.results[stem]
-    xs1 = np.asarray(info1.get("xs", []), float)
-    ys1 = np.asarray(info1.get("ys", []), float)
-    pk1 = info1.get("peaks", [])
-    vl1 = info1.get("valleys", [])
-    st.session_state.fig_pngs[f"{stem}.png"] = _plot_png(
-        stem, xs1, ys1, pk1, vl1
-    )
-    st.session_state[f"{stem}__pk_list"] = pk1.copy()
-    st.session_state[f"{stem}__vl_list"] = vl1.copy()
-    _mark_raw_ridge_stale()
-
-    st.session_state.params[stem] = {
-        "bw": bw_use,
-        "prom": prom_use,
-        "n_peaks": n_use,
-    }
-    if cli_applied:
-        st.session_state.params[stem]["n_peaks"] = len(peaks)
-    st.session_state.dirty[stem] = False
-    st.session_state.dirty_reason.pop(stem, None)
-
-    # progress update
-    done = st.session_state.total_todo - len(st.session_state.pending)
-    prog_placeholder.progress(done / st.session_state.total_todo,
-                              f"Processing… {done}/{st.session_state.total_todo}")
-
-    # finished queue?
-    if not st.session_state.pending:
-        if st.session_state.get("apply_consistency", True):
-            enforce_marker_consistency(st.session_state.results)
-            _restore_cli_positions()
-            for stem2, info2 in st.session_state.results.items():
-                xs2 = np.asarray(info2.get("xs", []), float)
-                ys2 = np.asarray(info2.get("ys", []), float)
-                pk2 = info2.get("peaks", [])
-                vl2 = info2.get("valleys", [])
-                st.session_state.fig_pngs[f"{stem2}.png"] = _plot_png(
-                    stem2, xs2, ys2, pk2, vl2
-                )
-                st.session_state[f"{stem2}__pk_list"] = pk2.copy()
-                st.session_state[f"{stem2}__vl_list"] = vl2.copy()
-            _mark_raw_ridge_stale()
-        st.session_state.run_active = False
-        st.success("All files processed!")
-
-    # show current results & run again if queue not empty
-    if st.session_state.run_active:
-        results_container = st.container()
-        render_results(results_container)
-        st.rerun()
-        st.stop()
-
-    # ── build a 'RAW' stacked ridge plot once we have ≥1 samples ─────────
-    if st.session_state.results and st.session_state.get("raw_ridge_png") is None:
-        _refresh_raw_ridge()
+if st.session_state.results and st.session_state.get("raw_ridge_png") is None:
+    _refresh_raw_ridge()
 
 
 # ────────────────────────── static results & download ────────────────────────
@@ -4032,16 +4192,16 @@ render_results(results_container)
 
 # ──────────────  SUMMARY  +  RIDGE-PLOT TABS  ──────────────
 if st.session_state.results:
-    df = pd.DataFrame(
-        [{
-            "file":     k,
-            "peaks":    v["peaks"],
-            "valleys":  v["valleys"],
-            "quality":  round(v.get("quality", np.nan), 4),
-        } for k, v in st.session_state.results.items()]
-    )
+  df = pd.DataFrame(
+      [{
+          "file":     k,
+          "peaks":    v["peaks"],
+          "valleys":  v["valleys"],
+          "quality":  round(v.get("quality", np.nan), 4),
+      } for k, v in st.session_state.results.items()]
+  )
 else:
-    df = pd.DataFrame()
+  df = pd.DataFrame()
 
 download_section = st.container()
 

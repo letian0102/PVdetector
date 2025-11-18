@@ -150,6 +150,9 @@ class BatchProgress(Protocol):
     def finish(self, completed: int, total: int, interrupted: bool) -> None:
         ...
 
+    def result(self, result: "SampleResult") -> None:
+        ...
+
 
 def _coerce_int(value: Any) -> int | None:
     if isinstance(value, (int, np.integer)):
@@ -566,6 +569,9 @@ def run_batch(
         if progress is not None:
             try:
                 progress.advance(res.stem, completed, total)
+                result_cb = getattr(progress, "result", None)
+                if callable(result_cb):
+                    result_cb(res)
             except Exception:
                 progress = None
 

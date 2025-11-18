@@ -1,7 +1,7 @@
 # app.py  – GPT-assisted bandwidth detector with
 #           live incremental results + per-sample overrides
 from __future__ import annotations
-import io, zipfile, re, math
+import io, zipfile, re, math, time
 from collections.abc import Iterable
 from pathlib import Path
 import warnings
@@ -2780,6 +2780,17 @@ def _process_batch_events() -> None:
             st.session_state.batch_thread = None
 
 
+def _schedule_batch_rerun(poll_interval: float = 0.5) -> None:
+    """Keep the Streamlit script polling for batch events while work runs."""
+
+    thread: Thread | None = st.session_state.get("batch_thread")
+    if not (st.session_state.get("run_active") and thread and thread.is_alive()):
+        return
+
+    time.sleep(max(poll_interval, 0.05))
+    st.rerun()
+
+
 def _format_batch_label(batch_val) -> str:
     """Return a human-friendly label for batch values, handling NaNs."""
     if pd.isna(batch_val):
@@ -4159,6 +4170,7 @@ if st.session_state.batch_error:
 if st.session_state.run_active:
     results_container = st.container()
     render_results(results_container)
+    _schedule_batch_rerun()
     st.stop()
 
 if st.session_state.results and st.session_state.get("raw_ridge_png") is None:

@@ -3678,6 +3678,13 @@ with st.sidebar:
         help="Key for accessing the OpenAI API."
     )
 
+    gpt_allowed = (mode == "Counts CSV files")
+    gpt_enabled = bool(api_key) and gpt_allowed
+    if not gpt_allowed:
+        st.info("GPT helpers are disabled when loading processed datasets; data will simply load and plot.")
+    elif not api_key:
+        st.info("Enter an OpenAI API key to enable GPT-based parameter suggestions.")
+
 
 
 _render_cli_import_section()
@@ -3751,9 +3758,10 @@ if run_clicked and not st.session_state.run_active:
     if not csv_files:
         st.error("No CSV files selected."); st.stop()
 
-    need_gpt = ((n_fixed is None) or prom_mode == "GPT automatic"
-                or bw_mode == "GPT automatic")
-    if need_gpt and not api_key:
+    need_gpt = gpt_allowed and ((n_fixed is None)
+                                or prom_mode == "GPT automatic"
+                                or bw_mode == "GPT automatic")
+    if need_gpt and not gpt_enabled:
         st.error("GPT-based options need an OpenAI key."); st.stop()
 
     todo = [f for f in csv_files
@@ -3884,7 +3892,7 @@ if st.session_state.run_active and st.session_state.pending:
     else:
         val_mode_use = val_mode
 
-    client = OpenAI(api_key=api_key) if api_key else None
+    client = OpenAI(api_key=api_key) if gpt_enabled else None
 
     # bandwidth
     if bw_over is not None:

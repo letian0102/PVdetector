@@ -4057,7 +4057,9 @@ if total_now:
         f"Processing… {completed_now}/{total_now}",
     )
 
-def _start_batch_run(csv_files: list[io.BytesIO]) -> None:
+def _start_batch_run(
+    csv_files: list[io.BytesIO], *, require_gpt: bool = True
+) -> None:
     if not csv_files:
         st.error("No CSV files selected.")
         st.stop()
@@ -4097,7 +4099,14 @@ def _start_batch_run(csv_files: list[io.BytesIO]) -> None:
         gpt_model=gpt_model,
     )
 
-    gpt_needed = options.bandwidth_auto or options.prominence_auto or options.n_peaks_auto
+    gpt_needed = (
+        require_gpt
+        and (
+            options.bandwidth_auto
+            or options.prominence_auto
+            or options.n_peaks_auto
+        )
+    )
     gpt_client = None
     if gpt_needed:
         if not api_key:
@@ -4168,7 +4177,10 @@ if (
   and st.session_state.pending
   and st.session_state.batch_thread is None
 ):
-  _start_batch_run(list(st.session_state.pending))
+  _start_batch_run(
+      list(st.session_state.pending),
+      require_gpt=not bool(st.session_state.get("cli_counts_native")),
+  )
 
 if st.session_state.batch_error:
     msg = str(st.session_state.batch_error)

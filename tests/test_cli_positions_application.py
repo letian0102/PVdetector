@@ -1,7 +1,14 @@
+import numpy as np
 import pandas as pd
 import streamlit as st
 
-from app import _apply_cli_positions, _restore_cli_positions, _cli_assign_groups
+from app import (
+    _apply_cli_positions,
+    _apply_sample_result,
+    _cli_assign_groups,
+    _restore_cli_positions,
+)
+from peak_valley.batch import SampleResult
 
 
 def setup_state():
@@ -11,6 +18,20 @@ def setup_state():
     st.session_state.cli_positions_cache = {}
     st.session_state.cli_positions_pending = []
     st.session_state.cli_positions_fixed = set()
+    st.session_state.results = {}
+    st.session_state.fig_pngs = {}
+    st.session_state.params = {}
+    st.session_state.dirty = {}
+    st.session_state.dirty_reason = {}
+    st.session_state.results_raw = {}
+    st.session_state.results_raw_meta = {}
+    st.session_state.aligned_results = {}
+    st.session_state.aligned_fig_pngs = {}
+    st.session_state.aligned_counts = None
+    st.session_state.aligned_landmarks = None
+    st.session_state.aligned_ridge_png = None
+    st.session_state.generated_meta = {}
+    st.session_state.raw_ridge_png = None
 
 
 def test_apply_cli_positions_overrides_once():
@@ -138,3 +159,30 @@ def test_cli_assign_groups_creates_new_group():
     assert applied
     assert st.session_state.group_assignments["sampleC_marker"] == "MyGroup"
     assert "MyGroup" in st.session_state.group_overrides
+
+
+def test_apply_sample_result_honours_imported_peaks():
+    setup_state()
+    st.session_state.cli_summary_lookup = {
+        "stem_marker": {"peaks": (1.0, 2.0), "valleys": (1.4,)},
+    }
+    st.session_state.cli_positions_pending = ["stem_marker"]
+
+    res = SampleResult(
+        stem="stem_marker",
+        peaks=[0.5],
+        valleys=[0.9],
+        xs=np.array([0.0, 1.0, 2.0]),
+        ys=np.array([0.0, 1.0, 0.0]),
+        counts=np.array([0.0, 1.0, 2.0]),
+        params={"bw": 1.0, "prom": 0.1, "n_peaks": 1},
+        quality=0.0,
+        metadata={"marker": "CD3"},
+    )
+
+    _apply_sample_result(res)
+
+    stored = st.session_state.results["stem_marker"]
+    assert stored["peaks"] == [1.0, 2.0]
+    assert stored["valleys"] == [1.4]
+    assert st.session_state.params["stem_marker"]["n_peaks"] == 2

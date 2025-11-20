@@ -1831,6 +1831,17 @@ def _queue_cli_samples(
 
     _sync_generated_counts(markers, samples, expr_df, meta_df, batches)
 
+    available_stems = {stem for stem, _ in st.session_state.generated_csvs}
+    missing_stems = sorted({stem for stem in stems if stem not in available_stems})
+    if missing_stems:
+        preview = ", ".join(missing_stems[:5])
+        suffix = "…" if len(missing_stems) > 5 else ""
+        st.warning(
+            "Skipped "
+            f"{len(missing_stems)} sample(s) because counts could not be generated: "
+            f"{preview}{suffix}."
+        )
+
     chosen = set(stems)
     files: list[io.BytesIO] = []
     for stem, bio in st.session_state.generated_csvs:
@@ -2592,6 +2603,13 @@ def _apply_sample_result(res: SampleResult, *, aligned: bool = False) -> None:
         else list(map(float, res.valleys))
     )
 
+    quality = float(res.quality)
+    cli_applied = False
+    if not aligned:
+        peaks, valleys, cli_applied = _apply_cli_positions(stem, peaks, valleys)
+        if cli_applied:
+            quality = float(stain_quality(res.counts, peaks, valleys))
+
     meta_entry = {
         "arcsinh": res.arcsinh_signature,
         "protein_name": res.metadata.get("protein_name"),
@@ -2607,7 +2625,7 @@ def _apply_sample_result(res: SampleResult, *, aligned: bool = False) -> None:
     target[stem] = {
         "peaks": peaks,
         "valleys": valleys,
-        "quality": float(res.quality),
+        "quality": quality,
         "xs": xs.tolist(),
         "ys": ys.tolist(),
         "marker": res.metadata.get("marker"),
@@ -2636,6 +2654,8 @@ def _apply_sample_result(res: SampleResult, *, aligned: bool = False) -> None:
         "prom": res.params.get("prom"),
         "n_peaks": res.params.get("n_peaks"),
     }
+    if cli_applied and peaks:
+        params["n_peaks"] = len(peaks)
     st.session_state.params[stem] = params
     st.session_state.dirty[stem] = False
     st.session_state.dirty_reason.pop(stem, None)

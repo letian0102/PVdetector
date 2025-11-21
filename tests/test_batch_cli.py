@@ -1,5 +1,6 @@
 import io
 import json
+import time
 import zipfile
 from pathlib import Path
 
@@ -345,6 +346,52 @@ def test_run_batch_handles_keyboard_interrupt(tmp_path, monkeypatch):
         manifest = json.load(fh)
     assert manifest.get("interrupted") is True
     assert manifest["samples"], "Partial samples should still be exported"
+
+
+def test_run_batch_retries_timed_out_workers(monkeypatch):
+    import peak_valley.batch as batch_mod
+
+    options = BatchOptions(apply_arcsinh=False, workers=2, worker_timeout=0.1, worker_retries=1)
+    sample_a = SampleInput(
+        stem="SampleA",
+        counts=np.array([0.1, 0.9]),
+        metadata={"sample": "S1", "marker": "CD3"},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+    sample_b = SampleInput(
+        stem="SampleB",
+        counts=np.array([0.2, 0.8]),
+        metadata={"sample": "S2", "marker": "CD19"},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+
+    call_counts: dict[str, int] = {}
+
+    def fake_process(sample, opts, overrides, gpt_client):
+        call_counts[sample.stem] = call_counts.get(sample.stem, 0) + 1
+        if sample.stem == "SampleA" and call_counts[sample.stem] == 1:
+            time.sleep(0.2)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[0.5],
+            valleys=[0.2],
+            xs=np.array([0.0, 1.0]),
+            ys=np.array([0.4, 0.6]),
+            counts=sample.counts,
+            params={"bw": 0.1, "prom": 0.05},
+            quality=0.95,
+            metadata=sample.metadata,
+            source_name=sample.source_name,
+            arcsinh_signature=sample.arcsinh_signature,
+        )
+
+    monkeypatch.setattr(batch_mod, "process_sample", fake_process)
+
+    batch = run_batch([sample_a, sample_b], options)
+
+    assert not batch.interrupted
+    assert len(batch.samples) == 2
+    assert call_counts["SampleA"] >= 2
 
 
 def test_alignment_normalizes_landmarks(monkeypatch):

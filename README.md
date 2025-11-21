@@ -95,6 +95,8 @@ Key flags:
 | `--alignment-mode` | Optional | `negPeak_valley_posPeak` | `--alignment-mode negPeak_valley` | Alignment template: `negPeak`, `negPeak_valley`, `negPeak_valley_posPeak`, or `valley`. |
 | `--alignment-target` | Optional | Cohort medians | `--alignment-target -1.5,0.0,1.5` | Comma-separated landmark targets; defaults to cohort medians. |
 | `--workers` | Optional | `1` | `--workers 4` | Number of parallel worker threads. |
+| `--worker-timeout` | Optional | `600` | `--worker-timeout 300` | Seconds to wait before restarting a stuck worker (`0` disables timeouts). |
+| `--worker-retries` | Optional | `1` | `--worker-retries 2` | How many times to requeue a sample that times out. |
 | `--override-file` | Optional | _None_ | `--override-file overrides.json` | JSON overrides for global/marker/sample/stem settings. |
 | `--gpt-model` | Optional | Auto (`o4-mini`) | `--gpt-model o4-mini` | Override GPT model name when using automatic suggestions. |
 | `--api-key` | Optional | Environment variable | `--api-key sk-...` | OpenAI API key; overrides the `OPENAI_API_KEY` environment variable. |

@@ -1,7 +1,8 @@
 # app.py  – GPT-assisted bandwidth detector with
 #           live incremental results + per-sample overrides
 from __future__ import annotations
-import io, zipfile, re, math, time
+import io, zipfile, re, math, time, os
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Iterable
 from pathlib import Path
 import warnings
@@ -60,6 +61,7 @@ warnings.filterwarnings(
 st.set_page_config("Peak & Valley Detector", None, layout="wide")
 
 DEFAULT_MIN_SEPARATION = 0.5
+DEFAULT_WORKERS = max(1, min(4, (os.cpu_count() or 1)))
 st.title("Peak & Valley Detector — CSV *or* full dataset")
 st.warning(
     "**Heads-up:** if you refresh or close this page, all of your uploaded data and results will be lost."
@@ -123,6 +125,7 @@ for key, default in {
     "cli_positions_fixed": set(),
     "cli_group_mode": "none",
     "cli_group_new_name": "",
+    "align_group_markers": False,
     "mode_selector": "Counts CSV files",
     "mode_selector_target": None,
       # incremental‑run machinery
@@ -134,7 +137,7 @@ for key, default in {
       "batch_run_id": 0,
       "batch_error": None,
       "batch_progress": {"completed": 0, "total": 0},
-      "workers": 1,
+      "workers": DEFAULT_WORKERS,
     "aligned_counts":    None,
     "aligned_landmarks": None,
     "aligned_results": {},   # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
@@ -162,6 +165,12 @@ def _keyify(label: str) -> str:
 def _normalize_label(value) -> str | None:
     """Return a stripped string label or ``None`` when empty."""
 
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
     if value is None:
         return None
 
@@ -171,6 +180,15 @@ def _normalize_label(value) -> str | None:
         text = str(value).strip()
 
     return text or None
+
+
+def _normalize_label_casefold(value) -> str | None:
+    """Normalize ``value`` and compare case-insensitively."""
+
+    base = _normalize_label(value)
+    if base is None:
+        return None
+    return base.casefold()
 
 
 def _marker_lookup_variants(value) -> list[str]:
@@ -274,6 +292,16 @@ def _summarize_overrides(overrides: dict[str, object]) -> list[str]:
     return summary
 
 
+def _clean_stem_label(value: object) -> str | None:
+    """Return a stripped stem label or ``None`` when empty/invalid."""
+
+    if not isinstance(value, str):
+        return None
+
+    cleaned = value.strip()
+    return cleaned or None
+
+
 def _clean_cli_positions(values) -> list[float]:
     """Return finite float values extracted from a CLI summary entry."""
 
@@ -374,28 +402,49 @@ def _apply_cli_positions(
 ) -> tuple[list[float], list[float], bool]:
     """Replace detected peak/valley positions with CLI imports when available."""
 
+    stem_clean = _clean_stem_label(stem) or (str(stem).strip() if stem is not None else None)
     if not st.session_state.get("cli_counts_native"):
         return peaks, valleys, False
 
     pending_raw = st.session_state.get("cli_positions_pending")
-    if not pending_raw:
-        return peaks, valleys, False
+    fixed_raw = st.session_state.get("cli_positions_fixed")
 
-    if isinstance(pending_raw, (set, tuple)):
-        pending_iter = list(pending_raw)
-    else:
-        pending_iter = list(pending_raw)
+    def _pending_labels(values) -> list[str]:
+        labels: list[str] = []
+        try:
+            iterator = values if isinstance(values, (list, tuple, set)) else [values]
+        except Exception:
+            iterator = []
+        for value in iterator:
+            cleaned = _clean_stem_label(value) or (str(value).strip() if value is not None else None)
+            if cleaned:
+                labels.append(cleaned)
+        return labels
 
-    if stem not in pending_iter:
+    pending_iter = []
+    if pending_raw:
+        pending_iter = _pending_labels(pending_raw)
+    fixed = set(fixed_raw) if isinstance(fixed_raw, (set, list, tuple)) else set()
+
+    should_apply = False
+    if stem_clean and stem_clean in pending_iter:
+        should_apply = True
+        st.session_state.cli_positions_pending = [s for s in pending_iter if s != stem_clean]
+    elif stem_clean and stem_clean in fixed:
+        should_apply = True
+
+    if not should_apply:
         return peaks, valleys, False
 
     lookup = st.session_state.get("cli_summary_lookup")
-    st.session_state.cli_positions_pending = [s for s in pending_iter if s != stem]
+    if not isinstance(lookup, dict) or not lookup:
+        cache_lookup = st.session_state.get("cli_positions_cache")
+        if isinstance(cache_lookup, dict) and cache_lookup:
+            lookup = cache_lookup
+        else:
+            return peaks, valleys, False
 
-    if not isinstance(lookup, dict):
-        return peaks, valleys, False
-
-    entry = lookup.get(stem)
+    entry = lookup.get(stem_clean)
     if not isinstance(entry, dict):
         return peaks, valleys, False
 
@@ -416,7 +465,7 @@ def _apply_cli_positions(
             updated = dict(cache)
         else:
             updated = {}
-        updated[stem] = {
+        updated[stem_clean] = {
             "peaks": tuple(peaks),
             "valleys": tuple(valleys),
         }
@@ -429,7 +478,7 @@ def _apply_cli_positions(
             fixed = set(fixed_raw)
         else:
             fixed = set()
-        fixed.add(stem)
+        fixed.add(stem_clean)
         st.session_state.cli_positions_fixed = fixed
 
     return peaks, valleys, applied
@@ -768,7 +817,8 @@ def _refresh_raw_ridge() -> None:
         st.session_state.raw_ridge_png = None
         return
 
-    stems = list(st.session_state.results)
+    use_groups = bool(st.session_state.get("align_group_markers"))
+    stems = _ordered_stems_for_results(use_groups=use_groups)
     st.session_state.raw_ridge_png = _ridge_plot_for_stems(
         stems, st.session_state.results
     )
@@ -899,6 +949,217 @@ def _group_stems_with_results() -> dict[str, list[str]]:
         groups.setdefault(group, []).append(stem)
 
     return groups
+
+
+def _ordered_stems_for_results(*, use_groups: bool) -> list[str]:
+    """Return stems ordered by group (Default first) or as-is when grouping is off."""
+
+    stems = list(st.session_state.results)
+    if not use_groups:
+        return stems
+
+    groups = _group_stems_with_results()
+
+    def _group_sort(item: tuple[str, list[str]]) -> tuple[int, str]:
+        name, _ = item
+        return (0, "") if name == "Default" else (1, name.lower())
+
+    ordered: list[str] = []
+    for _, group_stems in sorted(groups.items(), key=_group_sort):
+        ordered.extend(group_stems)
+
+    for stem in stems:
+        if stem not in ordered:
+            ordered.append(stem)
+
+    return ordered
+
+
+def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) -> None:
+    """Align results, respecting marker-based grouping when enabled."""
+
+    if not st.session_state.results:
+        st.error("Run the detector first to align landmarks.")
+        st.stop()
+
+    use_groups = bool(st.session_state.get("align_group_markers"))
+    group_map = (
+        _group_stems_with_results() if use_groups else {"Default": list(st.session_state.results)}
+    )
+
+    def _group_sort(item: tuple[str, list[str]]) -> tuple[int, str]:
+        name, _ = item
+        return (0, "") if name == "Default" else (1, name.lower())
+
+    xs_map: dict[str, np.ndarray] = {}
+    ys_map: dict[str, np.ndarray] = {}
+    aligned_counts: dict[str, np.ndarray] = {}
+    aligned_results: dict[str, dict[str, object]] = {}
+    landmark_rows: dict[str, list[float]] = {}
+
+    all_xmin = np.inf
+    all_xmax = -np.inf
+    all_ymax = 0.0
+
+    for _, stems in sorted(group_map.items(), key=_group_sort):
+        if not stems:
+            continue
+
+        peaks_all = [st.session_state.results[s]["peaks"] for s in stems]
+        valleys_all = [st.session_state.results[s]["valleys"] for s in stems]
+        counts_all = [st.session_state.results_raw[s] for s in stems]
+
+        landmark_mat = fill_landmark_matrix(
+            peaks=peaks_all,
+            valleys=valleys_all,
+            align_type=align_mode,
+            midpoint_type="valley",
+        )
+
+        if target_vec is None:
+            target_landmark = np.nanmedian(landmark_mat, axis=0).tolist()
+        else:
+            need = _cols_for_align_mode(align_mode)
+            if len(target_vec) != len(need):
+                st.error(
+                    f"Need {len(need)} values for '{align_mode}', but got {len(target_vec)}."
+                )
+                st.stop()
+            target_landmark = target_vec
+
+        warped, warped_lm, warp_funs = align_distributions(
+            counts_all,
+            peaks_all,
+            valleys_all,
+            align_type=align_mode,
+            landmark_matrix=landmark_mat,
+            target_landmark=target_landmark,
+        )
+
+        warped = list(warped)
+        warp_funs = list(warp_funs)
+        warped_lm = [list(row) for row in warped_lm]
+
+        neg_peaks = [lm[0] for lm in warped_lm]
+        target_neg = float(np.nanmean(neg_peaks)) if neg_peaks else 0.0
+
+        for idx, stem in enumerate(stems):
+            if idx >= len(warp_funs):
+                peaks = peaks_all[idx]
+                offset = (target_neg - peaks[0]) if peaks else 0.0
+                warp_funs.append(lambda x, o=offset: x + o)
+                warped.append(counts_all[idx] + offset)
+                warped_lm.append([
+                    (peaks[0] + offset) if peaks else np.nan,
+                    np.nan,
+                    np.nan,
+                ])
+
+            xs_raw = np.asarray(st.session_state.results[stem].get("xs", []), float)
+            ys_raw = np.asarray(st.session_state.results[stem].get("ys", []), float)
+            warp_fn = warp_funs[idx]
+
+            xs_aligned = warp_fn(xs_raw)
+            xs_map[stem] = xs_aligned
+            ys_map[stem] = ys_raw
+            if xs_aligned.size:
+                all_xmin = min(all_xmin, float(xs_aligned.min()))
+                all_xmax = max(all_xmax, float(xs_aligned.max()))
+            if ys_raw.size:
+                all_ymax = max(all_ymax, float(ys_raw.max()))
+
+            peaks_aligned = warp_fn(np.asarray(st.session_state.results[stem]["peaks"]))
+            valleys_aligned = warp_fn(np.asarray(st.session_state.results[stem]["valleys"]))
+            aligned_counts[stem] = np.asarray(warped[idx], float)
+
+            try:
+                sample_ymax = float(np.nanmax(ys_raw))
+            except ValueError:
+                sample_ymax = all_ymax
+
+            sample_xmin = float(xs_aligned.min()) if xs_aligned.size else all_xmin
+            sample_xmax = float(xs_aligned.max()) if xs_aligned.size else all_xmax
+            if not np.isfinite(sample_xmin) or not np.isfinite(sample_xmax):
+                sample_xmin, sample_xmax = all_xmin, all_xmax
+
+            if sample_xmax == sample_xmin:
+                span = abs(sample_xmin) if sample_xmin != 0 else 1.0
+                pad_local = 0.05 * span
+            else:
+                pad_local = 0.05 * (sample_xmax - sample_xmin)
+
+            if not np.isfinite(sample_ymax) or sample_ymax <= 0:
+                sample_ymax = all_ymax if np.isfinite(all_ymax) and all_ymax > 0 else 1.0
+
+            png = _plot_png_fixed(
+                f"{stem} (aligned)",
+                xs_raw,
+                ys_raw,
+                peaks_aligned[~np.isnan(peaks_aligned)],
+                valleys_aligned[~np.isnan(valleys_aligned)],
+                (sample_xmin - pad_local, sample_xmax + pad_local),
+                sample_ymax,
+            )
+
+            st.session_state.aligned_fig_pngs[f"{stem}_aligned.png"] = png
+            aligned_results[stem] = {
+                "peaks": peaks_aligned.round(4).tolist(),
+                "valleys": valleys_aligned.round(4).tolist(),
+                "xs": xs_raw.tolist(),
+                "ys": ys_raw.tolist(),
+            }
+            landmark_rows[stem] = list(warped_lm[idx])
+
+    if not np.isfinite(all_xmin) or not np.isfinite(all_xmax):
+        all_xmin, all_xmax = 0.0, 1.0
+    elif all_xmax == all_xmin:
+        d = abs(all_xmin) if all_xmin != 0 else 1.0
+        all_xmin -= 0.05 * d
+        all_xmax += 0.05 * d
+
+    span = all_xmax - all_xmin
+    pad = 0.05 * span
+    if not np.isfinite(all_ymax):
+        all_ymax = 1.0
+
+    st.session_state.aligned_counts = aligned_counts
+    st.session_state.aligned_landmarks = [
+        landmark_rows.get(stem, []) for stem in st.session_state.results
+    ]
+    st.session_state.aligned_results = aligned_results
+    st.session_state.aligned_ridge_png = None
+
+    ordered_stems = _ordered_stems_for_results(use_groups=use_groups)
+    gap = 1.2 * all_ymax
+    fig, ax = plt.subplots(
+        figsize=(6, 0.8 * len(ordered_stems)),
+        dpi=150,
+        sharex=True,
+    )
+
+    for i, stem in enumerate(ordered_stems):
+        xs = xs_map.get(stem, np.asarray([]))
+        ys = ys_map.get(stem, np.asarray([]))
+        offset = i * gap
+
+        ax.plot(xs, ys + offset, color="black", lw=1)
+        ax.fill_between(xs, offset, ys + offset, color="#FFA50088", lw=0)
+
+        info = aligned_results.get(stem)
+        if info:
+            for p in info["peaks"]:
+                ax.vlines(p, offset, offset + ys.max(), color="black", lw=0.8)
+            for v in info["valleys"]:
+                ax.vlines(v, offset, offset + ys.max(), color="grey", lw=0.8, linestyles=":")
+
+        ax.text(all_xmin - pad, offset + 0.5 * all_ymax, stem, ha="right", va="center", fontsize=7)
+
+    ax.set_yticks([])
+    ax.set_xlim(all_xmin - pad, all_xmax + pad)
+    fig.tight_layout()
+
+    st.session_state.aligned_ridge_png = fig_to_png(fig)
+    plt.close(fig)
 
 
 def _ensure_raw_ridge_png() -> bytes | None:
@@ -1348,23 +1609,37 @@ def _cell_indices_for(
 ) -> list[int]:
     """Return the DataFrame indices for ``sample`` and optional ``batch``."""
 
-    mask = meta_df["sample"].eq(sample)
+    sample_norm = _normalize_label_casefold(sample)
+    if sample_norm is None:
+        return []
+
+    sample_series = meta_df["sample"].map(_normalize_label_casefold)
+    mask = sample_series.eq(sample_norm)
+
     if "batch" in meta_df.columns:
-        if batch is None:
-            mask &= meta_df["batch"].isna()
+        batch_norm = _normalize_label_casefold(batch) if batch is not None else None
+        batch_series = meta_df["batch"].map(_normalize_label_casefold)
+        if batch_norm is None:
+            mask &= batch_series.isna()
         else:
-            mask &= meta_df["batch"].eq(batch)
+            mask &= batch_series.eq(batch_norm)
     return meta_df.index[mask].tolist()
 
 
-def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
-                           expr_df: pd.DataFrame, meta_df: pd.DataFrame,
-                           sel_b: list[str] | None = None) -> None:
+def _sync_generated_counts(
+    sel_m: list[str],
+    sel_s: list[str],
+    expr_df: pd.DataFrame,
+    meta_df: pd.DataFrame,
+    sel_b: list[str] | None = None,
+    *,
+    summary_rows: Iterable | None = None,
+) -> None:
     """Refresh cached CSVs to match the current marker/sample selection.
 
     The ``stem`` for each generated CSV uniquely identifies the batch, sample,
-    and marker combination (``<sample>_<batch>_<marker>_raw_counts``).  When no
-    batch column is present the stem falls back to ``<sample>_<marker>``.
+    and marker combination (``<sample>_<batch>_<marker>_raw_counts``) unless
+    explicit stems are supplied via ``summary_rows``.
     """
     use_batches = "batch" in meta_df.columns
     sel_batch_clean = [None if pd.isna(b) else b for b in (sel_b or [])]
@@ -1380,38 +1655,75 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         if key not in index_cache:
             index_cache[key] = _cell_indices_for(meta_df, sample, batch)
         return index_cache[key]
-    for s in sel_s:
-        batches = [None]
-        if use_batches:
-            raw_batches = meta_df.loc[meta_df["sample"].eq(s), "batch"].unique()
-            cleaned: list[str | None] = []
-            for raw in raw_batches:
-                clean = None if pd.isna(raw) else raw
-                if sel_batch_set and clean not in sel_batch_set:
-                    continue
-                cleaned.append(clean)
-            if not cleaned:
+
+    if summary_rows is not None:
+        for row in summary_rows:
+            stem_raw = getattr(row, "stem", None)
+            if not isinstance(stem_raw, str):
                 continue
-            batches = cleaned
-        for b in batches:
-            cell_idx = _cached_indices(s, b)
+            stem = stem_raw.strip()
+            if not stem:
+                continue
+
+            sample = _normalize_label(getattr(row, "sample", None))
+            marker_raw = getattr(row, "marker", None)
+            marker_label = _normalize_label(marker_raw)
+            batch_val = getattr(row, "batch", None) if use_batches else None
+            batch_clean = None if pd.isna(batch_val) else batch_val
+
+            if not sample or not marker_label:
+                continue
+            if sel_batch_set and batch_clean not in sel_batch_set:
+                continue
+
+            cell_idx = _cached_indices(sample, batch_clean)
             if not cell_idx:
                 continue
-            for m in sel_m:
-                marker_label = _normalize_label(m)
-                if not marker_label:
+
+            column_label = _resolve_expr_marker(marker_label, marker_lookup)
+            if column_label is None:
+                missing_markers.add(marker_label)
+                continue
+            resolved_marker = _normalize_label(column_label) or marker_label
+            desired[stem] = (sample, resolved_marker, batch_clean)
+    else:
+        for s in sel_s:
+            sample = _normalize_label(s)
+            if not sample:
+                continue
+            batches = [None]
+            if use_batches:
+                raw_batches = meta_df.loc[
+                    meta_df["sample"].map(_normalize_label) == sample, "batch"
+                ].unique()
+                cleaned: list[str | None] = []
+                for raw in raw_batches:
+                    clean = None if pd.isna(raw) else raw
+                    if sel_batch_set and clean not in sel_batch_set:
+                        continue
+                    cleaned.append(clean)
+                if not cleaned:
                     continue
-                column_label = _resolve_expr_marker(marker_label, marker_lookup)
-                if column_label is None:
-                    missing_markers.add(marker_label)
+                batches = cleaned
+            for b in batches:
+                cell_idx = _cached_indices(sample, b)
+                if not cell_idx:
                     continue
-                resolved_marker = _normalize_label(column_label) or marker_label
-                stem = (
-                    f"{s}_{resolved_marker}_raw_counts"
-                    if b is None
-                    else f"{s}_{b}_{resolved_marker}_raw_counts"
-                )
-                desired[stem] = (s, resolved_marker, b)
+                for m in sel_m:
+                    marker_label = _normalize_label(m)
+                    if not marker_label:
+                        continue
+                    column_label = _resolve_expr_marker(marker_label, marker_lookup)
+                    if column_label is None:
+                        missing_markers.add(marker_label)
+                        continue
+                    resolved_marker = _normalize_label(column_label) or marker_label
+                    stem = (
+                        f"{sample}_{resolved_marker}_raw_counts"
+                        if b is None
+                        else f"{sample}_{b}_{resolved_marker}_raw_counts"
+                    )
+                    desired[stem] = (sample, resolved_marker, b)
 
     # remove stale combinations
     st.session_state.generated_csvs = [
@@ -1455,6 +1767,16 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
     _mark_raw_ridge_stale()
 
     existing = {stem for stem, _ in st.session_state.generated_csvs}
+    to_generate: list[tuple[str, str, str, str | None, str, dict[str, object]]]
+    to_generate = []
+
+    apply_arcsinh = bool(st.session_state.get("apply_arcsinh", True))
+    arcsinh_a = float(st.session_state.get("arcsinh_a", 1.0))
+    arcsinh_b = float(st.session_state.get("arcsinh_b", 1 / 5))
+    arcsinh_c = float(st.session_state.get("arcsinh_c", 0.0))
+    cli_native = bool(st.session_state.get("cli_counts_native"))
+    worker_count = max(1, int(st.session_state.get("workers", 1)))
+
     for stem, (s, m, b) in desired.items():
         if stem in existing:
             continue
@@ -1467,41 +1789,52 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
                 "batch_label": _format_batch_label(b),
             }
         )
-        indices = entry.get("cell_indices")
+        indices = entry.get("cell_indices") or _cached_indices(s, b)
         if not indices:
-            indices = _cached_indices(s, b)
+            continue
         column_label = _resolve_expr_marker(m, marker_lookup)
         if column_label is None:
             missing_markers.add(m)
             continue
-        vals = expr_df.loc[indices, column_label]
-        entry["cell_indices"] = vals.index.tolist()
+        entry["cell_indices"] = list(indices)
+        to_generate.append((stem, s, m, b, column_label, entry))
 
-        cli_native = bool(st.session_state.get("cli_counts_native"))
+    def _build_counts(args: tuple[str, str, str, str | None, str, dict[str, object]]):
+        stem, sample, marker, batch, column_label, entry = args
+        vals = expr_df.loc[entry["cell_indices"], column_label]
+
         if cli_native:
             counts = vals.to_numpy(dtype=float, copy=True)
             arcsinh_applied = True
-        elif st.session_state.get("apply_arcsinh", True):
-            counts = arcsinh_transform(
-                vals,
-                a=st.session_state.get("arcsinh_a", 1.0),
-                b=st.session_state.get("arcsinh_b", 1 / 5),
-                c=st.session_state.get("arcsinh_c", 0.0),
-            )
+        elif apply_arcsinh:
+            counts = arcsinh_transform(vals, a=arcsinh_a, b=arcsinh_b, c=arcsinh_c)
             arcsinh_applied = True
         else:
             counts = vals.astype(float)
             arcsinh_applied = False
+
         bio = io.BytesIO()
-        counts_df = pd.DataFrame({m: np.asarray(counts).ravel()})
+        counts_df = pd.DataFrame({marker: np.asarray(counts).ravel()})
         counts_df.to_csv(bio, index=False)
         bio.seek(0)
         bio.name = f"{stem}.csv"
-        setattr(bio, "marker", m)
+        setattr(bio, "marker", marker)
         setattr(bio, "arcsinh", arcsinh_applied)
-        setattr(bio, "sample", s)
-        setattr(bio, "batch", b)
-        st.session_state.generated_csvs.append((stem, bio))
+        setattr(bio, "sample", sample)
+        setattr(bio, "batch", batch)
+        return stem, bio, entry
+
+    generated: list[tuple[str, io.BytesIO, dict[str, object]]] = []
+    if worker_count > 1 and len(to_generate) > 1:
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            for item in pool.map(_build_counts, to_generate):
+                generated.append(item)
+    else:
+        for args in to_generate:
+            generated.append(_build_counts(args))
+
+    st.session_state.generated_csvs.extend((stem, bio) for stem, bio, _ in generated)
+    for stem, _, entry in generated:
         st.session_state.generated_meta[stem] = entry
 
     if missing_markers:
@@ -1528,6 +1861,7 @@ def _clear_cli_import() -> None:
     st.session_state["cli_positions_fixed"] = set()
     st.session_state["cli_group_mode"] = "none"
     st.session_state["cli_group_new_name"] = ""
+    st.session_state["align_group_markers"] = False
 
 
 def _load_cli_import(
@@ -1541,6 +1875,10 @@ def _load_cli_import(
 ) -> None:
     """Store imported CLI outputs in session state and prime selectors."""
 
+    summary_df = summary_df.copy()
+    if "stem" in summary_df.columns:
+        summary_df["stem"] = summary_df["stem"].map(_clean_stem_label)
+
     st.session_state.expr_df = expr_df
     st.session_state.meta_df = meta_df
     st.session_state.expr_name = expr_name
@@ -1552,8 +1890,9 @@ def _load_cli_import(
         f"Loaded {len(summary_df)} entries from {summary_name}"
     )
     st.session_state.cli_counts_native = True
+    st.session_state.align_group_markers = False
 
-    stems = [str(s) for s in summary_df.get("stem", []) if isinstance(s, str) and s]
+    stems = [s for s in summary_df.get("stem", []) if isinstance(s, str) and s]
     valid_stems = set(stems)
     st.session_state.cli_summary_selection = stems.copy()
 
@@ -1576,8 +1915,8 @@ def _load_cli_import(
     positions_cache: dict[str, dict[str, object]] = {}
     updated_overrides: dict[str, dict[str, object]] = {}
     for row in summary_df.itertuples(index=False):
-        stem = getattr(row, "stem", None)
-        if not isinstance(stem, str) or not stem:
+        stem = _clean_stem_label(getattr(row, "stem", None))
+        if not stem:
             continue
 
         overrides = dict(existing_overrides.get(stem, {}))
@@ -1701,6 +2040,13 @@ def _cli_assign_groups(
 
     stems = [str(s) for s in subset.get("stem", []) if isinstance(s, str) and s]
 
+    st.session_state.align_group_markers = False
+
+    raw_ridge_before = st.session_state.get("raw_ridge_png")
+    aligned_ridge_before = st.session_state.get("aligned_ridge_png")
+    align_flag_before = bool(st.session_state.get("align_group_markers"))
+    assignments_changed = False
+
     if mode == "align_sample":
         if "sample" not in subset.columns:
             st.warning("The imported summary does not contain a 'sample' column to align by.")
@@ -1721,6 +2067,7 @@ def _cli_assign_groups(
                 assignments[stem] = group_name
                 if stem in st.session_state.results:
                     _mark_sample_dirty(stem, "group")
+                assignments_changed = True
             any_grouped = True
 
         if not any_grouped:
@@ -1728,9 +2075,39 @@ def _cli_assign_groups(
             return False
 
         st.session_state.group_overrides = overrides
-        return True
+        return_state = True
 
-    if mode == "new_group":
+    if mode == "marker_groups":
+        if "marker" not in subset.columns:
+            st.warning("The imported summary does not contain a 'marker' column to group by.")
+            return False
+
+        any_grouped = False
+        markers = subset["marker"].tolist()
+        for stem, marker in zip(stems, markers):
+            if not stem:
+                continue
+            label = marker if isinstance(marker, str) else ""
+            clean_label = _normalize_label_casefold(label) or _normalize_label(label)
+            if not clean_label:
+                continue
+            group_name = str(clean_label)
+            overrides.setdefault(group_name, {})
+            if assignments.get(stem) != group_name:
+                assignments[stem] = group_name
+                if stem in st.session_state.results:
+                    _mark_sample_dirty(stem, "group")
+                assignments_changed = True
+            any_grouped = True
+
+        if not any_grouped:
+            st.warning("No marker names were available to build group assignments.")
+            return False
+
+        st.session_state.group_overrides = overrides
+        st.session_state.align_group_markers = True
+        return_state = True
+    elif mode == "new_group":
         clean = (new_group or "").strip()
         if not clean:
             st.warning("Enter a group name before grouping the selected samples together.")
@@ -1742,10 +2119,24 @@ def _cli_assign_groups(
                 assignments[stem] = clean
                 if stem in st.session_state.results:
                     _mark_sample_dirty(stem, "group")
+                assignments_changed = True
         st.session_state.group_overrides = overrides
-        return True
+        return_state = True
+    else:
+        return_state = True
 
-    return True
+    if (
+        assignments_changed
+        or bool(st.session_state.get("align_group_markers")) != align_flag_before
+        or raw_ridge_before is not None
+        or aligned_ridge_before is not None
+    ):
+        _mark_raw_ridge_stale()
+        st.session_state.aligned_ridge_png = None
+        st.session_state.aligned_counts = None
+        st.session_state.aligned_landmarks = None
+
+    return return_state
 
 
 def _queue_cli_samples(
@@ -1776,6 +2167,8 @@ def _queue_cli_samples(
     marker_lookup = _build_expr_marker_lookup(expr_df)
     marker_map: dict[str, object] = {}
     missing_raw: list[str] = []
+    skip_reasons: dict[str, str] = {}
+    use_batches = "batch" in meta_df.columns
     for raw_marker in subset.get("marker", []):
         marker_label = _normalize_label(raw_marker)
         if not marker_label:
@@ -1786,6 +2179,31 @@ def _queue_cli_samples(
             continue
         resolved_marker = _normalize_label(column_label) or marker_label
         marker_map.setdefault(resolved_marker, column_label)
+    for _, row in subset.iterrows():
+        stem = str(row.get("stem"))
+        sample = _normalize_label(row.get("sample"))
+        marker_raw = row.get("marker")
+        marker_label = _normalize_label(marker_raw)
+        batch_raw = row.get("batch") if use_batches else None
+        batch_clean = None if pd.isna(batch_raw) else batch_raw
+
+        if not stem or not sample or not marker_label:
+            continue
+
+        column_label = _resolve_expr_marker(marker_label, marker_lookup)
+        if column_label is None:
+            skip_reasons[stem] = (
+                f"Marker '{marker_raw}' not found in the expression matrix"
+            )
+            continue
+
+        indices = _cell_indices_for(meta_df, sample, batch_clean)
+        if not indices:
+            batch_note = "" if batch_clean is None else f" batch '{batch_clean}'"
+            skip_reasons[stem] = (
+                f"No cells for sample '{sample}'{batch_note} in the metadata"
+            )
+
     markers = list(marker_map)
     missing_markers = sorted(set(missing_raw))
     samples = sorted({str(s) for s in subset.get("sample", []) if isinstance(s, str)})
@@ -1829,7 +2247,29 @@ def _queue_cli_samples(
                 pending_list.append(stem)
         st.session_state.cli_positions_pending = pending_list
 
-    _sync_generated_counts(markers, samples, expr_df, meta_df, batches)
+    _sync_generated_counts(
+        markers, samples, expr_df, meta_df, batches, summary_rows=subset.itertuples(index=False)
+    )
+
+    available_stems = {stem for stem, _ in st.session_state.generated_csvs}
+    missing_stems = sorted({stem for stem in stems if stem not in available_stems})
+    if missing_stems:
+        preview = ", ".join(missing_stems[:5])
+        suffix = "…" if len(missing_stems) > 5 else ""
+        detail_parts: list[str] = []
+        for stem in missing_stems[:3]:
+            reason = skip_reasons.get(stem)
+            if reason:
+                detail_parts.append(f"{stem} ({reason})")
+            else:
+                detail_parts.append(stem)
+        detail = "; ".join(detail_parts)
+        extra = "" if detail else preview
+        st.warning(
+            "Skipped "
+            f"{len(missing_stems)} sample(s) because counts could not be generated: "
+            f"{detail or extra}{suffix}."
+        )
 
     chosen = set(stems)
     files: list[io.BytesIO] = []
@@ -1960,10 +2400,11 @@ def _render_cli_import_section() -> None:
 
         st.session_state.cli_summary_selection = selection
 
-        group_choices = ["none", "align_sample", "new_group"]
+        group_choices = ["none", "align_sample", "marker_groups", "new_group"]
         group_labels = {
             "none": "No automatic grouping",
             "align_sample": "Align using sample column",
+            "marker_groups": "Group by marker name",
             "new_group": "Group selected together",
         }
         default_mode = st.session_state.get("cli_group_mode", "none")
@@ -2592,6 +3033,13 @@ def _apply_sample_result(res: SampleResult, *, aligned: bool = False) -> None:
         else list(map(float, res.valleys))
     )
 
+    quality = float(res.quality)
+    cli_applied = False
+    if not aligned:
+        peaks, valleys, cli_applied = _apply_cli_positions(stem, peaks, valleys)
+        if cli_applied:
+            quality = float(stain_quality(res.counts, peaks, valleys))
+
     meta_entry = {
         "arcsinh": res.arcsinh_signature,
         "protein_name": res.metadata.get("protein_name"),
@@ -2607,7 +3055,7 @@ def _apply_sample_result(res: SampleResult, *, aligned: bool = False) -> None:
     target[stem] = {
         "peaks": peaks,
         "valleys": valleys,
-        "quality": float(res.quality),
+        "quality": quality,
         "xs": xs.tolist(),
         "ys": ys.tolist(),
         "marker": res.metadata.get("marker"),
@@ -2636,6 +3084,8 @@ def _apply_sample_result(res: SampleResult, *, aligned: bool = False) -> None:
         "prom": res.params.get("prom"),
         "n_peaks": res.params.get("n_peaks"),
     }
+    if cli_applied and peaks:
+        params["n_peaks"] = len(peaks)
     st.session_state.params[stem] = params
     st.session_state.dirty[stem] = False
     st.session_state.dirty_reason.pop(stem, None)
@@ -4095,6 +4545,7 @@ def _start_batch_run(
         align=False,
         align_mode=align_mode,
         target_landmarks=target_vec,
+        group_by_marker=bool(st.session_state.get("align_group_markers", False)),
         workers=int(st.session_state.get("workers", 1)),
         gpt_model=gpt_model,
     )
@@ -4400,184 +4851,7 @@ if st.session_state.results:
                              type="primary")
     if do_align:
         with st.spinner("Running landmark alignment …"):
-            peaks_all   = [v["peaks"]   for v in st.session_state.results.values()]
-            valleys_all = [v["valleys"] for v in st.session_state.results.values()]
-            counts_all  = [st.session_state.results_raw[k]
-                        for k in st.session_state.results]
+            _align_results_by_group(align_mode=align_mode, target_vec=target_vec)
 
-            # —— 1. warp every distribution ---------------------------------------
-            # -------- deterministically build + fill landmark matrix ----------------
-            landmark_mat = fill_landmark_matrix(
-                peaks   = peaks_all,
-                valleys = valleys_all,
-                align_type  = align_mode,
-                midpoint_type        = "valley",          # valley-based fallback
-            )
-
-            # choose the *target* positions
-            if target_vec is None:                      # ► AUTOMATIC
-                target_landmark = np.nanmedian(landmark_mat, axis=0).tolist()
-            else:                                       # ► USER-SUPPLIED
-                need = _cols_for_align_mode(align_mode)
-                if len(target_vec) != len(need):
-                    st.error(
-                        f"Need {len(need)} values for '{align_mode}', "
-                        f"but got {len(target_vec)}."
-                    )
-                    st.stop()
-                target_landmark = target_vec            # <- exactly as typed
-
-            # -------- run the warp, forcing ALL THREE landmarks ---------------------
-            warped, warped_lm, warp_funs = align_distributions(
-                counts_all,
-                peaks_all,            # unused internally when landmark_mat supplied,
-                valleys_all,          # but kept for API compatibility
-                align_type      = align_mode,
-                landmark_matrix = landmark_mat,
-                target_landmark = target_landmark,
-            )
-
-            warped      = list(warped)                    # list of 1-D arrays
-            warp_funs   = list(warp_funs)                 # list of callables
-            warped_lm   = [list(row) for row in warped_lm]  # list of [neg, val, pos]
-
-            n_samples   = len(st.session_state.results)
-
-            # cohort mean location of the negative peak among samples that did warp
-            neg_peaks   = [lm[0] for lm in warped_lm]          # first column = neg-peak
-            target_neg  = float(np.nanmean(neg_peaks)) if neg_peaks else 0.0
-
-            for idx in range(n_samples):
-                if idx >= len(warp_funs):
-                    # sample idx was dropped  → fabricate a simple shift warp
-                    pks      = peaks_all[idx]
-                    offset   = (target_neg - pks[0]) if pks else 0.0
-                    warp_funs.append(lambda x, o=offset: x + o)
-                    warped.append(counts_all[idx] + offset)
-                    warped_lm.append([
-                        (pks[0] + offset) if pks else np.nan,  # neg-peak
-                        np.nan,                                # missing valley
-                        np.nan                                 # missing pos-peak
-                    ])
-
-            # build aligned curves directly from the already-computed KDEs
-            # to avoid bandwidth discrepancies between raw and aligned views
-            xs_map: dict[str, np.ndarray] = {}
-            ys_map: dict[str, np.ndarray] = {}
-            all_xmin = np.inf
-            all_xmax = -np.inf
-            all_ymax = 0.0
-            for stem, f in zip(st.session_state.results, warp_funs):
-                xs_raw = np.asarray(st.session_state.results[stem].get("xs", []), float)
-                ys_raw = np.asarray(st.session_state.results[stem].get("ys", []), float)
-                xs_al  = f(xs_raw)
-                xs_map[stem] = xs_al
-                ys_map[stem] = ys_raw
-                if xs_al.size:
-                    all_xmin = min(all_xmin, float(xs_al.min()))
-                    all_xmax = max(all_xmax, float(xs_al.max()))
-                if ys_raw.size:
-                    all_ymax = max(all_ymax, float(ys_raw.max()))
-
-            if not np.isfinite(all_xmin) or not np.isfinite(all_xmax):
-                all_xmin, all_xmax = 0.0, 1.0
-            elif all_xmax == all_xmin:
-                d = abs(all_xmin) if all_xmin != 0 else 1.0
-                all_xmin -= 0.05 * d
-                all_xmax += 0.05 * d
-
-            span = all_xmax - all_xmin
-            pad  = 0.05 * span
-            if not np.isfinite(all_ymax):
-                all_ymax = 1.0
-
-            st.session_state.aligned_counts     = dict(zip(st.session_state.results,
-                                                        warped))
-            st.session_state.aligned_landmarks  = warped_lm
-            st.session_state.aligned_results    = {}
-            st.session_state.aligned_fig_pngs   = {}
-            st.session_state.aligned_ridge_png  = None
-
-            # —— 2. per-sample PNGs & metadata ------------------------------------
-            for stem, f in zip(st.session_state.results, warp_funs):
-                xs      = xs_map[stem]
-                ys      = ys_map[stem]
-                pk_align = f(np.asarray(st.session_state.results[stem]["peaks"]))
-                vl_align = f(np.asarray(st.session_state.results[stem]["valleys"]))
-
-                try:
-                    sample_xmin = float(np.nanmin(xs))
-                    sample_xmax = float(np.nanmax(xs))
-                except ValueError:
-                    sample_xmin, sample_xmax = all_xmin, all_xmax
-
-                if not np.isfinite(sample_xmin) or not np.isfinite(sample_xmax):
-                    sample_xmin, sample_xmax = all_xmin, all_xmax
-
-                if sample_xmax == sample_xmin:
-                    span = abs(sample_xmin) if sample_xmin != 0 else 1.0
-                    pad_local = 0.05 * span
-                else:
-                    pad_local = 0.05 * (sample_xmax - sample_xmin)
-
-                x_limits = (sample_xmin - pad_local, sample_xmax + pad_local)
-
-                try:
-                    sample_ymax = float(np.nanmax(ys))
-                except ValueError:
-                    sample_ymax = all_ymax
-
-                if not np.isfinite(sample_ymax) or sample_ymax <= 0:
-                    sample_ymax = all_ymax if np.isfinite(all_ymax) and all_ymax > 0 else 1.0
-
-                png = _plot_png_fixed(
-                    f"{stem} (aligned)", xs, ys,
-                    pk_align[~np.isnan(pk_align)],
-                    vl_align[~np.isnan(vl_align)],
-                    x_limits,
-                    sample_ymax,
-                )
-
-                st.session_state.aligned_fig_pngs[f"{stem}_aligned.png"] = png
-                st.session_state.aligned_results[stem] = {
-                    "peaks":   pk_align.round(4).tolist(),
-                    "valleys": vl_align.round(4).tolist(),
-                    "xs": xs.tolist(),
-                    "ys": ys.tolist(),
-                }
-
-            # --- 3. stacked ridge-plot (plain) -----------------------------------
-            gap = 1.2 * all_ymax
-            fig, ax = plt.subplots(
-                figsize=(6, 0.8 * len(st.session_state.results)),
-                dpi=150,
-                sharex=True,
-            )
-
-            for i, stem in enumerate(st.session_state.results):
-                xs     = xs_map[stem]
-                ys     = ys_map[stem]
-                offset = i * gap
-
-                ax.plot(xs, ys + offset, color="black", lw=1)
-                ax.fill_between(xs, offset, ys + offset,
-                                color="#FFA50088", lw=0)
-
-                info = st.session_state.aligned_results[stem]
-                for p in info["peaks"]:
-                    ax.vlines(p, offset, offset + ys.max(), color="black", lw=0.8)
-                for v in info["valleys"]:
-                    ax.vlines(v, offset, offset + ys.max(), color="grey",
-                              lw=0.8, linestyles=":")
-
-                ax.text(all_xmin, offset + 0.5 * all_ymax, stem,
-                        ha="right", va="center", fontsize=7)
-
-            ax.set_yticks([]); ax.set_xlim(all_xmin, all_xmax)
-            fig.tight_layout()
-
-            st.session_state.aligned_ridge_png = fig_to_png(fig)
-            plt.close(fig)
-
-            st.success("Landmarks aligned – scroll down for the stacked view or download the ZIP!")
-            st.rerun()
+        st.success("Landmarks aligned – scroll down for the stacked view or download the ZIP!")
+        st.rerun()

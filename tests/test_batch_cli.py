@@ -301,28 +301,6 @@ def test_collect_dataset_samples(tmp_path):
     assert "expression_sources" in meta_info
 
 
-def test_collect_dataset_samples_matches_dash_names(tmp_path):
-    expr = pd.DataFrame({"markerA": [1.0, 2.0]})
-    meta = pd.DataFrame({"sample": ["Alpha-Beta", "Gamma"], "batch": [None, None]})
-
-    expr_path = tmp_path / "expr.csv"
-    meta_path = tmp_path / "meta.csv"
-    expr.to_csv(expr_path, index=False)
-    meta.to_csv(meta_path, index=False)
-
-    options = BatchOptions(apply_arcsinh=False)
-    samples, _ = collect_dataset_samples(
-        expr_path,
-        meta_path,
-        options,
-        markers=["markerA"],
-        samples_filter=["Alpha_Beta"],
-    )
-
-    assert [s.metadata["sample"] for s in samples] == ["Alpha-Beta"]
-    assert samples[0].stem.startswith("Alpha-Beta")
-
-
 def test_run_batch_handles_keyboard_interrupt(tmp_path, monkeypatch):
     rng = np.random.default_rng(321)
     values_a = rng.normal(loc=0.5, scale=0.1, size=200)

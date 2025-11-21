@@ -932,26 +932,10 @@ def collect_dataset_samples(
 
     sample_values = meta_df["sample"].astype(str).tolist()
 
-    canonical_to_samples: dict[str, list[str]] = {}
-    for value in sample_values:
-        canonical = _canonical_sample_label(value)
-        canonical_to_samples.setdefault(canonical, [])
-        if value not in canonical_to_samples[canonical]:
-            canonical_to_samples[canonical].append(value)
-
-    if samples_filter:
-        sample_sel: list[str] = []
-        for requested in samples_filter:
-            canonical = _canonical_sample_label(requested)
-            for resolved in canonical_to_samples.get(canonical, []):
-                if resolved not in sample_sel:
-                    sample_sel.append(resolved)
-    else:
-        sample_sel = sorted(set(sample_values))
-
+    sample_sel = samples_filter if samples_filter else sorted(set(sample_values))
     if exclude_samples:
-        sample_excludes = {_canonical_sample_label(s) for s in exclude_samples}
-        sample_sel = [s for s in sample_sel if _canonical_sample_label(s) not in sample_excludes]
+        sample_excludes = {str(s).lower() for s in exclude_samples}
+        sample_sel = [s for s in sample_sel if str(s).lower() not in sample_excludes]
 
     batch_column = "batch" if "batch" in meta_df.columns else None
     if batches is not None:
@@ -1093,18 +1077,6 @@ def _sanitize_stem_value(value: str) -> str:
     clean = re.sub(r"_{2,}", "_", clean)
     clean = clean.strip("._-")
     return clean or "sample"
-
-
-def _canonical_sample_label(value: str) -> str:
-    """Normalise sample identifiers for tolerant matching.
-
-    Hyphens and underscores are treated equivalently so CLI filters like
-    ``--sample Alpha-Beta`` and ``--sample Alpha_Beta`` both match metadata
-    entries containing either separator.
-    """
-
-    clean = _sanitize_stem_value(value)
-    return clean.replace("-", "_").lower()
 
 
 def _unique_stem(raw_value: str, *, used: set[str]) -> str:

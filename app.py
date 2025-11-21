@@ -819,7 +819,6 @@ def _refresh_raw_ridge() -> None:
 
     use_groups = bool(st.session_state.get("align_group_markers"))
     stems = _ordered_stems_for_results(use_groups=use_groups)
-
     st.session_state.raw_ridge_png = _ridge_plot_for_stems(
         stems, st.session_state.results
     )
@@ -1153,27 +1152,17 @@ def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) 
     st.session_state.aligned_ridge_png = None
 
     ordered_stems = _ordered_stems_for_results(use_groups=use_groups)
-
-    offsets: list[float] = []
-    current_offset = 0.0
-    for stem in ordered_stems:
-        ys = ys_map.get(stem, np.asarray([]))
-        try:
-            height = float(np.nanmax(ys)) if ys.size else 0.0
-        except ValueError:
-            height = 0.0
-        offsets.append(current_offset)
-        current_offset += max(height, 1e-6) * 1.2
-
+    gap = 1.2 * all_ymax
     fig, ax = plt.subplots(
-        figsize=(6, 0.8 * max(len(ordered_stems), 1)),
+        figsize=(6, 0.8 * len(ordered_stems)),
         dpi=150,
         sharex=True,
     )
 
-    for offset, stem in zip(offsets, ordered_stems):
+    for i, stem in enumerate(ordered_stems):
         xs = xs_map.get(stem, np.asarray([]))
         ys = ys_map.get(stem, np.asarray([]))
+        offset = i * gap
 
         ax.plot(xs, ys + offset, color="black", lw=1)
         ax.fill_between(xs, offset, ys + offset, color="#FFA50088", lw=0)
@@ -1185,9 +1174,7 @@ def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) 
             for v in info["valleys"]:
                 ax.vlines(v, offset, offset + ys.max(), color="grey", lw=0.8, linestyles=":")
 
-        ax.text(
-            all_xmin - pad, offset + 0.5 * all_ymax, stem, ha="right", va="center", fontsize=7
-        )
+        ax.text(all_xmin - pad, offset + 0.5 * all_ymax, stem, ha="right", va="center", fontsize=7)
 
     ax.set_yticks([])
     ax.set_xlim(all_xmin - pad, all_xmax + pad)
@@ -2077,11 +2064,6 @@ def _cli_assign_groups(
 
     st.session_state.align_group_markers = False
 
-    raw_ridge_before = st.session_state.get("raw_ridge_png")
-    aligned_ridge_before = st.session_state.get("aligned_ridge_png")
-    align_flag_before = bool(st.session_state.get("align_group_markers"))
-    assignments_changed = False
-
     if mode == "align_sample":
         if "sample" not in subset.columns:
             st.warning("The imported summary does not contain a 'sample' column to align by.")
@@ -2111,6 +2093,36 @@ def _cli_assign_groups(
 
         st.session_state.group_overrides = overrides
         return_state = True
+
+    if mode == "marker_groups":
+        if "marker" not in subset.columns:
+            st.warning("The imported summary does not contain a 'marker' column to group by.")
+            return False
+
+        any_grouped = False
+        markers = subset["marker"].tolist()
+        for stem, marker in zip(stems, markers):
+            if not stem:
+                continue
+            label = marker if isinstance(marker, str) else ""
+            clean_label = _normalize_label_casefold(label) or _normalize_label(label)
+            if not clean_label:
+                continue
+            group_name = str(clean_label)
+            overrides.setdefault(group_name, {})
+            if assignments.get(stem) != group_name:
+                assignments[stem] = group_name
+                if stem in st.session_state.results:
+                    _mark_sample_dirty(stem, "group")
+            any_grouped = True
+
+        if not any_grouped:
+            st.warning("No marker names were available to build group assignments.")
+            return False
+
+        st.session_state.group_overrides = overrides
+        st.session_state.align_group_markers = True
+        return True
 
     if mode == "new_group":
         clean = (new_group or "").strip()
@@ -2405,10 +2417,11 @@ def _render_cli_import_section() -> None:
 
         st.session_state.cli_summary_selection = selection
 
-        group_choices = ["none", "align_sample", "new_group"]
+        group_choices = ["none", "align_sample", "marker_groups", "new_group"]
         group_labels = {
             "none": "No automatic grouping",
             "align_sample": "Align using sample column",
+            "marker_groups": "Group by marker name",
             "new_group": "Group selected together",
         }
         default_mode = st.session_state.get("cli_group_mode", "none")

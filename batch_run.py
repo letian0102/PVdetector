@@ -518,6 +518,17 @@ def main(argv: list[str] | None = None) -> int:
         gpt_client,
         progress=progress,
     )
+
+    failed = getattr(batch, "failed_samples", None) or []
+    if failed:
+        failed_labels = ", ".join(sorted({item.get("stem", "") for item in failed if item.get("stem")}))
+        reason = failed[0].get("reason") if len({item.get("reason") for item in failed}) == 1 else None
+        detail = f" Reason: {reason}." if reason else ""
+        print(
+            f"[warning] {len(failed)} sample(s) were skipped after repeated failures:{detail}"
+            + (f" {failed_labels}" if failed_labels else ""),
+            file=sys.stderr,
+        )
     save_outputs(
         batch,
         args.output_dir,

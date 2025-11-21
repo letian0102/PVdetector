@@ -53,3 +53,30 @@ def test_run_batch_reschedules_timed_out_workers(monkeypatch):
 
     assert len(results.samples) == 3
     assert attempts["slow"] == 3
+
+
+def test_run_batch_marks_persistent_timeouts_and_continues(monkeypatch):
+    attempts: defaultdict[str, int] = defaultdict(int)
+
+    def fake_process_sample(sample: batch.SampleInput, *_args, **_kwargs):
+        attempts[sample.stem] += 1
+        if sample.stem == "never":
+            time.sleep(0.12)
+            raise TimeoutError("simulated timeout")
+        return _make_result(sample.stem)
+
+    monkeypatch.setattr(batch, "process_sample", fake_process_sample)
+
+    samples = [
+        _make_sample("never"),
+        _make_sample("fast1", order=1),
+        _make_sample("fast2", order=2),
+    ]
+    options = batch.BatchOptions(workers=2, worker_timeout=0.05)
+
+    results = batch.run_batch(samples, options)
+
+    assert len(results.samples) == 2
+    assert results.interrupted is True
+    assert any(entry.get("stem") == "never" for entry in results.failed_samples)
+    assert attempts["never"] == 3

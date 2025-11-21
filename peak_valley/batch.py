@@ -16,7 +16,7 @@ import re
 import zipfile
 import time
 from collections.abc import Mapping as MappingABC
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 
@@ -138,6 +138,7 @@ class BatchResults:
     target_landmarks: Optional[Sequence[float]] = None
     interrupted: bool = False
     group_by_marker: bool = False
+    failed_samples: list[dict[str, str]] = field(default_factory=list)
 
 
 class BatchProgress(Protocol):
@@ -554,6 +555,8 @@ def run_batch(
     total = len(ordered)
     completed = 0
     interrupted = False
+    failed_samples: list[dict[str, str]] = []
+    abort_run = False
 
     if progress is not None:
         try:
@@ -574,6 +577,20 @@ def run_batch(
                 result_cb = getattr(progress, "result", None)
                 if callable(result_cb):
                     result_cb(res)
+            except Exception:
+                progress = None
+
+    def _mark_failed(stem: str, reason: str) -> None:
+        nonlocal completed, progress, interrupted
+        failed_samples.append({"stem": stem, "reason": reason})
+        interrupted = True
+        if stem in seen_stems:
+            return
+        seen_stems.add(stem)
+        completed += 1
+        if progress is not None:
+            try:
+                progress.advance(stem, completed, total)
             except Exception:
                 progress = None
 
@@ -600,6 +617,9 @@ def run_batch(
             abandoned: list[Any] = []
             try:
                 while pending_samples or in_flight:
+                    if abort_run:
+                        break
+
                     while pending_samples and len(in_flight) < options.workers:
                         sample, attempt = pending_samples.pop(0)
                         _submit(pool, sample, attempt)
@@ -624,15 +644,12 @@ def run_batch(
                                 # The worker is still running; its late result will be ignored.
                                 pass
                             if attempt >= 3:
-                                error = TimeoutError(
-                                    f"Sample '{sample.stem}' exceeded worker timeout after {attempt} attempt(s)."
+                                _mark_failed(
+                                    sample.stem,
+                                    f"exceeded worker timeout after {attempt} attempt(s)",
                                 )
-                                interrupted = True
-                                break
+                                continue
                             pending_samples.append((sample, attempt + 1))
-
-                        if interrupted:
-                            break
 
                     for future in list(done):
                         info = in_flight.pop(future, None)
@@ -644,6 +661,7 @@ def run_batch(
                             res = future.result()
                         except KeyboardInterrupt:
                             interrupted = True
+                            abort_run = True
                             break
                         except BaseException as exc:  # capture other errors to re-raise later
                             if timeout is not None and attempt < 3:
@@ -651,10 +669,12 @@ def run_batch(
                                 continue
                             error = exc
                             interrupted = True
+                            abort_run = True
                             break
                         _append_result(res)
             except KeyboardInterrupt:
                 interrupted = True
+                abort_run = True
             finally:
                 for future, (sample, _, _) in list(in_flight.items()):
                     if future.done():
@@ -862,6 +882,7 @@ def run_batch(
         target_landmarks=options.target_landmarks,
         interrupted=interrupted,
         group_by_marker=bool(options.group_by_marker),
+        failed_samples=failed_samples,
     )
 
 
@@ -1211,6 +1232,9 @@ def results_to_dict(batch: BatchResults) -> dict[str, Any]:
     payload["group_by_marker"] = bool(batch.group_by_marker)
 
     payload["interrupted"] = bool(batch.interrupted)
+
+    if getattr(batch, "failed_samples", None):
+        payload["failed_samples"] = list(batch.failed_samples)
 
     if batch.aligned_landmarks is not None:
         payload["aligned_landmarks"] = _jsonify(batch.aligned_landmarks)

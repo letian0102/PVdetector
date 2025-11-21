@@ -14,6 +14,7 @@ import json
 import math
 import re
 import zipfile
+import time
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass
 from pathlib import Path
@@ -113,6 +114,7 @@ class BatchOptions:
     group_by_marker: bool = False
 
     workers: int = 1
+    worker_timeout: Optional[float] = 30.0
 
     # GPT integration
     gpt_model: Optional[str] = None
@@ -579,32 +581,71 @@ def run_batch(
 
     try:
         if options.workers and options.workers > 1:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
             error: BaseException | None = None
+            timeout = None
+            if options.worker_timeout is not None and options.worker_timeout > 0:
+                timeout = float(options.worker_timeout)
+
+            pending_samples: list[tuple[SampleInput, int]] = [(sample, 1) for sample in ordered]
+            in_flight: dict[Any, tuple[SampleInput, float, int]] = {}
+
+            def _submit(pool: ThreadPoolExecutor, sample: SampleInput, attempt: int) -> None:
+                future = pool.submit(process_sample, sample, options, overrides, gpt_client)
+                in_flight[future] = (sample, time.monotonic(), attempt)
+
             with ThreadPoolExecutor(max_workers=options.workers) as pool:
-                future_map = {
-                    pool.submit(process_sample, sample, options, overrides, gpt_client): sample
-                    for sample in ordered
-                }
                 try:
-                    for future in as_completed(future_map):
-                        sample = future_map[future]
-                        try:
-                            res = future.result()
-                        except KeyboardInterrupt:
-                            interrupted = True
+                    while pending_samples or in_flight:
+                        while pending_samples and len(in_flight) < options.workers:
+                            sample, attempt = pending_samples.pop(0)
+                            _submit(pool, sample, attempt)
+
+                        if not in_flight:
                             break
-                        except BaseException as exc:  # capture other errors to re-raise later
-                            error = exc
-                            interrupted = True
-                            break
-                        _append_result(res)
+
+                        wait_timeout = timeout if timeout is not None else None
+                        done, _ = wait(in_flight.keys(), timeout=wait_timeout, return_when=FIRST_COMPLETED)
+
+                        if not done and timeout is not None:
+                            # No worker finished before the timeout; resubmit the oldest task.
+                            oldest_future, (sample, _, attempt) = min(
+                                in_flight.items(), key=lambda item: item[1][1]
+                            )
+                            in_flight.pop(oldest_future, None)
+                            if not oldest_future.cancel():
+                                # The worker is still running; its late result will be ignored.
+                                pass
+                            if attempt >= 3:
+                                error = TimeoutError(
+                                    f"Sample '{sample.stem}' exceeded worker timeout after {attempt} attempt(s)."
+                                )
+                                interrupted = True
+                                break
+                            pending_samples.append((sample, attempt + 1))
+                            continue
+
+                        for future in list(done):
+                            sample, _, attempt = in_flight.pop(future)
+                            try:
+                                res = future.result()
+                            except KeyboardInterrupt:
+                                interrupted = True
+                                break
+                            except BaseException as exc:  # capture other errors to re-raise later
+                                if timeout is not None and attempt < 3:
+                                    pending_samples.append((sample, attempt + 1))
+                                    continue
+                                error = exc
+                                interrupted = True
+                                break
+                            _append_result(res)
                 except KeyboardInterrupt:
                     interrupted = True
                 finally:
                     if interrupted:
-                        for future, sample in future_map.items():
+                        for future, (sample, _, attempt) in list(in_flight.items()):
                             if future.done():
                                 try:
                                     res = future.result()

@@ -961,13 +961,20 @@ def _ridge_plot_for_stems(
 def _group_stems_with_results() -> dict[str, list[str]]:
     """Return a mapping of group → stems for processed results."""
 
-    assignments = st.session_state.get("group_assignments", {})
+    assignments = st.session_state.get("group_assignments", {}) or {}
+    use_marker_groups = bool(st.session_state.get("align_group_markers"))
     groups: dict[str, list[str]] = {}
 
     for stem in st.session_state.results:
-        group = assignments.get(stem, "Default")
+        group = assignments.get(stem)
+
+        if use_marker_groups and (not isinstance(group, str) or not group or group == "Default"):
+            marker = _stem_marker(stem)
+            group = _normalize_label_casefold(marker) or _normalize_label(marker)
+
         if not isinstance(group, str) or not group:
             group = "Default"
+
         groups.setdefault(group, []).append(stem)
 
     return groups

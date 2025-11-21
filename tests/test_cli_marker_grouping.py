@@ -1,7 +1,9 @@
+import numpy as np
 import pandas as pd
+import pytest
 import streamlit as st
 
-from app import _queue_cli_samples
+from app import _align_results_by_group, _ordered_stems_for_results, _queue_cli_samples
 
 
 def test_cli_queue_preserves_marker_labels(tmp_path):
@@ -105,3 +107,53 @@ def test_cli_marker_group_mode_sets_groups_and_alignment():
     assert "cd3" in st.session_state.group_overrides
     assert "cd4" in st.session_state.group_overrides
     assert st.session_state.align_group_markers is True
+
+
+def test_marker_grouping_orders_ridges_and_aligns_per_group():
+    st.session_state.clear()
+    st.session_state.generated_csvs = []
+    st.session_state.generated_meta = {}
+    st.session_state.results = {
+        "S1_CD3_raw_counts": {
+            "peaks": [-1.0],
+            "valleys": [],
+            "xs": np.array([-1.5, -1.0, -0.5]),
+            "ys": np.array([0.1, 0.2, 0.1]),
+        },
+        "S2_CD4_raw_counts": {
+            "peaks": [10.0],
+            "valleys": [],
+            "xs": np.array([9.5, 10.0, 10.5]),
+            "ys": np.array([0.2, 0.4, 0.2]),
+        },
+    }
+    st.session_state.results_raw = {
+        "S1_CD3_raw_counts": np.array([-1.6, -1.2, -1.0]),
+        "S2_CD4_raw_counts": np.array([9.8, 10.0, 10.4]),
+    }
+    st.session_state.results_raw_meta = {}
+    st.session_state.params = {}
+    st.session_state.dirty = {}
+    st.session_state.aligned_results = {}
+    st.session_state.fig_pngs = {}
+    st.session_state.aligned_fig_pngs = {}
+    st.session_state.aligned_counts = None
+    st.session_state.aligned_landmarks = None
+    st.session_state.raw_ridge_png = None
+    st.session_state.align_group_markers = True
+    st.session_state.group_assignments = {
+        "S1_CD3_raw_counts": "cd3",
+        "S2_CD4_raw_counts": "cd4",
+    }
+    st.session_state.group_overrides = {"Default": {}, "cd3": {}, "cd4": {}}
+
+    ordered = _ordered_stems_for_results(use_groups=True)
+    assert ordered == ["S1_CD3_raw_counts", "S2_CD4_raw_counts"]
+
+    _align_results_by_group(align_mode="negPeak", target_vec=None)
+
+    peaks_cd3 = st.session_state.aligned_results["S1_CD3_raw_counts"]["peaks"]
+    peaks_cd4 = st.session_state.aligned_results["S2_CD4_raw_counts"]["peaks"]
+
+    assert pytest.approx(peaks_cd3[0], rel=0.01) == -1.0
+    assert pytest.approx(peaks_cd4[0], rel=0.01) == 10.0

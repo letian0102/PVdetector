@@ -817,7 +817,8 @@ def _refresh_raw_ridge() -> None:
         st.session_state.raw_ridge_png = None
         return
 
-    stems = list(st.session_state.results)
+    use_groups = bool(st.session_state.get("align_group_markers"))
+    stems = _ordered_stems_for_results(use_groups=use_groups)
     st.session_state.raw_ridge_png = _ridge_plot_for_stems(
         stems, st.session_state.results
     )
@@ -948,6 +949,217 @@ def _group_stems_with_results() -> dict[str, list[str]]:
         groups.setdefault(group, []).append(stem)
 
     return groups
+
+
+def _ordered_stems_for_results(*, use_groups: bool) -> list[str]:
+    """Return stems ordered by group (Default first) or as-is when grouping is off."""
+
+    stems = list(st.session_state.results)
+    if not use_groups:
+        return stems
+
+    groups = _group_stems_with_results()
+
+    def _group_sort(item: tuple[str, list[str]]) -> tuple[int, str]:
+        name, _ = item
+        return (0, "") if name == "Default" else (1, name.lower())
+
+    ordered: list[str] = []
+    for _, group_stems in sorted(groups.items(), key=_group_sort):
+        ordered.extend(group_stems)
+
+    for stem in stems:
+        if stem not in ordered:
+            ordered.append(stem)
+
+    return ordered
+
+
+def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) -> None:
+    """Align results, respecting marker-based grouping when enabled."""
+
+    if not st.session_state.results:
+        st.error("Run the detector first to align landmarks.")
+        st.stop()
+
+    use_groups = bool(st.session_state.get("align_group_markers"))
+    group_map = (
+        _group_stems_with_results() if use_groups else {"Default": list(st.session_state.results)}
+    )
+
+    def _group_sort(item: tuple[str, list[str]]) -> tuple[int, str]:
+        name, _ = item
+        return (0, "") if name == "Default" else (1, name.lower())
+
+    xs_map: dict[str, np.ndarray] = {}
+    ys_map: dict[str, np.ndarray] = {}
+    aligned_counts: dict[str, np.ndarray] = {}
+    aligned_results: dict[str, dict[str, object]] = {}
+    landmark_rows: dict[str, list[float]] = {}
+
+    all_xmin = np.inf
+    all_xmax = -np.inf
+    all_ymax = 0.0
+
+    for _, stems in sorted(group_map.items(), key=_group_sort):
+        if not stems:
+            continue
+
+        peaks_all = [st.session_state.results[s]["peaks"] for s in stems]
+        valleys_all = [st.session_state.results[s]["valleys"] for s in stems]
+        counts_all = [st.session_state.results_raw[s] for s in stems]
+
+        landmark_mat = fill_landmark_matrix(
+            peaks=peaks_all,
+            valleys=valleys_all,
+            align_type=align_mode,
+            midpoint_type="valley",
+        )
+
+        if target_vec is None:
+            target_landmark = np.nanmedian(landmark_mat, axis=0).tolist()
+        else:
+            need = _cols_for_align_mode(align_mode)
+            if len(target_vec) != len(need):
+                st.error(
+                    f"Need {len(need)} values for '{align_mode}', but got {len(target_vec)}."
+                )
+                st.stop()
+            target_landmark = target_vec
+
+        warped, warped_lm, warp_funs = align_distributions(
+            counts_all,
+            peaks_all,
+            valleys_all,
+            align_type=align_mode,
+            landmark_matrix=landmark_mat,
+            target_landmark=target_landmark,
+        )
+
+        warped = list(warped)
+        warp_funs = list(warp_funs)
+        warped_lm = [list(row) for row in warped_lm]
+
+        neg_peaks = [lm[0] for lm in warped_lm]
+        target_neg = float(np.nanmean(neg_peaks)) if neg_peaks else 0.0
+
+        for idx, stem in enumerate(stems):
+            if idx >= len(warp_funs):
+                peaks = peaks_all[idx]
+                offset = (target_neg - peaks[0]) if peaks else 0.0
+                warp_funs.append(lambda x, o=offset: x + o)
+                warped.append(counts_all[idx] + offset)
+                warped_lm.append([
+                    (peaks[0] + offset) if peaks else np.nan,
+                    np.nan,
+                    np.nan,
+                ])
+
+            xs_raw = np.asarray(st.session_state.results[stem].get("xs", []), float)
+            ys_raw = np.asarray(st.session_state.results[stem].get("ys", []), float)
+            warp_fn = warp_funs[idx]
+
+            xs_aligned = warp_fn(xs_raw)
+            xs_map[stem] = xs_aligned
+            ys_map[stem] = ys_raw
+            if xs_aligned.size:
+                all_xmin = min(all_xmin, float(xs_aligned.min()))
+                all_xmax = max(all_xmax, float(xs_aligned.max()))
+            if ys_raw.size:
+                all_ymax = max(all_ymax, float(ys_raw.max()))
+
+            peaks_aligned = warp_fn(np.asarray(st.session_state.results[stem]["peaks"]))
+            valleys_aligned = warp_fn(np.asarray(st.session_state.results[stem]["valleys"]))
+            aligned_counts[stem] = np.asarray(warped[idx], float)
+
+            try:
+                sample_ymax = float(np.nanmax(ys_raw))
+            except ValueError:
+                sample_ymax = all_ymax
+
+            sample_xmin = float(xs_aligned.min()) if xs_aligned.size else all_xmin
+            sample_xmax = float(xs_aligned.max()) if xs_aligned.size else all_xmax
+            if not np.isfinite(sample_xmin) or not np.isfinite(sample_xmax):
+                sample_xmin, sample_xmax = all_xmin, all_xmax
+
+            if sample_xmax == sample_xmin:
+                span = abs(sample_xmin) if sample_xmin != 0 else 1.0
+                pad_local = 0.05 * span
+            else:
+                pad_local = 0.05 * (sample_xmax - sample_xmin)
+
+            if not np.isfinite(sample_ymax) or sample_ymax <= 0:
+                sample_ymax = all_ymax if np.isfinite(all_ymax) and all_ymax > 0 else 1.0
+
+            png = _plot_png_fixed(
+                f"{stem} (aligned)",
+                xs_raw,
+                ys_raw,
+                peaks_aligned[~np.isnan(peaks_aligned)],
+                valleys_aligned[~np.isnan(valleys_aligned)],
+                (sample_xmin - pad_local, sample_xmax + pad_local),
+                sample_ymax,
+            )
+
+            st.session_state.aligned_fig_pngs[f"{stem}_aligned.png"] = png
+            aligned_results[stem] = {
+                "peaks": peaks_aligned.round(4).tolist(),
+                "valleys": valleys_aligned.round(4).tolist(),
+                "xs": xs_raw.tolist(),
+                "ys": ys_raw.tolist(),
+            }
+            landmark_rows[stem] = list(warped_lm[idx])
+
+    if not np.isfinite(all_xmin) or not np.isfinite(all_xmax):
+        all_xmin, all_xmax = 0.0, 1.0
+    elif all_xmax == all_xmin:
+        d = abs(all_xmin) if all_xmin != 0 else 1.0
+        all_xmin -= 0.05 * d
+        all_xmax += 0.05 * d
+
+    span = all_xmax - all_xmin
+    pad = 0.05 * span
+    if not np.isfinite(all_ymax):
+        all_ymax = 1.0
+
+    st.session_state.aligned_counts = aligned_counts
+    st.session_state.aligned_landmarks = [
+        landmark_rows.get(stem, []) for stem in st.session_state.results
+    ]
+    st.session_state.aligned_results = aligned_results
+    st.session_state.aligned_ridge_png = None
+
+    ordered_stems = _ordered_stems_for_results(use_groups=use_groups)
+    gap = 1.2 * all_ymax
+    fig, ax = plt.subplots(
+        figsize=(6, 0.8 * len(ordered_stems)),
+        dpi=150,
+        sharex=True,
+    )
+
+    for i, stem in enumerate(ordered_stems):
+        xs = xs_map.get(stem, np.asarray([]))
+        ys = ys_map.get(stem, np.asarray([]))
+        offset = i * gap
+
+        ax.plot(xs, ys + offset, color="black", lw=1)
+        ax.fill_between(xs, offset, ys + offset, color="#FFA50088", lw=0)
+
+        info = aligned_results.get(stem)
+        if info:
+            for p in info["peaks"]:
+                ax.vlines(p, offset, offset + ys.max(), color="black", lw=0.8)
+            for v in info["valleys"]:
+                ax.vlines(v, offset, offset + ys.max(), color="grey", lw=0.8, linestyles=":")
+
+        ax.text(all_xmin - pad, offset + 0.5 * all_ymax, stem, ha="right", va="center", fontsize=7)
+
+    ax.set_yticks([])
+    ax.set_xlim(all_xmin - pad, all_xmax + pad)
+    fig.tight_layout()
+
+    st.session_state.aligned_ridge_png = fig_to_png(fig)
+    plt.close(fig)
 
 
 def _ensure_raw_ridge_png() -> bytes | None:
@@ -4619,184 +4831,7 @@ if st.session_state.results:
                              type="primary")
     if do_align:
         with st.spinner("Running landmark alignment …"):
-            peaks_all   = [v["peaks"]   for v in st.session_state.results.values()]
-            valleys_all = [v["valleys"] for v in st.session_state.results.values()]
-            counts_all  = [st.session_state.results_raw[k]
-                        for k in st.session_state.results]
+            _align_results_by_group(align_mode=align_mode, target_vec=target_vec)
 
-            # —— 1. warp every distribution ---------------------------------------
-            # -------- deterministically build + fill landmark matrix ----------------
-            landmark_mat = fill_landmark_matrix(
-                peaks   = peaks_all,
-                valleys = valleys_all,
-                align_type  = align_mode,
-                midpoint_type        = "valley",          # valley-based fallback
-            )
-
-            # choose the *target* positions
-            if target_vec is None:                      # ► AUTOMATIC
-                target_landmark = np.nanmedian(landmark_mat, axis=0).tolist()
-            else:                                       # ► USER-SUPPLIED
-                need = _cols_for_align_mode(align_mode)
-                if len(target_vec) != len(need):
-                    st.error(
-                        f"Need {len(need)} values for '{align_mode}', "
-                        f"but got {len(target_vec)}."
-                    )
-                    st.stop()
-                target_landmark = target_vec            # <- exactly as typed
-
-            # -------- run the warp, forcing ALL THREE landmarks ---------------------
-            warped, warped_lm, warp_funs = align_distributions(
-                counts_all,
-                peaks_all,            # unused internally when landmark_mat supplied,
-                valleys_all,          # but kept for API compatibility
-                align_type      = align_mode,
-                landmark_matrix = landmark_mat,
-                target_landmark = target_landmark,
-            )
-
-            warped      = list(warped)                    # list of 1-D arrays
-            warp_funs   = list(warp_funs)                 # list of callables
-            warped_lm   = [list(row) for row in warped_lm]  # list of [neg, val, pos]
-
-            n_samples   = len(st.session_state.results)
-
-            # cohort mean location of the negative peak among samples that did warp
-            neg_peaks   = [lm[0] for lm in warped_lm]          # first column = neg-peak
-            target_neg  = float(np.nanmean(neg_peaks)) if neg_peaks else 0.0
-
-            for idx in range(n_samples):
-                if idx >= len(warp_funs):
-                    # sample idx was dropped  → fabricate a simple shift warp
-                    pks      = peaks_all[idx]
-                    offset   = (target_neg - pks[0]) if pks else 0.0
-                    warp_funs.append(lambda x, o=offset: x + o)
-                    warped.append(counts_all[idx] + offset)
-                    warped_lm.append([
-                        (pks[0] + offset) if pks else np.nan,  # neg-peak
-                        np.nan,                                # missing valley
-                        np.nan                                 # missing pos-peak
-                    ])
-
-            # build aligned curves directly from the already-computed KDEs
-            # to avoid bandwidth discrepancies between raw and aligned views
-            xs_map: dict[str, np.ndarray] = {}
-            ys_map: dict[str, np.ndarray] = {}
-            all_xmin = np.inf
-            all_xmax = -np.inf
-            all_ymax = 0.0
-            for stem, f in zip(st.session_state.results, warp_funs):
-                xs_raw = np.asarray(st.session_state.results[stem].get("xs", []), float)
-                ys_raw = np.asarray(st.session_state.results[stem].get("ys", []), float)
-                xs_al  = f(xs_raw)
-                xs_map[stem] = xs_al
-                ys_map[stem] = ys_raw
-                if xs_al.size:
-                    all_xmin = min(all_xmin, float(xs_al.min()))
-                    all_xmax = max(all_xmax, float(xs_al.max()))
-                if ys_raw.size:
-                    all_ymax = max(all_ymax, float(ys_raw.max()))
-
-            if not np.isfinite(all_xmin) or not np.isfinite(all_xmax):
-                all_xmin, all_xmax = 0.0, 1.0
-            elif all_xmax == all_xmin:
-                d = abs(all_xmin) if all_xmin != 0 else 1.0
-                all_xmin -= 0.05 * d
-                all_xmax += 0.05 * d
-
-            span = all_xmax - all_xmin
-            pad  = 0.05 * span
-            if not np.isfinite(all_ymax):
-                all_ymax = 1.0
-
-            st.session_state.aligned_counts     = dict(zip(st.session_state.results,
-                                                        warped))
-            st.session_state.aligned_landmarks  = warped_lm
-            st.session_state.aligned_results    = {}
-            st.session_state.aligned_fig_pngs   = {}
-            st.session_state.aligned_ridge_png  = None
-
-            # —— 2. per-sample PNGs & metadata ------------------------------------
-            for stem, f in zip(st.session_state.results, warp_funs):
-                xs      = xs_map[stem]
-                ys      = ys_map[stem]
-                pk_align = f(np.asarray(st.session_state.results[stem]["peaks"]))
-                vl_align = f(np.asarray(st.session_state.results[stem]["valleys"]))
-
-                try:
-                    sample_xmin = float(np.nanmin(xs))
-                    sample_xmax = float(np.nanmax(xs))
-                except ValueError:
-                    sample_xmin, sample_xmax = all_xmin, all_xmax
-
-                if not np.isfinite(sample_xmin) or not np.isfinite(sample_xmax):
-                    sample_xmin, sample_xmax = all_xmin, all_xmax
-
-                if sample_xmax == sample_xmin:
-                    span = abs(sample_xmin) if sample_xmin != 0 else 1.0
-                    pad_local = 0.05 * span
-                else:
-                    pad_local = 0.05 * (sample_xmax - sample_xmin)
-
-                x_limits = (sample_xmin - pad_local, sample_xmax + pad_local)
-
-                try:
-                    sample_ymax = float(np.nanmax(ys))
-                except ValueError:
-                    sample_ymax = all_ymax
-
-                if not np.isfinite(sample_ymax) or sample_ymax <= 0:
-                    sample_ymax = all_ymax if np.isfinite(all_ymax) and all_ymax > 0 else 1.0
-
-                png = _plot_png_fixed(
-                    f"{stem} (aligned)", xs, ys,
-                    pk_align[~np.isnan(pk_align)],
-                    vl_align[~np.isnan(vl_align)],
-                    x_limits,
-                    sample_ymax,
-                )
-
-                st.session_state.aligned_fig_pngs[f"{stem}_aligned.png"] = png
-                st.session_state.aligned_results[stem] = {
-                    "peaks":   pk_align.round(4).tolist(),
-                    "valleys": vl_align.round(4).tolist(),
-                    "xs": xs.tolist(),
-                    "ys": ys.tolist(),
-                }
-
-            # --- 3. stacked ridge-plot (plain) -----------------------------------
-            gap = 1.2 * all_ymax
-            fig, ax = plt.subplots(
-                figsize=(6, 0.8 * len(st.session_state.results)),
-                dpi=150,
-                sharex=True,
-            )
-
-            for i, stem in enumerate(st.session_state.results):
-                xs     = xs_map[stem]
-                ys     = ys_map[stem]
-                offset = i * gap
-
-                ax.plot(xs, ys + offset, color="black", lw=1)
-                ax.fill_between(xs, offset, ys + offset,
-                                color="#FFA50088", lw=0)
-
-                info = st.session_state.aligned_results[stem]
-                for p in info["peaks"]:
-                    ax.vlines(p, offset, offset + ys.max(), color="black", lw=0.8)
-                for v in info["valleys"]:
-                    ax.vlines(v, offset, offset + ys.max(), color="grey",
-                              lw=0.8, linestyles=":")
-
-                ax.text(all_xmin, offset + 0.5 * all_ymax, stem,
-                        ha="right", va="center", fontsize=7)
-
-            ax.set_yticks([]); ax.set_xlim(all_xmin, all_xmax)
-            fig.tight_layout()
-
-            st.session_state.aligned_ridge_png = fig_to_png(fig)
-            plt.close(fig)
-
-            st.success("Landmarks aligned – scroll down for the stacked view or download the ZIP!")
-            st.rerun()
+        st.success("Landmarks aligned – scroll down for the stacked view or download the ZIP!")
+        st.rerun()

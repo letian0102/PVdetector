@@ -394,6 +394,62 @@ def test_run_batch_retries_timed_out_workers(monkeypatch):
     assert call_counts["SampleA"] >= 2
 
 
+def test_run_batch_reports_exceeded_retries(monkeypatch, capsys):
+    import peak_valley.batch as batch_mod
+
+    options = BatchOptions(
+        apply_arcsinh=False,
+        workers=2,
+        worker_timeout=0.05,
+        worker_retries=1,
+    )
+    slow_sample = SampleInput(
+        stem="SlowOne",
+        counts=np.array([0.1, 0.9]),
+        metadata={"sample": "S1"},
+        arcsinh_signature=options.arcsinh_signature(),
+        order=0,
+    )
+    fast_sample = SampleInput(
+        stem="FastOne",
+        counts=np.array([0.2, 0.8]),
+        metadata={"sample": "S2"},
+        arcsinh_signature=options.arcsinh_signature(),
+        order=1,
+    )
+
+    attempts: dict[str, int] = {}
+
+    def fake_process(sample, opts, overrides, gpt_client):
+        attempts[sample.stem] = attempts.get(sample.stem, 0) + 1
+        if sample.stem == "SlowOne":
+            time.sleep(options.worker_timeout + 0.05)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[],
+            valleys=[],
+            xs=np.array([]),
+            ys=np.array([]),
+            counts=sample.counts,
+            params={},
+            quality=0.0,
+            metadata=sample.metadata,
+            source_name=sample.source_name,
+            arcsinh_signature=sample.arcsinh_signature,
+        )
+
+    monkeypatch.setattr(batch_mod, "process_sample", fake_process)
+
+    batch = run_batch([slow_sample, fast_sample], options)
+
+    err = capsys.readouterr().err
+    assert "giving up" in err
+    assert batch.interrupted is True
+    assert batch.failed_samples == ["SlowOne"]
+    assert [res.stem for res in batch.samples] == ["FastOne"]
+    assert attempts["SlowOne"] == options.worker_retries + 1
+
+
 def test_alignment_normalizes_landmarks(monkeypatch):
     import peak_valley.batch as batch_mod
 

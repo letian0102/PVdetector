@@ -2050,6 +2050,12 @@ def _cli_assign_groups(
     if not isinstance(subset, pd.DataFrame) or subset.empty:
         return True
 
+    assignments_changed = False
+    align_flag_before = bool(st.session_state.get("align_group_markers"))
+    raw_ridge_before = st.session_state.get("raw_ridge_png")
+    aligned_ridge_before = st.session_state.get("aligned_ridge_png")
+    return_state = True
+
     assignments = st.session_state.get("group_assignments")
     if not isinstance(assignments, dict):
         assignments = {}
@@ -2138,9 +2144,6 @@ def _cli_assign_groups(
                     _mark_sample_dirty(stem, "group")
                 assignments_changed = True
         st.session_state.group_overrides = overrides
-        return_state = True
-    else:
-        return_state = True
 
     if (
         assignments_changed

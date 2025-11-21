@@ -557,6 +557,8 @@ def run_batch(
     interrupted = False
     failed_samples: list[dict[str, str]] = []
     abort_run = False
+    serial_pending: list[SampleInput] = []
+    serial_pending_stems: set[str] = set()
 
     if progress is not None:
         try:
@@ -644,10 +646,9 @@ def run_batch(
                                 # The worker is still running; its late result will be ignored.
                                 pass
                             if attempt >= 3:
-                                _mark_failed(
-                                    sample.stem,
-                                    f"exceeded worker timeout after {attempt} attempt(s)",
-                                )
+                                if sample.stem not in serial_pending_stems:
+                                    serial_pending_stems.add(sample.stem)
+                                    serial_pending.append(sample)
                                 continue
                             pending_samples.append((sample, attempt + 1))
 
@@ -666,6 +667,11 @@ def run_batch(
                         except BaseException as exc:  # capture other errors to re-raise later
                             if timeout is not None and attempt < 3:
                                 pending_samples.append((sample, attempt + 1))
+                                continue
+                            if timeout is not None and isinstance(exc, TimeoutError):
+                                if sample.stem not in serial_pending_stems:
+                                    serial_pending_stems.add(sample.stem)
+                                    serial_pending.append(sample)
                                 continue
                             error = exc
                             interrupted = True
@@ -697,6 +703,20 @@ def run_batch(
                     pool.shutdown(wait=False)
             if error is not None:
                 raise error
+            if not abort_run and serial_pending:
+                for sample in serial_pending:
+                    if interrupted:
+                        break
+                    try:
+                        res = process_sample(sample, options, overrides, gpt_client)
+                    except KeyboardInterrupt:
+                        interrupted = True
+                        abort_run = True
+                        break
+                    except BaseException as exc:
+                        _mark_failed(sample.stem, f"failed after serial fallback: {exc}")
+                        continue
+                    _append_result(res)
         else:
             for sample in ordered:
                 if interrupted:

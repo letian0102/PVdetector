@@ -291,6 +291,16 @@ def _summarize_overrides(overrides: dict[str, object]) -> list[str]:
     return summary
 
 
+def _clean_stem_label(value: object) -> str | None:
+    """Return a stripped stem label or ``None`` when empty/invalid."""
+
+    if not isinstance(value, str):
+        return None
+
+    cleaned = value.strip()
+    return cleaned or None
+
+
 def _clean_cli_positions(values) -> list[float]:
     """Return finite float values extracted from a CLI summary entry."""
 
@@ -391,6 +401,7 @@ def _apply_cli_positions(
 ) -> tuple[list[float], list[float], bool]:
     """Replace detected peak/valley positions with CLI imports when available."""
 
+    stem_clean = _clean_stem_label(stem) or (str(stem).strip() if stem is not None else None)
     if not st.session_state.get("cli_counts_native"):
         return peaks, valleys, False
 
@@ -398,21 +409,30 @@ def _apply_cli_positions(
     if not pending_raw:
         return peaks, valleys, False
 
-    if isinstance(pending_raw, (set, tuple)):
-        pending_iter = list(pending_raw)
-    else:
-        pending_iter = list(pending_raw)
+    def _pending_labels(values) -> list[str]:
+        labels: list[str] = []
+        try:
+            iterator = values if isinstance(values, (list, tuple, set)) else [values]
+        except Exception:
+            iterator = []
+        for value in iterator:
+            cleaned = _clean_stem_label(value) or (str(value).strip() if value is not None else None)
+            if cleaned:
+                labels.append(cleaned)
+        return labels
 
-    if stem not in pending_iter:
+    pending_iter = _pending_labels(pending_raw)
+
+    if not stem_clean or stem_clean not in pending_iter:
         return peaks, valleys, False
 
     lookup = st.session_state.get("cli_summary_lookup")
-    st.session_state.cli_positions_pending = [s for s in pending_iter if s != stem]
+    st.session_state.cli_positions_pending = [s for s in pending_iter if s != stem_clean]
 
     if not isinstance(lookup, dict):
         return peaks, valleys, False
 
-    entry = lookup.get(stem)
+    entry = lookup.get(stem_clean)
     if not isinstance(entry, dict):
         return peaks, valleys, False
 
@@ -433,7 +453,7 @@ def _apply_cli_positions(
             updated = dict(cache)
         else:
             updated = {}
-        updated[stem] = {
+        updated[stem_clean] = {
             "peaks": tuple(peaks),
             "valleys": tuple(valleys),
         }
@@ -446,7 +466,7 @@ def _apply_cli_positions(
             fixed = set(fixed_raw)
         else:
             fixed = set()
-        fixed.add(stem)
+        fixed.add(stem_clean)
         st.session_state.cli_positions_fixed = fixed
 
     return peaks, valleys, applied
@@ -1631,6 +1651,10 @@ def _load_cli_import(
 ) -> None:
     """Store imported CLI outputs in session state and prime selectors."""
 
+    summary_df = summary_df.copy()
+    if "stem" in summary_df.columns:
+        summary_df["stem"] = summary_df["stem"].map(_clean_stem_label)
+
     st.session_state.expr_df = expr_df
     st.session_state.meta_df = meta_df
     st.session_state.expr_name = expr_name
@@ -1646,7 +1670,7 @@ def _load_cli_import(
         st.session_state.get("align_group_markers", False)
     )
 
-    stems = [str(s) for s in summary_df.get("stem", []) if isinstance(s, str) and s]
+    stems = [s for s in summary_df.get("stem", []) if isinstance(s, str) and s]
     valid_stems = set(stems)
     st.session_state.cli_summary_selection = stems.copy()
 
@@ -1669,8 +1693,8 @@ def _load_cli_import(
     positions_cache: dict[str, dict[str, object]] = {}
     updated_overrides: dict[str, dict[str, object]] = {}
     for row in summary_df.itertuples(index=False):
-        stem = getattr(row, "stem", None)
-        if not isinstance(stem, str) or not stem:
+        stem = _clean_stem_label(getattr(row, "stem", None))
+        if not stem:
             continue
 
         overrides = dict(existing_overrides.get(stem, {}))

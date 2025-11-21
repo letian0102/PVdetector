@@ -162,6 +162,12 @@ def _keyify(label: str) -> str:
 def _normalize_label(value) -> str | None:
     """Return a stripped string label or ``None`` when empty."""
 
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
     if value is None:
         return None
 
@@ -171,6 +177,15 @@ def _normalize_label(value) -> str | None:
         text = str(value).strip()
 
     return text or None
+
+
+def _normalize_label_casefold(value) -> str | None:
+    """Normalize ``value`` and compare case-insensitively."""
+
+    base = _normalize_label(value)
+    if base is None:
+        return None
+    return base.casefold()
 
 
 def _marker_lookup_variants(value) -> list[str]:
@@ -1348,23 +1363,37 @@ def _cell_indices_for(
 ) -> list[int]:
     """Return the DataFrame indices for ``sample`` and optional ``batch``."""
 
-    mask = meta_df["sample"].eq(sample)
+    sample_norm = _normalize_label_casefold(sample)
+    if sample_norm is None:
+        return []
+
+    sample_series = meta_df["sample"].map(_normalize_label_casefold)
+    mask = sample_series.eq(sample_norm)
+
     if "batch" in meta_df.columns:
-        if batch is None:
-            mask &= meta_df["batch"].isna()
+        batch_norm = _normalize_label_casefold(batch) if batch is not None else None
+        batch_series = meta_df["batch"].map(_normalize_label_casefold)
+        if batch_norm is None:
+            mask &= batch_series.isna()
         else:
-            mask &= meta_df["batch"].eq(batch)
+            mask &= batch_series.eq(batch_norm)
     return meta_df.index[mask].tolist()
 
 
-def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
-                           expr_df: pd.DataFrame, meta_df: pd.DataFrame,
-                           sel_b: list[str] | None = None) -> None:
+def _sync_generated_counts(
+    sel_m: list[str],
+    sel_s: list[str],
+    expr_df: pd.DataFrame,
+    meta_df: pd.DataFrame,
+    sel_b: list[str] | None = None,
+    *,
+    summary_rows: Iterable | None = None,
+) -> None:
     """Refresh cached CSVs to match the current marker/sample selection.
 
     The ``stem`` for each generated CSV uniquely identifies the batch, sample,
-    and marker combination (``<sample>_<batch>_<marker>_raw_counts``).  When no
-    batch column is present the stem falls back to ``<sample>_<marker>``.
+    and marker combination (``<sample>_<batch>_<marker>_raw_counts``) unless
+    explicit stems are supplied via ``summary_rows``.
     """
     use_batches = "batch" in meta_df.columns
     sel_batch_clean = [None if pd.isna(b) else b for b in (sel_b or [])]
@@ -1380,38 +1409,75 @@ def _sync_generated_counts(sel_m: list[str], sel_s: list[str],
         if key not in index_cache:
             index_cache[key] = _cell_indices_for(meta_df, sample, batch)
         return index_cache[key]
-    for s in sel_s:
-        batches = [None]
-        if use_batches:
-            raw_batches = meta_df.loc[meta_df["sample"].eq(s), "batch"].unique()
-            cleaned: list[str | None] = []
-            for raw in raw_batches:
-                clean = None if pd.isna(raw) else raw
-                if sel_batch_set and clean not in sel_batch_set:
-                    continue
-                cleaned.append(clean)
-            if not cleaned:
+
+    if summary_rows is not None:
+        for row in summary_rows:
+            stem_raw = getattr(row, "stem", None)
+            if not isinstance(stem_raw, str):
                 continue
-            batches = cleaned
-        for b in batches:
-            cell_idx = _cached_indices(s, b)
+            stem = stem_raw.strip()
+            if not stem:
+                continue
+
+            sample = _normalize_label(getattr(row, "sample", None))
+            marker_raw = getattr(row, "marker", None)
+            marker_label = _normalize_label(marker_raw)
+            batch_val = getattr(row, "batch", None) if use_batches else None
+            batch_clean = None if pd.isna(batch_val) else batch_val
+
+            if not sample or not marker_label:
+                continue
+            if sel_batch_set and batch_clean not in sel_batch_set:
+                continue
+
+            cell_idx = _cached_indices(sample, batch_clean)
             if not cell_idx:
                 continue
-            for m in sel_m:
-                marker_label = _normalize_label(m)
-                if not marker_label:
+
+            column_label = _resolve_expr_marker(marker_label, marker_lookup)
+            if column_label is None:
+                missing_markers.add(marker_label)
+                continue
+            resolved_marker = _normalize_label(column_label) or marker_label
+            desired[stem] = (sample, resolved_marker, batch_clean)
+    else:
+        for s in sel_s:
+            sample = _normalize_label(s)
+            if not sample:
+                continue
+            batches = [None]
+            if use_batches:
+                raw_batches = meta_df.loc[
+                    meta_df["sample"].map(_normalize_label) == sample, "batch"
+                ].unique()
+                cleaned: list[str | None] = []
+                for raw in raw_batches:
+                    clean = None if pd.isna(raw) else raw
+                    if sel_batch_set and clean not in sel_batch_set:
+                        continue
+                    cleaned.append(clean)
+                if not cleaned:
                     continue
-                column_label = _resolve_expr_marker(marker_label, marker_lookup)
-                if column_label is None:
-                    missing_markers.add(marker_label)
+                batches = cleaned
+            for b in batches:
+                cell_idx = _cached_indices(sample, b)
+                if not cell_idx:
                     continue
-                resolved_marker = _normalize_label(column_label) or marker_label
-                stem = (
-                    f"{s}_{resolved_marker}_raw_counts"
-                    if b is None
-                    else f"{s}_{b}_{resolved_marker}_raw_counts"
-                )
-                desired[stem] = (s, resolved_marker, b)
+                for m in sel_m:
+                    marker_label = _normalize_label(m)
+                    if not marker_label:
+                        continue
+                    column_label = _resolve_expr_marker(marker_label, marker_lookup)
+                    if column_label is None:
+                        missing_markers.add(marker_label)
+                        continue
+                    resolved_marker = _normalize_label(column_label) or marker_label
+                    stem = (
+                        f"{sample}_{resolved_marker}_raw_counts"
+                        if b is None
+                        else f"{sample}_{b}_{resolved_marker}_raw_counts"
+                    )
+                    desired[stem] = (sample, resolved_marker, b)
 
     # remove stale combinations
     st.session_state.generated_csvs = [
@@ -1856,7 +1922,9 @@ def _queue_cli_samples(
                 pending_list.append(stem)
         st.session_state.cli_positions_pending = pending_list
 
-    _sync_generated_counts(markers, samples, expr_df, meta_df, batches)
+    _sync_generated_counts(
+        markers, samples, expr_df, meta_df, batches, summary_rows=subset.itertuples(index=False)
+    )
 
     available_stems = {stem for stem, _ in st.session_state.generated_csvs}
     missing_stems = sorted({stem for stem in stems if stem not in available_stems})

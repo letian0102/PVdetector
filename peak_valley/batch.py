@@ -13,9 +13,11 @@ import io
 import json
 import math
 import re
+import sys
+import time
 import zipfile
 from collections.abc import Mapping as MappingABC
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 
@@ -113,6 +115,8 @@ class BatchOptions:
     group_by_marker: bool = False
 
     workers: int = 1
+    worker_timeout: float | None = 600.0
+    worker_retries: int = 1
 
     # GPT integration
     gpt_model: Optional[str] = None
@@ -136,6 +140,7 @@ class BatchResults:
     target_landmarks: Optional[Sequence[float]] = None
     interrupted: bool = False
     group_by_marker: bool = False
+    failed_samples: list[str] = field(default_factory=list)
 
 
 class BatchProgress(Protocol):
@@ -552,6 +557,7 @@ def run_batch(
     total = len(ordered)
     completed = 0
     interrupted = False
+    failed_samples: list[str] = []
 
     if progress is not None:
         try:
@@ -579,42 +585,105 @@ def run_batch(
 
     try:
         if options.workers and options.workers > 1:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
             error: BaseException | None = None
-            with ThreadPoolExecutor(max_workers=options.workers) as pool:
-                future_map = {
-                    pool.submit(process_sample, sample, options, overrides, gpt_client): sample
-                    for sample in ordered
-                }
-                try:
-                    for future in as_completed(future_map):
-                        sample = future_map[future]
+            abort = False
+            attempts: dict[str, int] = {}
+
+            def _submit_sample(
+                pool: ThreadPoolExecutor,
+                sample: SampleInput,
+                future_map: dict[Any, SampleInput],
+                pending: set[Any],
+                start_times: dict[Any, float],
+            ) -> None:
+                future = pool.submit(process_sample, sample, options, overrides, gpt_client)
+                future_map[future] = sample
+                pending.add(future)
+                start_times[future] = time.monotonic()
+
+            pool = ThreadPoolExecutor(max_workers=options.workers)
+            future_map: dict[Any, SampleInput] = {}
+            pending: set[Any] = set()
+            start_times: dict[Any, float] = {}
+
+            try:
+                for sample in ordered:
+                    _submit_sample(pool, sample, future_map, pending, start_times)
+
+                while pending and not abort:
+                    timeout = options.worker_timeout if options.worker_timeout and options.worker_timeout > 0 else None
+                    try:
+                        done, _ = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
+                    except KeyboardInterrupt:
+                        interrupted = True
+                        break
+
+                    if not done:
+                        if timeout is None:
+                            continue
+                        now = time.monotonic()
+                        stuck = [
+                            fut for fut in list(pending) if now - start_times.get(fut, now) >= timeout
+                        ]
+                        if not stuck:
+                            continue
+
+                        for fut in stuck:
+                            sample = future_map.pop(fut)
+                            pending.discard(fut)
+                            start_times.pop(fut, None)
+                            fut.cancel()
+
+                            attempt = attempts.get(sample.stem, 0) + 1
+                            attempts[sample.stem] = attempt
+                            if attempt > max(0, options.worker_retries):
+                                print(
+                                    f"[warning] Sample {sample.stem} exceeded worker timeout {timeout:.1f}s "
+                                    f"after {attempt} attempt(s); giving up.",
+                                    file=sys.stderr,
+                                )
+                                failed_samples.append(sample.stem)
+                                interrupted = True
+                                completed += 1
+                                if progress is not None:
+                                    try:
+                                        progress.advance(sample.stem, completed, total)
+                                    except Exception:
+                                        progress = None
+                                continue
+
+                            print(
+                                f"[warning] Worker processing {sample.stem} exceeded {timeout:.1f}s; "
+                                f"retrying ({attempt}/{options.worker_retries}).",
+                                file=sys.stderr,
+                            )
+                            _submit_sample(pool, sample, future_map, pending, start_times)
+                        continue
+
+                    for future in done:
+                        pending.discard(future)
+                        sample = future_map.pop(future, None)
+                        start_times.pop(future, None)
                         try:
                             res = future.result()
                         except KeyboardInterrupt:
                             interrupted = True
+                            abort = True
                             break
                         except BaseException as exc:  # capture other errors to re-raise later
                             error = exc
                             interrupted = True
+                            abort = True
                             break
                         _append_result(res)
-                except KeyboardInterrupt:
-                    interrupted = True
-                finally:
-                    if interrupted:
-                        for future, sample in future_map.items():
-                            if future.done():
-                                try:
-                                    res = future.result()
-                                except KeyboardInterrupt:
-                                    continue
-                                except BaseException:
-                                    continue
-                                _append_result(res)
-                            else:
-                                future.cancel()
+            finally:
+                try:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                except TypeError:  # pragma: no cover - older Python without cancel_futures
+                    pool.shutdown(wait=False)
+
             if error is not None:
                 raise error
         else:
@@ -802,6 +871,7 @@ def run_batch(
         target_landmarks=options.target_landmarks,
         interrupted=interrupted,
         group_by_marker=bool(options.group_by_marker),
+        failed_samples=failed_samples if options.workers and options.workers > 1 else [],
     )
 
 
@@ -1150,6 +1220,8 @@ def results_to_dict(batch: BatchResults) -> dict[str, Any]:
     payload["group_by_marker"] = bool(batch.group_by_marker)
 
     payload["interrupted"] = bool(batch.interrupted)
+    if batch.failed_samples:
+        payload["failed_samples"] = list(batch.failed_samples)
 
     if batch.aligned_landmarks is not None:
         payload["aligned_landmarks"] = _jsonify(batch.aligned_landmarks)
@@ -1229,6 +1301,11 @@ def save_outputs(
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+
+    print(
+        "[info] Processing complete; compiling summary, manifest, and zip exports...",
+        file=sys.stderr,
+    )
 
     summary_df = export_summary(batch)
 

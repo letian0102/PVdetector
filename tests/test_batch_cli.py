@@ -1,5 +1,6 @@
 import io
 import json
+import time
 import zipfile
 from pathlib import Path
 
@@ -345,6 +346,230 @@ def test_run_batch_handles_keyboard_interrupt(tmp_path, monkeypatch):
         manifest = json.load(fh)
     assert manifest.get("interrupted") is True
     assert manifest["samples"], "Partial samples should still be exported"
+
+
+def test_run_batch_retries_timed_out_workers(monkeypatch):
+    import peak_valley.batch as batch_mod
+
+    options = BatchOptions(apply_arcsinh=False, workers=2, worker_timeout=0.1, worker_retries=1)
+    sample_a = SampleInput(
+        stem="SampleA",
+        counts=np.array([0.1, 0.9]),
+        metadata={"sample": "S1", "marker": "CD3"},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+    sample_b = SampleInput(
+        stem="SampleB",
+        counts=np.array([0.2, 0.8]),
+        metadata={"sample": "S2", "marker": "CD19"},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+
+    call_counts: dict[str, int] = {}
+
+    def fake_process(sample, opts, overrides, gpt_client):
+        call_counts[sample.stem] = call_counts.get(sample.stem, 0) + 1
+        if sample.stem == "SampleA" and call_counts[sample.stem] == 1:
+            time.sleep(0.2)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[0.5],
+            valleys=[0.2],
+            xs=np.array([0.0, 1.0]),
+            ys=np.array([0.4, 0.6]),
+            counts=sample.counts,
+            params={"bw": 0.1, "prom": 0.05},
+            quality=0.95,
+            metadata=sample.metadata,
+            source_name=sample.source_name,
+            arcsinh_signature=sample.arcsinh_signature,
+        )
+
+    monkeypatch.setattr(batch_mod, "process_sample", fake_process)
+
+    batch = run_batch([sample_a, sample_b], options)
+
+    assert not batch.interrupted
+    assert len(batch.samples) == 2
+    assert call_counts["SampleA"] >= 2
+
+
+def test_run_batch_reports_exceeded_retries(monkeypatch, capsys):
+    import peak_valley.batch as batch_mod
+
+    options = BatchOptions(
+        apply_arcsinh=False,
+        workers=2,
+        worker_timeout=0.05,
+        worker_retries=1,
+    )
+    slow_sample = SampleInput(
+        stem="SlowOne",
+        counts=np.array([0.1, 0.9]),
+        metadata={"sample": "S1"},
+        arcsinh_signature=options.arcsinh_signature(),
+        order=0,
+    )
+    fast_sample = SampleInput(
+        stem="FastOne",
+        counts=np.array([0.2, 0.8]),
+        metadata={"sample": "S2"},
+        arcsinh_signature=options.arcsinh_signature(),
+        order=1,
+    )
+
+    attempts: dict[str, int] = {}
+
+    def fake_process(sample, opts, overrides, gpt_client):
+        attempts[sample.stem] = attempts.get(sample.stem, 0) + 1
+        if sample.stem == "SlowOne":
+            time.sleep(options.worker_timeout + 0.05)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[],
+            valleys=[],
+            xs=np.array([]),
+            ys=np.array([]),
+            counts=sample.counts,
+            params={},
+            quality=0.0,
+            metadata=sample.metadata,
+            source_name=sample.source_name,
+            arcsinh_signature=sample.arcsinh_signature,
+        )
+
+    monkeypatch.setattr(batch_mod, "process_sample", fake_process)
+
+    batch = run_batch([slow_sample, fast_sample], options)
+
+    err = capsys.readouterr().err
+    assert "giving up" in err
+    assert batch.interrupted is True
+    assert batch.failed_samples == ["SlowOne"]
+    assert [res.stem for res in batch.samples] == ["FastOne"]
+    assert attempts["SlowOne"] == options.worker_retries + 1
+
+
+def test_run_batch_does_not_block_on_exhausted_workers(monkeypatch):
+    import peak_valley.batch as batch_mod
+
+    options = BatchOptions(
+        apply_arcsinh=False,
+        workers=2,
+        worker_timeout=0.05,
+        worker_retries=0,
+    )
+
+    sleepy = SampleInput(
+        stem="NeverReturns",
+        counts=np.array([0.1, 0.9]),
+        metadata={"sample": "S1"},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+    fast = SampleInput(
+        stem="FastOne",
+        counts=np.array([0.2, 0.8]),
+        metadata={"sample": "S2"},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+
+    def fake_process(sample, opts, overrides, gpt_client):
+        if sample.stem == "NeverReturns":
+            time.sleep(opts.worker_timeout * 10)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[],
+            valleys=[],
+            xs=np.array([]),
+            ys=np.array([]),
+            counts=sample.counts,
+            params={},
+            quality=0.0,
+            metadata=sample.metadata,
+            source_name=sample.source_name,
+            arcsinh_signature=sample.arcsinh_signature,
+        )
+
+    monkeypatch.setattr(batch_mod, "process_sample", fake_process)
+
+    start = time.perf_counter()
+    batch = run_batch([sleepy, fast], options)
+    duration = time.perf_counter() - start
+
+    assert duration < options.worker_timeout * 4
+    assert batch.interrupted is True
+    assert batch.failed_samples == ["NeverReturns"]
+    assert [res.stem for res in batch.samples] == ["FastOne"]
+
+
+def test_save_outputs_after_failed_samples(monkeypatch, tmp_path, capsys):
+    import peak_valley.batch as batch_mod
+
+    expr = pd.DataFrame(
+        {
+            "Slow": [0.1, 0.2, 0.3],
+            "Fast": [1.0, 1.2, 1.1],
+        }
+    )
+    meta = pd.DataFrame({"sample": ["S1", "S1", "S1"]})
+
+    expr_path = tmp_path / "expr.csv"
+    meta_path = tmp_path / "meta.csv"
+    expr.to_csv(expr_path, index=False)
+    meta.to_csv(meta_path, index=False)
+
+    options = BatchOptions(
+        apply_arcsinh=False,
+        workers=2,
+        worker_timeout=0.05,
+        worker_retries=0,
+    )
+    samples, meta_info = collect_dataset_samples(expr_path, meta_path, options)
+
+    def fake_process(sample, opts, overrides, gpt_client):
+        if sample.metadata.get("marker") == "Slow":
+            time.sleep(options.worker_timeout + 0.05)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[],
+            valleys=[],
+            xs=np.array([]),
+            ys=np.array([]),
+            counts=sample.counts,
+            params={},
+            quality=0.0,
+            metadata=sample.metadata,
+            source_name=sample.source_name,
+            arcsinh_signature=sample.arcsinh_signature,
+            cell_indices=sample.cell_indices,
+        )
+
+    monkeypatch.setattr(batch_mod, "process_sample", fake_process)
+
+    batch = run_batch(samples, options)
+
+    out_dir = tmp_path / "outputs"
+    save_outputs(batch, out_dir, run_metadata=meta_info)
+
+    captured = capsys.readouterr()
+    assert "compiling summary, manifest, and zip" in captured.err.lower()
+    assert batch.failed_samples == [s.stem for s in samples if s.metadata.get("marker") == "Slow"]
+
+    summary_files = list(out_dir.glob("summary_*.csv"))
+    assert summary_files
+    summary_df = pd.read_csv(summary_files[0])
+    assert summary_df["stem"].tolist() == [
+        s.stem for s in samples if s.metadata.get("marker") == "Fast"
+    ]
+
+    results_files = list(out_dir.glob("results_*.json"))
+    assert results_files
+    with results_files[0].open("r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    assert manifest.get("failed_samples") == batch.failed_samples
+
+    zip_candidates = list(out_dir.glob("before_after_alignment_*.zip"))
+    assert zip_candidates, "Expected zip export even when some samples failed"
 
 
 def test_alignment_normalizes_landmarks(monkeypatch):

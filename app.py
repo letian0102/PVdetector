@@ -1090,19 +1090,20 @@ def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) 
 
             xs_aligned = warp_fn(xs_raw)
             xs_map[stem] = xs_aligned
-            ys_map[stem] = ys_raw
+            ys_aligned = np.asarray(aligned_counts.get(stem, ys_raw), float)
+            ys_map[stem] = ys_aligned
             if xs_aligned.size:
                 all_xmin = min(all_xmin, float(xs_aligned.min()))
                 all_xmax = max(all_xmax, float(xs_aligned.max()))
-            if ys_raw.size:
-                all_ymax = max(all_ymax, float(ys_raw.max()))
+            if ys_aligned.size:
+                all_ymax = max(all_ymax, float(ys_aligned.max()))
 
             peaks_aligned = warp_fn(np.asarray(st.session_state.results[stem]["peaks"]))
             valleys_aligned = warp_fn(np.asarray(st.session_state.results[stem]["valleys"]))
             aligned_counts[stem] = np.asarray(warped[idx], float)
 
             try:
-                sample_ymax = float(np.nanmax(ys_raw))
+                sample_ymax = float(np.nanmax(ys_aligned))
             except ValueError:
                 sample_ymax = all_ymax
 
@@ -1123,7 +1124,7 @@ def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) 
             png = _plot_png_fixed(
                 f"{stem} (aligned)",
                 xs_raw,
-                ys_raw,
+                ys_aligned,
                 peaks_aligned[~np.isnan(peaks_aligned)],
                 valleys_aligned[~np.isnan(valleys_aligned)],
                 (sample_xmin - pad_local, sample_xmax + pad_local),
@@ -1134,8 +1135,8 @@ def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) 
             aligned_results[stem] = {
                 "peaks": peaks_aligned.round(4).tolist(),
                 "valleys": valleys_aligned.round(4).tolist(),
-                "xs": xs_raw.tolist(),
-                "ys": ys_raw.tolist(),
+                "xs": xs_aligned.tolist(),
+                "ys": ys_aligned.tolist(),
             }
             landmark_rows[stem] = list(warped_lm[idx])
 

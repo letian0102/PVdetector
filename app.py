@@ -840,6 +840,28 @@ def _current_arcsinh_signature() -> tuple[bool, float, float, float]:
     )
 
 
+def _stem_offsets_for_plot(
+    stems: list[str], group_for: dict[str, str], gap: float
+) -> tuple[list[float], int]:
+    """Return stacked offsets for ``stems`` with gaps between marker groups."""
+
+    offsets: list[float] = []
+    offset = 0.0
+    breaks = 0
+    last_group: str | None = None
+
+    for stem in stems:
+        group = group_for.get(stem, "Default")
+        if last_group is not None and group != last_group:
+            offset += 0.5 * gap
+            breaks += 1
+        offsets.append(offset)
+        offset += gap
+        last_group = group
+
+    return offsets, breaks
+
+
 def _ridge_plot_for_stems(
     stems: list[str],
     results_map: dict[str, dict[str, object]],
@@ -2062,6 +2084,7 @@ def _cli_assign_groups(
                 assignments[stem] = group_name
                 if stem in st.session_state.results:
                     _mark_sample_dirty(stem, "group")
+                assignments_changed = True
             any_grouped = True
 
         if not any_grouped:
@@ -2069,7 +2092,7 @@ def _cli_assign_groups(
             return False
 
         st.session_state.group_overrides = overrides
-        return True
+        return_state = True
 
     if mode == "marker_groups":
         if "marker" not in subset.columns:
@@ -2113,10 +2136,24 @@ def _cli_assign_groups(
                 assignments[stem] = clean
                 if stem in st.session_state.results:
                     _mark_sample_dirty(stem, "group")
+                assignments_changed = True
         st.session_state.group_overrides = overrides
-        return True
+        return_state = True
+    else:
+        return_state = True
 
-    return True
+    if (
+        assignments_changed
+        or bool(st.session_state.get("align_group_markers")) != align_flag_before
+        or raw_ridge_before is not None
+        or aligned_ridge_before is not None
+    ):
+        _mark_raw_ridge_stale()
+        st.session_state.aligned_ridge_png = None
+        st.session_state.aligned_counts = None
+        st.session_state.aligned_landmarks = None
+
+    return return_state
 
 
 def _queue_cli_samples(

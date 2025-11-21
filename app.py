@@ -2120,6 +2120,7 @@ def _cli_assign_groups(
                 assignments[stem] = group_name
                 if stem in st.session_state.results:
                     _mark_sample_dirty(stem, "group")
+                assignments_changed = True
             any_grouped = True
 
         if not any_grouped:
@@ -2128,7 +2129,7 @@ def _cli_assign_groups(
 
         st.session_state.group_overrides = overrides
         st.session_state.align_group_markers = True
-        return True
+        return_state = True
 
     if mode == "new_group":
         clean = (new_group or "").strip()

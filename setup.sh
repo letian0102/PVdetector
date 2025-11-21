@@ -1,14 +1,13 @@
 mkdir -p ~/.streamlit/
-
-echo "\
-[general]\n\
-email = \"letian0102@gmail.com\"\n\
-" > ~/.streamlit/credentials.toml
-
-echo "\
-[server]\n\
-headless = true\n\
-maxUploadSize = 10240\n\
-enableCORS=false\n\
-port = $PORT\n\
-" > ~/.streamlit/config.toml
+cat <<CONFIG > ~/.streamlit/credentials.toml
+[general]
+email = "letian0102@gmail.com"
+CONFIG
+cat <<CONFIG > ~/.streamlit/config.toml
+[server]
+headless = true
+maxUploadSize = 10240
+enableCORS = false
+port = $PORT
+address = "0.0.0.0"
+CONFIG

@@ -450,6 +450,76 @@ def test_run_batch_reports_exceeded_retries(monkeypatch, capsys):
     assert attempts["SlowOne"] == options.worker_retries + 1
 
 
+def test_save_outputs_after_failed_samples(monkeypatch, tmp_path, capsys):
+    import peak_valley.batch as batch_mod
+
+    expr = pd.DataFrame(
+        {
+            "Slow": [0.1, 0.2, 0.3],
+            "Fast": [1.0, 1.2, 1.1],
+        }
+    )
+    meta = pd.DataFrame({"sample": ["S1", "S1", "S1"]})
+
+    expr_path = tmp_path / "expr.csv"
+    meta_path = tmp_path / "meta.csv"
+    expr.to_csv(expr_path, index=False)
+    meta.to_csv(meta_path, index=False)
+
+    options = BatchOptions(
+        apply_arcsinh=False,
+        workers=2,
+        worker_timeout=0.05,
+        worker_retries=0,
+    )
+    samples, meta_info = collect_dataset_samples(expr_path, meta_path, options)
+
+    def fake_process(sample, opts, overrides, gpt_client):
+        if sample.metadata.get("marker") == "Slow":
+            time.sleep(options.worker_timeout + 0.05)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[],
+            valleys=[],
+            xs=np.array([]),
+            ys=np.array([]),
+            counts=sample.counts,
+            params={},
+            quality=0.0,
+            metadata=sample.metadata,
+            source_name=sample.source_name,
+            arcsinh_signature=sample.arcsinh_signature,
+            cell_indices=sample.cell_indices,
+        )
+
+    monkeypatch.setattr(batch_mod, "process_sample", fake_process)
+
+    batch = run_batch(samples, options)
+
+    out_dir = tmp_path / "outputs"
+    save_outputs(batch, out_dir, run_metadata=meta_info)
+
+    captured = capsys.readouterr()
+    assert "compiling summary, manifest, and zip" in captured.err.lower()
+    assert batch.failed_samples == [s.stem for s in samples if s.metadata.get("marker") == "Slow"]
+
+    summary_files = list(out_dir.glob("summary_*.csv"))
+    assert summary_files
+    summary_df = pd.read_csv(summary_files[0])
+    assert summary_df["stem"].tolist() == [
+        s.stem for s in samples if s.metadata.get("marker") == "Fast"
+    ]
+
+    results_files = list(out_dir.glob("results_*.json"))
+    assert results_files
+    with results_files[0].open("r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    assert manifest.get("failed_samples") == batch.failed_samples
+
+    zip_candidates = list(out_dir.glob("before_after_alignment_*.zip"))
+    assert zip_candidates, "Expected zip export even when some samples failed"
+
+
 def test_alignment_normalizes_landmarks(monkeypatch):
     import peak_valley.batch as batch_mod
 

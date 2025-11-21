@@ -1293,6 +1293,11 @@ def save_outputs(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    print(
+        "[info] Processing complete; compiling summary, manifest, and zip exports...",
+        file=sys.stderr,
+    )
+
     summary_df = export_summary(batch)
 
     manifest = results_to_dict(batch)

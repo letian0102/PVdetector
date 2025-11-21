@@ -2,6 +2,7 @@
 #           live incremental results + per-sample overrides
 from __future__ import annotations
 import io, zipfile, re, math, time
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Iterable
 from pathlib import Path
 import warnings
@@ -123,6 +124,7 @@ for key, default in {
     "cli_positions_fixed": set(),
     "cli_group_mode": "none",
     "cli_group_new_name": "",
+    "align_group_markers": False,
     "mode_selector": "Counts CSV files",
     "mode_selector_target": None,
       # incremental‑run machinery
@@ -1521,6 +1523,16 @@ def _sync_generated_counts(
     _mark_raw_ridge_stale()
 
     existing = {stem for stem, _ in st.session_state.generated_csvs}
+    to_generate: list[tuple[str, str, str, str | None, str, dict[str, object]]]
+    to_generate = []
+
+    apply_arcsinh = bool(st.session_state.get("apply_arcsinh", True))
+    arcsinh_a = float(st.session_state.get("arcsinh_a", 1.0))
+    arcsinh_b = float(st.session_state.get("arcsinh_b", 1 / 5))
+    arcsinh_c = float(st.session_state.get("arcsinh_c", 0.0))
+    cli_native = bool(st.session_state.get("cli_counts_native"))
+    worker_count = max(1, int(st.session_state.get("workers", 1)))
+
     for stem, (s, m, b) in desired.items():
         if stem in existing:
             continue
@@ -1533,41 +1545,52 @@ def _sync_generated_counts(
                 "batch_label": _format_batch_label(b),
             }
         )
-        indices = entry.get("cell_indices")
+        indices = entry.get("cell_indices") or _cached_indices(s, b)
         if not indices:
-            indices = _cached_indices(s, b)
+            continue
         column_label = _resolve_expr_marker(m, marker_lookup)
         if column_label is None:
             missing_markers.add(m)
             continue
-        vals = expr_df.loc[indices, column_label]
-        entry["cell_indices"] = vals.index.tolist()
+        entry["cell_indices"] = list(indices)
+        to_generate.append((stem, s, m, b, column_label, entry))
 
-        cli_native = bool(st.session_state.get("cli_counts_native"))
+    def _build_counts(args: tuple[str, str, str, str | None, str, dict[str, object]]):
+        stem, sample, marker, batch, column_label, entry = args
+        vals = expr_df.loc[entry["cell_indices"], column_label]
+
         if cli_native:
             counts = vals.to_numpy(dtype=float, copy=True)
             arcsinh_applied = True
-        elif st.session_state.get("apply_arcsinh", True):
-            counts = arcsinh_transform(
-                vals,
-                a=st.session_state.get("arcsinh_a", 1.0),
-                b=st.session_state.get("arcsinh_b", 1 / 5),
-                c=st.session_state.get("arcsinh_c", 0.0),
-            )
+        elif apply_arcsinh:
+            counts = arcsinh_transform(vals, a=arcsinh_a, b=arcsinh_b, c=arcsinh_c)
             arcsinh_applied = True
         else:
             counts = vals.astype(float)
             arcsinh_applied = False
+
         bio = io.BytesIO()
-        counts_df = pd.DataFrame({m: np.asarray(counts).ravel()})
+        counts_df = pd.DataFrame({marker: np.asarray(counts).ravel()})
         counts_df.to_csv(bio, index=False)
         bio.seek(0)
         bio.name = f"{stem}.csv"
-        setattr(bio, "marker", m)
+        setattr(bio, "marker", marker)
         setattr(bio, "arcsinh", arcsinh_applied)
-        setattr(bio, "sample", s)
-        setattr(bio, "batch", b)
-        st.session_state.generated_csvs.append((stem, bio))
+        setattr(bio, "sample", sample)
+        setattr(bio, "batch", batch)
+        return stem, bio, entry
+
+    generated: list[tuple[str, io.BytesIO, dict[str, object]]] = []
+    if worker_count > 1 and len(to_generate) > 1:
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            for item in pool.map(_build_counts, to_generate):
+                generated.append(item)
+    else:
+        for args in to_generate:
+            generated.append(_build_counts(args))
+
+    st.session_state.generated_csvs.extend((stem, bio) for stem, bio, _ in generated)
+    for stem, _, entry in generated:
         st.session_state.generated_meta[stem] = entry
 
     if missing_markers:
@@ -1594,6 +1617,7 @@ def _clear_cli_import() -> None:
     st.session_state["cli_positions_fixed"] = set()
     st.session_state["cli_group_mode"] = "none"
     st.session_state["cli_group_new_name"] = ""
+    st.session_state["align_group_markers"] = False
 
 
 def _load_cli_import(
@@ -1618,6 +1642,9 @@ def _load_cli_import(
         f"Loaded {len(summary_df)} entries from {summary_name}"
     )
     st.session_state.cli_counts_native = True
+    st.session_state.align_group_markers = bool(
+        st.session_state.get("align_group_markers", False)
+    )
 
     stems = [str(s) for s in summary_df.get("stem", []) if isinstance(s, str) and s]
     valid_stems = set(stems)
@@ -2103,6 +2130,17 @@ def _render_cli_import_section() -> None:
             disabled=group_mode != "new_group",
             help="Provide the group name used when grouping the selected samples together.",
         )
+
+        align_group_markers = st.checkbox(
+            "Group markers for alignment",
+            value=st.session_state.get("align_group_markers", False),
+            key="align_group_markers",
+            help=(
+                "When running alignment later, group ridge plots and aligned curves by marker "
+                "instead of combining everything together."
+            ),
+        )
+        st.session_state.align_group_markers = align_group_markers
 
         buttons_col1, buttons_col2 = st.columns([1, 1])
         with buttons_col1:
@@ -4219,6 +4257,7 @@ def _start_batch_run(
         align=False,
         align_mode=align_mode,
         target_landmarks=target_vec,
+        group_by_marker=bool(st.session_state.get("align_group_markers", False)),
         workers=int(st.session_state.get("workers", 1)),
         gpt_model=gpt_model,
     )

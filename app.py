@@ -1678,9 +1678,7 @@ def _load_cli_import(
         f"Loaded {len(summary_df)} entries from {summary_name}"
     )
     st.session_state.cli_counts_native = True
-    st.session_state.align_group_markers = bool(
-        st.session_state.get("align_group_markers", False)
-    )
+    st.session_state.align_group_markers = False
 
     stems = [s for s in summary_df.get("stem", []) if isinstance(s, str) and s]
     valid_stems = set(stems)
@@ -1830,6 +1828,8 @@ def _cli_assign_groups(
 
     stems = [str(s) for s in subset.get("stem", []) if isinstance(s, str) and s]
 
+    st.session_state.align_group_markers = False
+
     if mode == "align_sample":
         if "sample" not in subset.columns:
             st.warning("The imported summary does not contain a 'sample' column to align by.")
@@ -1857,6 +1857,36 @@ def _cli_assign_groups(
             return False
 
         st.session_state.group_overrides = overrides
+        return True
+
+    if mode == "marker_groups":
+        if "marker" not in subset.columns:
+            st.warning("The imported summary does not contain a 'marker' column to group by.")
+            return False
+
+        any_grouped = False
+        markers = subset["marker"].tolist()
+        for stem, marker in zip(stems, markers):
+            if not stem:
+                continue
+            label = marker if isinstance(marker, str) else ""
+            clean_label = _normalize_label_casefold(label) or _normalize_label(label)
+            if not clean_label:
+                continue
+            group_name = str(clean_label)
+            overrides.setdefault(group_name, {})
+            if assignments.get(stem) != group_name:
+                assignments[stem] = group_name
+                if stem in st.session_state.results:
+                    _mark_sample_dirty(stem, "group")
+            any_grouped = True
+
+        if not any_grouped:
+            st.warning("No marker names were available to build group assignments.")
+            return False
+
+        st.session_state.group_overrides = overrides
+        st.session_state.align_group_markers = True
         return True
 
     if mode == "new_group":
@@ -2138,10 +2168,11 @@ def _render_cli_import_section() -> None:
 
         st.session_state.cli_summary_selection = selection
 
-        group_choices = ["none", "align_sample", "new_group"]
+        group_choices = ["none", "align_sample", "marker_groups", "new_group"]
         group_labels = {
             "none": "No automatic grouping",
             "align_sample": "Align using sample column",
+            "marker_groups": "Group by marker name",
             "new_group": "Group selected together",
         }
         default_mode = st.session_state.get("cli_group_mode", "none")
@@ -2165,17 +2196,6 @@ def _render_cli_import_section() -> None:
             key="cli_group_new_name",
             disabled=group_mode != "new_group",
             help="Provide the group name used when grouping the selected samples together.",
-        )
-
-        st.session_state.setdefault("align_group_markers", False)
-        st.checkbox(
-            "Group markers for alignment",
-            value=st.session_state.get("align_group_markers", False),
-            key="align_group_markers",
-            help=(
-                "When running alignment later, group ridge plots and aligned curves by marker "
-                "instead of combining everything together."
-            ),
         )
 
         buttons_col1, buttons_col2 = st.columns([1, 1])

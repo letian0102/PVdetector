@@ -603,11 +603,12 @@ def run_batch(
                 pending.add(future)
                 start_times[future] = time.monotonic()
 
-            with ThreadPoolExecutor(max_workers=options.workers) as pool:
-                future_map: dict[Any, SampleInput] = {}
-                pending: set[Any] = set()
-                start_times: dict[Any, float] = {}
+            pool = ThreadPoolExecutor(max_workers=options.workers)
+            future_map: dict[Any, SampleInput] = {}
+            pending: set[Any] = set()
+            start_times: dict[Any, float] = {}
 
+            try:
                 for sample in ordered:
                     _submit_sample(pool, sample, future_map, pending, start_times)
 
@@ -645,6 +646,12 @@ def run_batch(
                                 )
                                 failed_samples.append(sample.stem)
                                 interrupted = True
+                                completed += 1
+                                if progress is not None:
+                                    try:
+                                        progress.advance(sample.stem, completed, total)
+                                    except Exception:
+                                        progress = None
                                 continue
 
                             print(
@@ -671,9 +678,11 @@ def run_batch(
                             abort = True
                             break
                         _append_result(res)
-
-                for future in pending:
-                    future.cancel()
+            finally:
+                try:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                except TypeError:  # pragma: no cover - older Python without cancel_futures
+                    pool.shutdown(wait=False)
 
             if error is not None:
                 raise error

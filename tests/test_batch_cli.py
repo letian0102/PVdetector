@@ -450,6 +450,58 @@ def test_run_batch_reports_exceeded_retries(monkeypatch, capsys):
     assert attempts["SlowOne"] == options.worker_retries + 1
 
 
+def test_run_batch_does_not_block_on_exhausted_workers(monkeypatch):
+    import peak_valley.batch as batch_mod
+
+    options = BatchOptions(
+        apply_arcsinh=False,
+        workers=2,
+        worker_timeout=0.05,
+        worker_retries=0,
+    )
+
+    sleepy = SampleInput(
+        stem="NeverReturns",
+        counts=np.array([0.1, 0.9]),
+        metadata={"sample": "S1"},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+    fast = SampleInput(
+        stem="FastOne",
+        counts=np.array([0.2, 0.8]),
+        metadata={"sample": "S2"},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+
+    def fake_process(sample, opts, overrides, gpt_client):
+        if sample.stem == "NeverReturns":
+            time.sleep(opts.worker_timeout * 10)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[],
+            valleys=[],
+            xs=np.array([]),
+            ys=np.array([]),
+            counts=sample.counts,
+            params={},
+            quality=0.0,
+            metadata=sample.metadata,
+            source_name=sample.source_name,
+            arcsinh_signature=sample.arcsinh_signature,
+        )
+
+    monkeypatch.setattr(batch_mod, "process_sample", fake_process)
+
+    start = time.perf_counter()
+    batch = run_batch([sleepy, fast], options)
+    duration = time.perf_counter() - start
+
+    assert duration < options.worker_timeout * 4
+    assert batch.interrupted is True
+    assert batch.failed_samples == ["NeverReturns"]
+    assert [res.stem for res in batch.samples] == ["FastOne"]
+
+
 def test_save_outputs_after_failed_samples(monkeypatch, tmp_path, capsys):
     import peak_valley.batch as batch_mod
 

@@ -1776,6 +1776,8 @@ def _queue_cli_samples(
     marker_lookup = _build_expr_marker_lookup(expr_df)
     marker_map: dict[str, object] = {}
     missing_raw: list[str] = []
+    skip_reasons: dict[str, str] = {}
+    use_batches = "batch" in meta_df.columns
     for raw_marker in subset.get("marker", []):
         marker_label = _normalize_label(raw_marker)
         if not marker_label:
@@ -1786,6 +1788,31 @@ def _queue_cli_samples(
             continue
         resolved_marker = _normalize_label(column_label) or marker_label
         marker_map.setdefault(resolved_marker, column_label)
+    for _, row in subset.iterrows():
+        stem = str(row.get("stem"))
+        sample = _normalize_label(row.get("sample"))
+        marker_raw = row.get("marker")
+        marker_label = _normalize_label(marker_raw)
+        batch_raw = row.get("batch") if use_batches else None
+        batch_clean = None if pd.isna(batch_raw) else batch_raw
+
+        if not stem or not sample or not marker_label:
+            continue
+
+        column_label = _resolve_expr_marker(marker_label, marker_lookup)
+        if column_label is None:
+            skip_reasons[stem] = (
+                f"Marker '{marker_raw}' not found in the expression matrix"
+            )
+            continue
+
+        indices = _cell_indices_for(meta_df, sample, batch_clean)
+        if not indices:
+            batch_note = "" if batch_clean is None else f" batch '{batch_clean}'"
+            skip_reasons[stem] = (
+                f"No cells for sample '{sample}'{batch_note} in the metadata"
+            )
+
     markers = list(marker_map)
     missing_markers = sorted(set(missing_raw))
     samples = sorted({str(s) for s in subset.get("sample", []) if isinstance(s, str)})
@@ -1836,10 +1863,19 @@ def _queue_cli_samples(
     if missing_stems:
         preview = ", ".join(missing_stems[:5])
         suffix = "…" if len(missing_stems) > 5 else ""
+        detail_parts: list[str] = []
+        for stem in missing_stems[:3]:
+            reason = skip_reasons.get(stem)
+            if reason:
+                detail_parts.append(f"{stem} ({reason})")
+            else:
+                detail_parts.append(stem)
+        detail = "; ".join(detail_parts)
+        extra = "" if detail else preview
         st.warning(
             "Skipped "
             f"{len(missing_stems)} sample(s) because counts could not be generated: "
-            f"{preview}{suffix}."
+            f"{detail or extra}{suffix}."
         )
 
     chosen = set(stems)

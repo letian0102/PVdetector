@@ -1,7 +1,7 @@
 # app.py  – GPT-assisted bandwidth detector with
 #           live incremental results + per-sample overrides
 from __future__ import annotations
-import io, zipfile, re, math, time
+import io, zipfile, re, math, time, os
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Iterable
 from pathlib import Path
@@ -61,6 +61,7 @@ warnings.filterwarnings(
 st.set_page_config("Peak & Valley Detector", None, layout="wide")
 
 DEFAULT_MIN_SEPARATION = 0.5
+DEFAULT_WORKERS = max(1, min(4, (os.cpu_count() or 1)))
 st.title("Peak & Valley Detector — CSV *or* full dataset")
 st.warning(
     "**Heads-up:** if you refresh or close this page, all of your uploaded data and results will be lost."
@@ -136,7 +137,7 @@ for key, default in {
       "batch_run_id": 0,
       "batch_error": None,
       "batch_progress": {"completed": 0, "total": 0},
-      "workers": 1,
+      "workers": DEFAULT_WORKERS,
     "aligned_counts":    None,
     "aligned_landmarks": None,
     "aligned_results": {},   # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
@@ -406,8 +407,7 @@ def _apply_cli_positions(
         return peaks, valleys, False
 
     pending_raw = st.session_state.get("cli_positions_pending")
-    if not pending_raw:
-        return peaks, valleys, False
+    fixed_raw = st.session_state.get("cli_positions_fixed")
 
     def _pending_labels(values) -> list[str]:
         labels: list[str] = []
@@ -421,16 +421,28 @@ def _apply_cli_positions(
                 labels.append(cleaned)
         return labels
 
-    pending_iter = _pending_labels(pending_raw)
+    pending_iter = []
+    if pending_raw:
+        pending_iter = _pending_labels(pending_raw)
+    fixed = set(fixed_raw) if isinstance(fixed_raw, (set, list, tuple)) else set()
 
-    if not stem_clean or stem_clean not in pending_iter:
+    should_apply = False
+    if stem_clean and stem_clean in pending_iter:
+        should_apply = True
+        st.session_state.cli_positions_pending = [s for s in pending_iter if s != stem_clean]
+    elif stem_clean and stem_clean in fixed:
+        should_apply = True
+
+    if not should_apply:
         return peaks, valleys, False
 
     lookup = st.session_state.get("cli_summary_lookup")
-    st.session_state.cli_positions_pending = [s for s in pending_iter if s != stem_clean]
-
-    if not isinstance(lookup, dict):
-        return peaks, valleys, False
+    if not isinstance(lookup, dict) or not lookup:
+        cache_lookup = st.session_state.get("cli_positions_cache")
+        if isinstance(cache_lookup, dict) and cache_lookup:
+            lookup = cache_lookup
+        else:
+            return peaks, valleys, False
 
     entry = lookup.get(stem_clean)
     if not isinstance(entry, dict):

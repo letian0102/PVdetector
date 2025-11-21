@@ -2131,7 +2131,8 @@ def _render_cli_import_section() -> None:
             help="Provide the group name used when grouping the selected samples together.",
         )
 
-        align_group_markers = st.checkbox(
+        st.session_state.setdefault("align_group_markers", False)
+        st.checkbox(
             "Group markers for alignment",
             value=st.session_state.get("align_group_markers", False),
             key="align_group_markers",
@@ -2140,7 +2141,6 @@ def _render_cli_import_section() -> None:
                 "instead of combining everything together."
             ),
         )
-        st.session_state.align_group_markers = align_group_markers
 
         buttons_col1, buttons_col2 = st.columns([1, 1])
         with buttons_col1:

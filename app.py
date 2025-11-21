@@ -819,8 +819,14 @@ def _refresh_raw_ridge() -> None:
 
     use_groups = bool(st.session_state.get("align_group_markers"))
     stems = _ordered_stems_for_results(use_groups=use_groups)
+    group_for = {}
+    if use_groups:
+        for group_name, group_stems in _group_stems_with_results().items():
+            for stem in group_stems:
+                group_for[stem] = group_name
+
     st.session_state.raw_ridge_png = _ridge_plot_for_stems(
-        stems, st.session_state.results
+        stems, st.session_state.results, group_for=group_for
     )
 
 
@@ -840,9 +846,33 @@ def _current_arcsinh_signature() -> tuple[bool, float, float, float]:
     )
 
 
+def _stem_offsets_for_plot(
+    stems: list[str], group_for: dict[str, str], gap: float
+) -> tuple[list[float], int]:
+    """Return stacked offsets for ``stems`` with gaps between marker groups."""
+
+    offsets: list[float] = []
+    offset = 0.0
+    breaks = 0
+    last_group: str | None = None
+
+    for stem in stems:
+        group = group_for.get(stem, "Default")
+        if last_group is not None and group != last_group:
+            offset += 0.5 * gap
+            breaks += 1
+        offsets.append(offset)
+        offset += gap
+        last_group = group
+
+    return offsets, breaks
+
+
 def _ridge_plot_for_stems(
     stems: list[str],
     results_map: dict[str, dict[str, object]],
+    *,
+    group_for: dict[str, str] | None = None,
 ) -> bytes | None:
     """Return a stacked ridge plot PNG for the provided stems."""
 
@@ -877,19 +907,24 @@ def _ridge_plot_for_stems(
     else:
         pad = 0.05 * (x_max - x_min)
 
-    offsets: list[float] = []
-    current_offset = 0.0
-    for _, _, _, _, _, height in curve_info:
-        offsets.append(current_offset)
-        current_offset += max(height, 1e-6) * 1.2
+    max_height = max(height for _, _, _, _, _, height in curve_info)
+    gap = 1.2 * max(max_height, 1e-6)
 
+    plotted_stems = [stem for stem, *_ in curve_info]
+    group_lookup = group_for or {}
+    offsets, breaks = _stem_offsets_for_plot(plotted_stems, group_lookup, gap)
+
+    height_factor = len(curve_info) + 0.5 * breaks
     fig, ax = plt.subplots(
-        figsize=(6, 0.8 * max(len(curve_info), 1)),
+        figsize=(6, 0.8 * max(height_factor, 1)),
         dpi=150,
         sharex=True,
     )
 
     for offset, (stem, xs, ys, peaks, valleys, height) in zip(offsets, curve_info):
+        group_label = group_lookup.get(stem, "Default")
+        label = f"[{group_label}] {stem}" if group_label != "Default" else stem
+
         ax.plot(xs, ys + offset, color="black", lw=1)
         ax.fill_between(xs, offset, ys + offset, color="#FFA50088", lw=0)
 
@@ -921,7 +956,7 @@ def _ridge_plot_for_stems(
         ax.text(
             x_min,
             offset + 0.5 * ymax,
-            stem,
+            label,
             ha="right",
             va="center",
             fontsize=7,
@@ -1129,18 +1164,30 @@ def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) 
     st.session_state.aligned_results = aligned_results
     st.session_state.aligned_ridge_png = None
 
-    ordered_stems = _ordered_stems_for_results(use_groups=use_groups)
+    ordered_groups = (
+        sorted(group_map.items(), key=_group_sort)
+        if use_groups
+        else [("Default", list(st.session_state.results))]
+    )
+    ordered_stems = [stem for _, stems in ordered_groups for stem in stems]
+    group_for: dict[str, str] = {}
+    for group_name, stems in ordered_groups:
+        for stem in stems:
+            group_for[stem] = group_name
+
     gap = 1.2 * all_ymax
+    offsets, breaks = _stem_offsets_for_plot(ordered_stems, group_for, gap)
     fig, ax = plt.subplots(
-        figsize=(6, 0.8 * len(ordered_stems)),
+        figsize=(6, 0.8 * max(len(ordered_stems) + 0.5 * breaks, 1)),
         dpi=150,
         sharex=True,
     )
 
-    for i, stem in enumerate(ordered_stems):
+    for offset, stem in zip(offsets, ordered_stems):
         xs = xs_map.get(stem, np.asarray([]))
         ys = ys_map.get(stem, np.asarray([]))
-        offset = i * gap
+        group_label = group_for.get(stem, "Default")
+        label = f"[{group_label}] {stem}" if group_label != "Default" else stem
 
         ax.plot(xs, ys + offset, color="black", lw=1)
         ax.fill_between(xs, offset, ys + offset, color="#FFA50088", lw=0)
@@ -1152,7 +1199,9 @@ def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) 
             for v in info["valleys"]:
                 ax.vlines(v, offset, offset + ys.max(), color="grey", lw=0.8, linestyles=":")
 
-        ax.text(all_xmin - pad, offset + 0.5 * all_ymax, stem, ha="right", va="center", fontsize=7)
+        ax.text(
+            all_xmin - pad, offset + 0.5 * all_ymax, label, ha="right", va="center", fontsize=7
+        )
 
     ax.set_yticks([])
     ax.set_xlim(all_xmin - pad, all_xmax + pad)

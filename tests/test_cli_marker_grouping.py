@@ -3,7 +3,12 @@ import pandas as pd
 import pytest
 import streamlit as st
 
-from app import _align_results_by_group, _ordered_stems_for_results, _queue_cli_samples
+from app import (
+    _align_results_by_group,
+    _ordered_stems_for_results,
+    _queue_cli_samples,
+    _stem_offsets_for_plot,
+)
 
 
 def test_cli_queue_preserves_marker_labels(tmp_path):
@@ -205,3 +210,14 @@ def test_marker_grouping_invalidates_cached_ridges():
 
     assert st.session_state.raw_ridge_png is None
     assert st.session_state.aligned_ridge_png is None
+
+
+def test_group_offsets_insert_spacing_between_markers():
+    offsets, breaks = _stem_offsets_for_plot(
+        ["S1_CD3", "S2_CD3", "S3_CD4", "S4_CD4"],
+        {"S1_CD3": "cd3", "S2_CD3": "cd3", "S3_CD4": "cd4", "S4_CD4": "cd4"},
+        gap=2.0,
+    )
+
+    assert offsets == [0.0, 2.0, 5.0, 7.0]
+    assert breaks == 1

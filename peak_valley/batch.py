@@ -590,6 +590,7 @@ def run_batch(
 
             pending_samples: list[tuple[SampleInput, int]] = [(sample, 1) for sample in ordered]
             in_flight: dict[Any, tuple[SampleInput, float, int]] = {}
+            poll_interval = min(timeout, 1.0) if timeout is not None else None
 
             def _submit(pool: ThreadPoolExecutor, sample: SampleInput, attempt: int) -> None:
                 future = pool.submit(process_sample, sample, options, overrides, gpt_client)
@@ -605,26 +606,31 @@ def run_batch(
                         if not in_flight:
                             break
 
-                        wait_timeout = timeout if timeout is not None else None
+                        wait_timeout = poll_interval if timeout is not None else None
                         done, _ = wait(in_flight.keys(), timeout=wait_timeout, return_when=FIRST_COMPLETED)
 
-                        if not done and timeout is not None:
-                            # No worker finished before the timeout; resubmit the oldest task.
-                            oldest_future, (sample, _, attempt) = min(
-                                in_flight.items(), key=lambda item: item[1][1]
-                            )
-                            in_flight.pop(oldest_future, None)
-                            if not oldest_future.cancel():
-                                # The worker is still running; its late result will be ignored.
-                                pass
-                            if attempt >= 3:
-                                error = TimeoutError(
-                                    f"Sample '{sample.stem}' exceeded worker timeout after {attempt} attempt(s)."
-                                )
-                                interrupted = True
+                        if timeout is not None:
+                            now = time.monotonic()
+                            timed_out: list[tuple[Any, SampleInput, int]] = []
+                            for future, (sample, started, attempt) in list(in_flight.items()):
+                                if now - started >= timeout:
+                                    in_flight.pop(future, None)
+                                    timed_out.append((future, sample, attempt))
+
+                            for future, sample, attempt in timed_out:
+                                if not future.cancel():
+                                    # The worker is still running; its late result will be ignored.
+                                    pass
+                                if attempt >= 3:
+                                    error = TimeoutError(
+                                        f"Sample '{sample.stem}' exceeded worker timeout after {attempt} attempt(s)."
+                                    )
+                                    interrupted = True
+                                    break
+                                pending_samples.append((sample, attempt + 1))
+
+                            if interrupted:
                                 break
-                            pending_samples.append((sample, attempt + 1))
-                            continue
 
                         for future in list(done):
                             sample, _, attempt = in_flight.pop(future)

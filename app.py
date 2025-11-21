@@ -2112,37 +2112,7 @@ def _cli_assign_groups(
         st.session_state.group_overrides = overrides
         return_state = True
 
-    if mode == "marker_groups":
-        if "marker" not in subset.columns:
-            st.warning("The imported summary does not contain a 'marker' column to group by.")
-            return False
-
-        any_grouped = False
-        markers = subset["marker"].tolist()
-        for stem, marker in zip(stems, markers):
-            if not stem:
-                continue
-            label = marker if isinstance(marker, str) else ""
-            clean_label = _normalize_label_casefold(label) or _normalize_label(label)
-            if not clean_label:
-                continue
-            group_name = str(clean_label)
-            overrides.setdefault(group_name, {})
-            if assignments.get(stem) != group_name:
-                assignments[stem] = group_name
-                if stem in st.session_state.results:
-                    _mark_sample_dirty(stem, "group")
-                assignments_changed = True
-            any_grouped = True
-
-        if not any_grouped:
-            st.warning("No marker names were available to build group assignments.")
-            return False
-
-        st.session_state.group_overrides = overrides
-        st.session_state.align_group_markers = True
-        return_state = True
-    elif mode == "new_group":
+    if mode == "new_group":
         clean = (new_group or "").strip()
         if not clean:
             st.warning("Enter a group name before grouping the selected samples together.")
@@ -2435,11 +2405,10 @@ def _render_cli_import_section() -> None:
 
         st.session_state.cli_summary_selection = selection
 
-        group_choices = ["none", "align_sample", "marker_groups", "new_group"]
+        group_choices = ["none", "align_sample", "new_group"]
         group_labels = {
             "none": "No automatic grouping",
             "align_sample": "Align using sample column",
-            "marker_groups": "Group by marker name",
             "new_group": "Group selected together",
         }
         default_mode = st.session_state.get("cli_group_mode", "none")

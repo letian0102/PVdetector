@@ -195,6 +195,49 @@ def test_combined_zip_has_expected_exports(tmp_path):
     assert not (out_dir / "aligned_landmarks.csv").exists()
 
 
+def test_combined_zip_tolerates_missing_indices(tmp_path, capsys):
+    expr = pd.DataFrame(
+        {
+            "CD7": [1.0, 1.2, 1.1, 4.0, 4.2],
+        }
+    )
+    meta = pd.DataFrame({"sample": ["S1"] * 5})
+
+    expr_path = tmp_path / "expr.csv"
+    meta_path = tmp_path / "meta.csv"
+    expr.to_csv(expr_path, index=False)
+    meta.to_csv(meta_path, index=False)
+
+    sample = SampleResult(
+        stem="sample",
+        peaks=[],
+        valleys=[],
+        xs=np.array([0.0, 1.0]),
+        ys=np.array([1.0, 1.0]),
+        counts=np.array([1.0, 2.0]),
+        params={},
+        quality=1.0,
+        metadata={"sample": "S1", "marker": "CD7"},
+        cell_indices=np.array([0, 10]),
+    )
+
+    batch = BatchResults(samples=[sample])
+    out_dir = tmp_path / "outputs"
+
+    save_outputs(
+        batch,
+        out_dir,
+        run_metadata={"expression_path": expr_path, "metadata_path": meta_path},
+    )
+
+    captured = capsys.readouterr()
+    assert "metadata rows were missing" in captured.err
+    assert "expression rows were missing" in captured.err
+
+    zip_candidates = list(out_dir.glob("before_after_alignment_*.zip"))
+    assert zip_candidates, "Expected combined zip even when indices are missing"
+
+
 def test_group_marker_exports_multiple_ridges(tmp_path):
     expr = pd.DataFrame(
         {

@@ -1553,7 +1553,40 @@ def _dataset_exports(
             return None
 
     meta_subset = meta_subset.copy()
-    meta_subset = meta_subset.loc[union_indices]
+    expr_subset = expr_subset.copy()
+
+    missing_meta = [idx for idx in union_indices if idx not in meta_subset.index]
+    if missing_meta:
+        print(
+            f"[warning] {len(missing_meta)} cell metadata rows were missing; filling with blanks to complete exports.",
+            file=sys.stderr,
+        )
+        filler = pd.DataFrame(
+            {
+                col: pd.Series([np.nan] * len(missing_meta), dtype=meta_subset[col].dtype)
+                for col in meta_subset.columns
+            },
+            index=missing_meta,
+        )
+        meta_subset = pd.concat([meta_subset, filler])
+
+    missing_expr = [idx for idx in union_indices if idx not in expr_subset.index]
+    if missing_expr:
+        print(
+            f"[warning] {len(missing_expr)} expression rows were missing; filling with NaNs to complete exports.",
+            file=sys.stderr,
+        )
+        filler = pd.DataFrame(
+            {
+                col: pd.Series([np.nan] * len(missing_expr), dtype=expr_subset[col].dtype)
+                for col in expr_subset.columns
+            },
+            index=missing_expr,
+        )
+        expr_subset = pd.concat([expr_subset, filler])
+
+    meta_subset = meta_subset.reindex(union_indices)
+    expr_subset = expr_subset.reindex(union_indices)
     meta_csv = meta_subset.reset_index(drop=True).to_csv(index=False).encode()
 
     markers_available = [c for c in expr_subset.columns if c not in meta_subset.columns]

@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 import peak_valley.batch
+batch_module = peak_valley.batch
 from peak_valley.batch import (
     BatchOptions,
     BatchResults,
@@ -237,6 +238,43 @@ def test_combined_zip_tolerates_missing_indices(tmp_path, capsys):
     zip_candidates = list(out_dir.glob("before_after_alignment_*.zip"))
     assert zip_candidates, "Expected combined zip even when indices are missing"
 
+
+def test_combined_zip_skips_when_missing_rows_are_huge(tmp_path, capsys, monkeypatch):
+    expr = pd.DataFrame({"CD7": [1.0, 1.2, 1.1]})
+    meta = pd.DataFrame({"sample": ["S1"] * 3})
+
+    expr_path = tmp_path / "expr.csv"
+    meta_path = tmp_path / "meta.csv"
+    expr.to_csv(expr_path, index=False)
+    meta.to_csv(meta_path, index=False)
+
+    sample = SampleResult(
+        stem="sample",
+        peaks=[],
+        valleys=[],
+        xs=np.array([0.0, 1.0]),
+        ys=np.array([1.0, 1.0]),
+        counts=np.array([1.0, 2.0]),
+        params={},
+        quality=1.0,
+        metadata={"sample": "S1", "marker": "CD7"},
+        cell_indices=np.arange(0, 120, dtype=int),
+    )
+
+    batch = BatchResults(samples=[sample])
+    out_dir = tmp_path / "outputs"
+
+    monkeypatch.setattr(batch_module, "MAX_MISSING_EXPORT_ROWS", 50)
+
+    save_outputs(
+        batch,
+        out_dir,
+        run_metadata={"expression_path": expr_path, "metadata_path": meta_path},
+    )
+
+    captured = capsys.readouterr()
+    assert "skipping combined dataset exports" in captured.err
+    assert not list(out_dir.glob("before_after_alignment_*.zip")), "Combined zip should be skipped"
 
 def test_group_marker_exports_multiple_ridges(tmp_path):
     expr = pd.DataFrame(

@@ -42,6 +42,7 @@ RIDGE_DOWNSAMPLE_NOTE = (
     "[warning] Ridge plot export is being downsampled to keep compilation responsive; "
     "use --export-plots for per-sample PNGs if you need every curve."
 )
+MAX_MISSING_EXPORT_ROWS = 100_000
 
 try:  # optional dependency during tests
     from openai import OpenAI
@@ -1561,6 +1562,19 @@ def _dataset_exports(
     expr_subset = expr_subset.copy()
 
     missing_meta = [idx for idx in union_indices if idx not in meta_subset.index]
+    missing_expr = [idx for idx in union_indices if idx not in expr_subset.index]
+
+    total_missing = max(len(missing_meta), len(missing_expr))
+    if total_missing > MAX_MISSING_EXPORT_ROWS:
+        print(
+            (
+                f"[warning] {total_missing} dataset rows were missing; skipping combined dataset exports "
+                "to finish compilation. Check your metadata and expression inputs if you need the combined CSVs."
+            ),
+            file=sys.stderr,
+        )
+        return None
+
     if missing_meta:
         print(
             f"[warning] {len(missing_meta)} cell metadata rows were missing; filling with blanks to complete exports.",
@@ -1568,7 +1582,6 @@ def _dataset_exports(
         )
         meta_subset = meta_subset.reindex(meta_subset.index.union(missing_meta))
 
-    missing_expr = [idx for idx in union_indices if idx not in expr_subset.index]
     if missing_expr:
         print(
             f"[warning] {len(missing_expr)} expression rows were missing; filling with NaNs to complete exports.",

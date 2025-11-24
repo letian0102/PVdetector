@@ -37,6 +37,7 @@ from .quality import stain_quality
 
 
 DEFAULT_GPT_MODEL = "o4-mini"
+MAX_RIDGE_CURVES = 500
 
 try:  # optional dependency during tests
     from openai import OpenAI
@@ -1513,6 +1514,15 @@ def _ridge_plot_png(
     aligned: bool,
     group_by_marker: bool = False,
 ) -> bytes | dict[str, bytes] | None:
+    total_samples = len(samples)
+    if total_samples > MAX_RIDGE_CURVES:
+        print(
+            f"[warning] Skipping ridge plot export for {total_samples} samples "
+            f"(limit {MAX_RIDGE_CURVES}).",
+            file=sys.stderr,
+        )
+        return None
+
     if group_by_marker:
         grouped: dict[str, list[SampleResult]] = {}
         for res in samples:
@@ -1522,11 +1532,16 @@ def _ridge_plot_png(
 
         outputs: dict[str, bytes] = {}
         for group_name in sorted(grouped):
-            png = _ridge_plot_png(
-                grouped[group_name],
-                aligned=aligned,
-                group_by_marker=False,
-            )
+            group_samples = grouped[group_name]
+            if len(group_samples) > MAX_RIDGE_CURVES:
+                print(
+                    f"[warning] Skipping ridge plot export for {len(group_samples)} samples "
+                    f"in group {group_name!r} (limit {MAX_RIDGE_CURVES}).",
+                    file=sys.stderr,
+                )
+                continue
+
+            png = _ridge_plot_png(group_samples, aligned=aligned, group_by_marker=False)
             if isinstance(png, bytes):
                 outputs[group_name] = png
         return outputs or None

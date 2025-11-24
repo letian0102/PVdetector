@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import peak_valley.batch
 from peak_valley.batch import (
     BatchOptions,
     BatchResults,
@@ -631,6 +632,33 @@ def test_alignment_normalizes_landmarks(monkeypatch):
         atol=1e-9,
     )
     np.testing.assert_allclose(batch.aligned_landmarks[0], [-2.0, 0.0, 2.0], atol=1e-9)
+
+
+def test_ridge_plot_skipped_for_large_batches(capsys):
+    samples: list[SampleResult] = []
+    xs = np.linspace(0.0, 1.0, 5)
+    ys = np.linspace(0.0, 1.0, 5)
+    for idx in range(501):
+        samples.append(
+            SampleResult(
+                stem=f"S{idx}",
+                peaks=[0.25],
+                valleys=[0.75],
+                xs=xs,
+                ys=ys,
+                counts=np.array([0.1, 0.2]),
+                params={},
+                quality=1.0,
+                metadata={"marker": "CD3"},
+                arcsinh_signature=(True, 1.0, 0.2, 0.0),
+            )
+        )
+
+    output = peak_valley.batch._ridge_plot_png(samples, aligned=False)
+    captured = capsys.readouterr()
+
+    assert output is None
+    assert "skipping ridge plot export" in captured.err.lower()
 
 
 def _dummy_result(marker: str, sample: str) -> SampleResult:

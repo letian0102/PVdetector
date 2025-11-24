@@ -488,7 +488,7 @@ def test_run_batch_reports_exceeded_retries(monkeypatch, capsys):
 
     err = capsys.readouterr().err
     assert "giving up" in err
-    assert batch.interrupted is True
+    assert batch.interrupted is False
     assert batch.failed_samples == ["SlowOne"]
     assert [res.stem for res in batch.samples] == ["FastOne"]
     assert attempts["SlowOne"] == options.worker_retries + 1
@@ -541,7 +541,7 @@ def test_run_batch_does_not_block_on_exhausted_workers(monkeypatch):
     duration = time.perf_counter() - start
 
     assert duration < options.worker_timeout * 4
-    assert batch.interrupted is True
+    assert batch.interrupted is False
     assert batch.failed_samples == ["NeverReturns"]
     assert [res.stem for res in batch.samples] == ["FastOne"]
 
@@ -598,6 +598,13 @@ def test_save_outputs_after_failed_samples(monkeypatch, tmp_path, capsys):
     captured = capsys.readouterr()
     assert "compiling summary, manifest, and zip" in captured.err.lower()
     assert batch.failed_samples == [s.stem for s in samples if s.metadata.get("marker") == "Slow"]
+    assert batch.interrupted is False
+
+    error_file = out_dir / "error_samples.txt"
+    assert error_file.exists()
+    with error_file.open("r", encoding="utf-8") as fh:
+        lines = [line.strip() for line in fh.readlines() if line.strip()]
+    assert lines == batch.failed_samples
 
     summary_files = list(out_dir.glob("summary_*.csv"))
     assert summary_files

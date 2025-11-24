@@ -651,7 +651,6 @@ def run_batch(
                                     file=sys.stderr,
                                 )
                                 failed_samples.append(sample.stem)
-                                interrupted = True
                                 completed += 1
                                 if progress is not None:
                                     try:
@@ -1416,6 +1415,12 @@ def save_outputs(
 
     summary_name = f"summary_{slug}.csv"
     summary_df.to_csv(out / summary_name, index=False)
+
+    if batch.failed_samples:
+        error_path = out / "error_samples.txt"
+        with error_path.open("w", encoding="utf-8") as fh:
+            for stem in batch.failed_samples:
+                fh.write(f"{stem}\n")
 
     if export_plots:
         plots_dir = out / "plots"

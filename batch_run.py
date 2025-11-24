@@ -533,6 +533,13 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     processed = len(batch.samples)
+    if batch.failed_samples:
+        print(
+            "[warning] Some samples could not be processed and were skipped. "
+            "See error_samples.txt for details.",
+            file=sys.stderr,
+        )
+
     if batch.interrupted:
         print(
             f"[warning] Processing interrupted after {processed} of {total_requested} sample(s). "

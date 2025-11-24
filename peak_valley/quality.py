@@ -53,6 +53,17 @@ def stain_quality(counts, peaks, valleys):
     Returns a single quality score *or* np.nan.
     """
     counts = np.asarray(counts, float)
+    if counts.size > 10_000:
+        # ``np.random.choice`` without replacement partially shuffles the entire
+        # array.  For extremely large inputs this shuffle can dominate runtime
+        # for a single sample, so mirror the fast sampling guard used by the
+        # KDE/GMM helpers to keep quality scoring responsive in both the CLI and
+        # Streamlit flows.
+        rng = np.random.default_rng()
+        if counts.size > 200_000:
+            counts = rng.choice(counts, 10_000, replace=True)
+        else:
+            counts = rng.choice(counts, 10_000, replace=False)
     peaks  = [p for p in peaks  if np.isfinite(p)]
     valleys= [v for v in valleys if np.isfinite(v)]
 

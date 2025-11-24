@@ -820,7 +820,7 @@ def _refresh_raw_ridge() -> None:
     use_groups = bool(st.session_state.get("align_group_markers"))
     stems = _ordered_stems_for_results(use_groups=use_groups)
     st.session_state.raw_ridge_png = _ridge_plot_for_stems(
-        stems, st.session_state.results
+        stems, st.session_state.results, robust_limits=True
     )
 
 
@@ -865,6 +865,8 @@ def _stem_offsets_for_plot(
 def _ridge_plot_for_stems(
     stems: list[str],
     results_map: dict[str, dict[str, object]],
+    *,
+    robust_limits: bool = False,
 ) -> bytes | None:
     """Return a stacked ridge plot PNG for the provided stems."""
 
@@ -888,8 +890,25 @@ def _ridge_plot_for_stems(
     if not curve_info:
         return None
 
-    x_min = min(float(xs.min()) for _, xs, _, _, _, _ in curve_info)
-    x_max = max(float(xs.max()) for _, xs, _, _, _, _ in curve_info)
+    if robust_limits:
+        trimmed: list[tuple[float, float]] = []
+        for _, xs, _, _, _, _ in curve_info:
+            finite_xs = xs[np.isfinite(xs)]
+            if finite_xs.size == 0:
+                continue
+            low, high = np.nanquantile(finite_xs, [0.01, 0.99])
+            trimmed.append((float(low), float(high)))
+
+        if trimmed:
+            x_min = min(low for low, _ in trimmed)
+            x_max = max(high for _, high in trimmed)
+        else:
+            x_min = min(float(xs.min()) for _, xs, _, _, _, _ in curve_info)
+            x_max = max(float(xs.max()) for _, xs, _, _, _, _ in curve_info)
+    else:
+        x_min = min(float(xs.min()) for _, xs, _, _, _, _ in curve_info)
+        x_max = max(float(xs.max()) for _, xs, _, _, _, _ in curve_info)
+
     if not np.isfinite(x_min) or not np.isfinite(x_max):
         return None
 
@@ -1029,6 +1048,7 @@ def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) 
     all_xmin = np.inf
     all_xmax = -np.inf
     all_ymax = 0.0
+    trimmed_bounds: list[tuple[float, float]] = []
 
     for _, stems in sorted(group_map.items(), key=_group_sort):
         if not stems:
@@ -1095,6 +1115,10 @@ def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) 
             if xs_aligned.size:
                 all_xmin = min(all_xmin, float(xs_aligned.min()))
                 all_xmax = max(all_xmax, float(xs_aligned.max()))
+                finite_xs = xs_aligned[np.isfinite(xs_aligned)]
+                if finite_xs.size:
+                    low, high = np.nanquantile(finite_xs, [0.01, 0.99])
+                    trimmed_bounds.append((float(low), float(high)))
             if ys_aligned.size:
                 all_ymax = max(all_ymax, float(ys_aligned.max()))
 
@@ -1139,6 +1163,10 @@ def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) 
                 "ys": ys_aligned.tolist(),
             }
             landmark_rows[stem] = list(warped_lm[idx])
+
+    if trimmed_bounds:
+        all_xmin = min(low for low, _ in trimmed_bounds)
+        all_xmax = max(high for _, high in trimmed_bounds)
 
     if not np.isfinite(all_xmin) or not np.isfinite(all_xmax):
         all_xmin, all_xmax = 0.0, 1.0
@@ -4824,7 +4852,9 @@ with tab_cmp:
                 )
                 grp_col_raw, grp_col_aligned = st.columns(2, gap="small")
 
-                raw_png = _ridge_plot_for_stems(stems, st.session_state.results)
+                raw_png = _ridge_plot_for_stems(
+                    stems, st.session_state.results, robust_limits=True
+                )
                 if raw_png:
                     grp_col_raw.image(
                         raw_png,

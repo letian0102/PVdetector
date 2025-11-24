@@ -1952,7 +1952,11 @@ def ask_gpt_bandwidth(
     # down-sample for speed and avoid huge prompts
     x = counts_full.astype("float64")
     if x.size > 2000:
-        x = np.random.choice(x, 2000, replace=False)
+        rng = np.random.default_rng()
+        if x.size > 200_000:
+            x = rng.choice(x, 2000, replace=True)
+        else:
+            x = rng.choice(x, 2000, replace=False)
 
     # evaluate a small grid of candidate bandwidth scale factors
     scales = np.round(np.linspace(0.10, 0.50, 9), 2)

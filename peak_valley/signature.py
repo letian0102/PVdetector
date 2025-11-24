@@ -15,7 +15,11 @@ def shape_signature(counts: np.ndarray) -> str:
     """
     x = counts.astype("float32")
     if x.size > 2000:                         # subsample for speed
-        x = np.random.choice(x, 2000, False)
+        rng = np.random.default_rng()
+        if x.size > 200_000:
+            x = rng.choice(x, 2000, replace=True)
+        else:
+            x = rng.choice(x, 2000, replace=False)
     x = (x - x.mean()) / x.std(ddof=1)        # z-score
     hist, _ = np.histogram(x, bins=16, range=(-4, 4), density=True)
     qs = np.percentile(x, [25, 50, 75]) / 10  # keep <1 in magnitude

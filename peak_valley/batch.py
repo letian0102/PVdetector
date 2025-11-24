@@ -14,8 +14,9 @@ import json
 import math
 import re
 import zipfile
+import time
 from collections.abc import Mapping as MappingABC
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 
@@ -113,6 +114,7 @@ class BatchOptions:
     group_by_marker: bool = False
 
     workers: int = 1
+    worker_timeout: Optional[float] = 30.0
 
     # GPT integration
     gpt_model: Optional[str] = None
@@ -136,6 +138,7 @@ class BatchResults:
     target_landmarks: Optional[Sequence[float]] = None
     interrupted: bool = False
     group_by_marker: bool = False
+    failed_samples: list[dict[str, str]] = field(default_factory=list)
 
 
 class BatchProgress(Protocol):
@@ -552,6 +555,10 @@ def run_batch(
     total = len(ordered)
     completed = 0
     interrupted = False
+    failed_samples: list[dict[str, str]] = []
+    abort_run = False
+    serial_pending: list[SampleInput] = []
+    serial_pending_stems: set[str] = set()
 
     if progress is not None:
         try:
@@ -575,48 +582,161 @@ def run_batch(
             except Exception:
                 progress = None
 
+    def _mark_failed(stem: str, reason: str) -> None:
+        nonlocal completed, progress, interrupted
+        failed_samples.append({"stem": stem, "reason": reason})
+        interrupted = True
+        if stem in seen_stems:
+            return
+        seen_stems.add(stem)
+        completed += 1
+        if progress is not None:
+            try:
+                progress.advance(stem, completed, total)
+            except Exception:
+                progress = None
+
     aligned_landmarks: Optional[np.ndarray] = None
 
     try:
         if options.workers and options.workers > 1:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
             error: BaseException | None = None
-            with ThreadPoolExecutor(max_workers=options.workers) as pool:
-                future_map = {
-                    pool.submit(process_sample, sample, options, overrides, gpt_client): sample
-                    for sample in ordered
-                }
-                try:
-                    for future in as_completed(future_map):
-                        sample = future_map[future]
+            timeout = None
+            if options.worker_timeout is not None and options.worker_timeout > 0:
+                timeout = float(options.worker_timeout)
+
+            pending_samples: list[tuple[SampleInput, int]] = [(sample, 1) for sample in ordered]
+            in_flight: dict[Any, tuple[SampleInput, float, int]] = {}
+            poll_interval = min(timeout, 1.0) if timeout is not None else None
+
+            def _submit(pool: ThreadPoolExecutor, sample: SampleInput, attempt: int) -> None:
+                future = pool.submit(process_sample, sample, options, overrides, gpt_client)
+                in_flight[future] = (sample, time.monotonic(), attempt)
+
+            pool = ThreadPoolExecutor(max_workers=options.workers)
+            abandoned: list[Any] = []
+            try:
+                while pending_samples or in_flight:
+                    if abort_run:
+                        break
+
+                    while pending_samples and len(in_flight) < options.workers:
+                        sample, attempt = pending_samples.pop(0)
+                        _submit(pool, sample, attempt)
+
+                    if not in_flight:
+                        break
+
+                    wait_timeout = poll_interval if timeout is not None else None
+                    done, _ = wait(in_flight.keys(), timeout=wait_timeout, return_when=FIRST_COMPLETED)
+
+                    if timeout is not None:
+                        now = time.monotonic()
+                        timed_out: list[tuple[Any, SampleInput, int]] = []
+                        for future, (sample, started, attempt) in list(in_flight.items()):
+                            if now - started >= timeout:
+                                in_flight.pop(future, None)
+                                timed_out.append((future, sample, attempt))
+
+                        for future, sample, attempt in timed_out:
+                            abandoned.append(future)
+                            if not future.cancel():
+                                # The worker is still running; its late result will be ignored.
+                                pass
+                            if attempt >= 3:
+                                if sample.stem not in serial_pending_stems:
+                                    serial_pending_stems.add(sample.stem)
+                                    serial_pending.append(sample)
+                                continue
+                            pending_samples.append((sample, attempt + 1))
+
+                    for future in list(done):
+                        info = in_flight.pop(future, None)
+                        if info is None:
+                            abandoned.append(future)
+                            continue
+                        sample, _, attempt = info
                         try:
                             res = future.result()
                         except KeyboardInterrupt:
                             interrupted = True
+                            abort_run = True
                             break
                         except BaseException as exc:  # capture other errors to re-raise later
+                            if timeout is not None and attempt < 3:
+                                pending_samples.append((sample, attempt + 1))
+                                continue
+                            if timeout is not None and isinstance(exc, TimeoutError):
+                                if sample.stem not in serial_pending_stems:
+                                    serial_pending_stems.add(sample.stem)
+                                    serial_pending.append(sample)
+                                continue
                             error = exc
                             interrupted = True
+                            abort_run = True
                             break
                         _append_result(res)
-                except KeyboardInterrupt:
-                    interrupted = True
-                finally:
-                    if interrupted:
-                        for future, sample in future_map.items():
-                            if future.done():
-                                try:
-                                    res = future.result()
-                                except KeyboardInterrupt:
-                                    continue
-                                except BaseException:
-                                    continue
-                                _append_result(res)
-                            else:
-                                future.cancel()
+            except KeyboardInterrupt:
+                interrupted = True
+                abort_run = True
+            finally:
+                for future, (sample, _, _) in list(in_flight.items()):
+                    if future.done():
+                        try:
+                            res = future.result()
+                        except BaseException:
+                            continue
+                        _append_result(res)
+                    else:
+                        future.cancel()
+                        abandoned.append(future)
+
+                for future in abandoned:
+                    if not future.done():
+                        future.cancel()
+
+                try:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                except TypeError:  # Python < 3.9 compatibility
+                    pool.shutdown(wait=False)
             if error is not None:
                 raise error
+            if not abort_run and serial_pending:
+                serial_timeout = timeout if timeout is not None and timeout > 0 else None
+
+                def _run_serial(sample: SampleInput) -> SampleResult:
+                    if serial_timeout is None:
+                        return process_sample(sample, options, overrides, gpt_client)
+
+                    from concurrent.futures import ThreadPoolExecutor
+
+                    with ThreadPoolExecutor(max_workers=1) as serial_pool:
+                        future = serial_pool.submit(
+                            process_sample, sample, options, overrides, gpt_client
+                        )
+                        return future.result(timeout=serial_timeout)
+
+                for sample in serial_pending:
+                    if interrupted:
+                        break
+                    try:
+                        res = _run_serial(sample)
+                    except KeyboardInterrupt:
+                        interrupted = True
+                        abort_run = True
+                        break
+                    except TimeoutError:
+                        _mark_failed(
+                            sample.stem,
+                            "failed after serial fallback timeout",
+                        )
+                        continue
+                    except BaseException as exc:
+                        _mark_failed(sample.stem, f"failed after serial fallback: {exc}")
+                        continue
+                    _append_result(res)
         else:
             for sample in ordered:
                 if interrupted:
@@ -802,6 +922,7 @@ def run_batch(
         target_landmarks=options.target_landmarks,
         interrupted=interrupted,
         group_by_marker=bool(options.group_by_marker),
+        failed_samples=failed_samples,
     )
 
 
@@ -890,6 +1011,7 @@ def collect_dataset_samples(
         markers_sel = [m for m in markers_sel if str(m).lower() not in marker_excludes]
 
     sample_values = meta_df["sample"].astype(str).tolist()
+
     sample_sel = samples_filter if samples_filter else sorted(set(sample_values))
     if exclude_samples:
         sample_excludes = {str(s).lower() for s in exclude_samples}
@@ -1150,6 +1272,9 @@ def results_to_dict(batch: BatchResults) -> dict[str, Any]:
     payload["group_by_marker"] = bool(batch.group_by_marker)
 
     payload["interrupted"] = bool(batch.interrupted)
+
+    if getattr(batch, "failed_samples", None):
+        payload["failed_samples"] = list(batch.failed_samples)
 
     if batch.aligned_landmarks is not None:
         payload["aligned_landmarks"] = _jsonify(batch.aligned_landmarks)

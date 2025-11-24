@@ -38,6 +38,10 @@ from .quality import stain_quality
 
 DEFAULT_GPT_MODEL = "o4-mini"
 MAX_RIDGE_CURVES = 500
+RIDGE_DOWNSAMPLE_NOTE = (
+    "[warning] Ridge plot export is being downsampled to keep compilation responsive; "
+    "use --export-plots for per-sample PNGs if you need every curve."
+)
 
 try:  # optional dependency during tests
     from openai import OpenAI
@@ -642,7 +646,8 @@ def run_batch(
                             if attempt > max(0, options.worker_retries):
                                 print(
                                     f"[warning] Sample {sample.stem} exceeded worker timeout {timeout:.1f}s "
-                                    f"after {attempt} attempt(s); giving up.",
+                                    f"after {attempt} attempt(s); giving up. "
+                                    f"cells={sample.counts.size}, grid_size={options.grid_size}",
                                     file=sys.stderr,
                                 )
                                 failed_samples.append(sample.stem)
@@ -655,11 +660,13 @@ def run_batch(
                                         progress = None
                                 continue
 
-                            print(
+                            msg = (
                                 f"[warning] Worker processing {sample.stem} exceeded {timeout:.1f}s; "
-                                f"retrying ({attempt}/{options.worker_retries}).",
-                                file=sys.stderr,
+                                f"retrying ({attempt}/{options.worker_retries})."
                             )
+                            if sample.counts.size > 50_000:
+                                msg += " Large cell count detected; consider increasing --worker-timeout."
+                            print(msg, file=sys.stderr)
                             _submit_sample(pool, sample, future_map, pending, start_times)
                         continue
 
@@ -1095,6 +1102,97 @@ def _sanitize_group_label(label: str | None) -> str:
     return clean or "group"
 
 
+def _probe_csv_columns(path: str | Path) -> list[str] | None:
+    try:
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path) as archive:
+                members = [
+                    name
+                    for name in archive.namelist()
+                    if name.lower().endswith(".csv") and not name.endswith("/")
+                ]
+                members.sort()
+                if not members:
+                    return None
+                with archive.open(members[0]) as fh:
+                    return list(pd.read_csv(fh, nrows=0).columns)
+        return list(pd.read_csv(path, nrows=0).columns)
+    except Exception:
+        return None
+
+
+def _iter_csv_chunks(
+    path: str | Path,
+    *,
+    usecols: Sequence[str] | None,
+    low_memory: bool,
+    chunksize: int = 50_000,
+):
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            members = [
+                name
+                for name in archive.namelist()
+                if name.lower().endswith(".csv") and not name.endswith("/")
+            ]
+            members.sort()
+            offset = 0
+            for name in members:
+                with archive.open(name) as fh:
+                    for chunk in pd.read_csv(
+                        fh,
+                        usecols=usecols,
+                        low_memory=low_memory,
+                        chunksize=chunksize,
+                    ):
+                        yield offset, chunk
+                        offset += len(chunk)
+            return
+
+    offset = 0
+    for chunk in pd.read_csv(
+        path, usecols=usecols, low_memory=low_memory, chunksize=chunksize
+    ):
+        yield offset, chunk
+        offset += len(chunk)
+
+
+def _collect_rows_by_index(
+    path: str | Path,
+    indices: Sequence[int],
+    *,
+    usecols: Sequence[str] | None = None,
+    low_memory: bool = False,
+) -> pd.DataFrame:
+    if not indices:
+        return pd.DataFrame()
+
+    remaining = set(int(i) for i in indices)
+    parts: list[pd.DataFrame] = []
+
+    for offset, chunk in _iter_csv_chunks(
+        path, usecols=usecols, low_memory=low_memory, chunksize=50_000
+    ):
+        global_index = chunk.index.to_numpy() + offset
+        mask = np.isin(global_index, list(remaining))
+        if not mask.any():
+            continue
+
+        selected = chunk.loc[mask].copy()
+        selected.insert(0, "__pv_index__", global_index[mask])
+        parts.append(selected)
+        remaining.difference_update(global_index[mask].tolist())
+        if not remaining:
+            break
+
+    if not parts:
+        return pd.DataFrame()
+
+    combined = pd.concat(parts, ignore_index=True)
+    combined.set_index("__pv_index__", inplace=True)
+    return combined
+
+
 def _sanitize_stem_value(value: str) -> str:
     """Return a filesystem-safe value suitable for sample stems."""
 
@@ -1414,12 +1512,6 @@ def _dataset_exports(
     if not expr_path or not meta_path:
         return None
 
-    try:
-        expr_df, _ = load_combined_csv(expr_path, low_memory=False)
-        meta_df, _ = load_combined_csv(meta_path, low_memory=False)
-    except Exception:
-        return None
-
     dataset_results = [res for res in batch.samples if res.cell_indices is not None]
     if not dataset_results:
         return None
@@ -1440,10 +1532,31 @@ def _dataset_exports(
     if not union_indices:
         return None
 
-    meta_subset = meta_df.loc[union_indices].copy()
+    try:
+        meta_subset = _collect_rows_by_index(meta_path, union_indices, low_memory=False)
+        expr_columns = _probe_csv_columns(expr_path)
+        markers_to_load = [m for m in markers_order if expr_columns is None or m in expr_columns]
+        expr_usecols = markers_to_load
+        if expr_columns and "cell_id" in expr_columns:
+            expr_usecols = markers_to_load + ["cell_id"]
+        expr_subset = _collect_rows_by_index(
+            expr_path,
+            union_indices,
+            usecols=expr_usecols if expr_usecols else None,
+            low_memory=False,
+        )
+    except Exception:
+        try:
+            expr_subset, _ = load_combined_csv(expr_path, low_memory=False)
+            meta_subset, _ = load_combined_csv(meta_path, low_memory=False)
+        except Exception:
+            return None
+
+    meta_subset = meta_subset.copy()
+    meta_subset = meta_subset.loc[union_indices]
     meta_csv = meta_subset.reset_index(drop=True).to_csv(index=False).encode()
 
-    markers_available = [c for c in expr_df.columns if c not in meta_df.columns]
+    markers_available = [c for c in expr_subset.columns if c not in meta_subset.columns]
     ordered_markers = [m for m in markers_available if m in markers_order]
     for marker in markers_order:
         if marker not in ordered_markers:
@@ -1473,8 +1586,8 @@ def _dataset_exports(
     expr_before = expr_before.loc[union_indices]
     expr_after = expr_after.loc[union_indices]
 
-    if "cell_id" in expr_df.columns:
-        cell_ids = expr_df.loc[union_indices, "cell_id"].to_numpy()
+    if "cell_id" in expr_subset.columns:
+        cell_ids = expr_subset.loc[union_indices, "cell_id"].to_numpy()
         expr_before.insert(0, "cell_id", cell_ids)
         expr_after.insert(0, "cell_id", cell_ids)
 
@@ -1516,12 +1629,14 @@ def _ridge_plot_png(
 ) -> bytes | dict[str, bytes] | None:
     total_samples = len(samples)
     if total_samples > MAX_RIDGE_CURVES:
+        step = math.ceil(total_samples / MAX_RIDGE_CURVES)
+        samples = samples[::step]
+        total_samples = len(samples)
         print(
-            f"[warning] Skipping ridge plot export for {total_samples} samples "
-            f"(limit {MAX_RIDGE_CURVES}).",
+            f"[warning] Downsampling ridge plot export to {total_samples} of "
+            f"{total_samples * step} samples to avoid hangs. {RIDGE_DOWNSAMPLE_NOTE}",
             file=sys.stderr,
         )
-        return None
 
     if group_by_marker:
         grouped: dict[str, list[SampleResult]] = {}
@@ -1534,12 +1649,13 @@ def _ridge_plot_png(
         for group_name in sorted(grouped):
             group_samples = grouped[group_name]
             if len(group_samples) > MAX_RIDGE_CURVES:
+                step = math.ceil(len(group_samples) / MAX_RIDGE_CURVES)
+                group_samples = group_samples[::step]
                 print(
-                    f"[warning] Skipping ridge plot export for {len(group_samples)} samples "
-                    f"in group {group_name!r} (limit {MAX_RIDGE_CURVES}).",
+                    f"[warning] Downsampling ridge plot export for group {group_name!r} "
+                    f"to {len(group_samples)} curves. {RIDGE_DOWNSAMPLE_NOTE}",
                     file=sys.stderr,
                 )
-                continue
 
             png = _ridge_plot_png(group_samples, aligned=aligned, group_by_marker=False)
             if isinstance(png, bytes):

@@ -657,8 +657,78 @@ def test_ridge_plot_skipped_for_large_batches(capsys):
     output = peak_valley.batch._ridge_plot_png(samples, aligned=False)
     captured = capsys.readouterr()
 
-    assert output is None
-    assert "skipping ridge plot export" in captured.err.lower()
+    assert isinstance(output, (bytes, dict))
+    assert "downsampling ridge plot export" in captured.err.lower()
+
+
+def test_dataset_export_streams_large_inputs(tmp_path):
+    meta_df = pd.DataFrame(
+        {
+            "sample": ["s1", "s2", "s3", "s4"],
+            "batch": ["b1", "b1", "b2", "b2"],
+            "cell_id": ["c0", "c1", "c2", "c3"],
+        }
+    )
+
+    expr_part_a = pd.DataFrame({"CD3": [1.0, 2.0], "CD4": [0.1, 0.2], "cell_id": ["c0", "c1"]})
+    expr_part_b = pd.DataFrame({"CD3": [3.0, 4.0], "CD4": [0.3, 0.4], "cell_id": ["c2", "c3"]})
+
+    meta_path = tmp_path / "meta.csv"
+    meta_df.to_csv(meta_path, index=False)
+
+    expr_zip = tmp_path / "expr.zip"
+    with zipfile.ZipFile(expr_zip, "w") as archive:
+        archive.writestr("expr_a.csv", expr_part_a.to_csv(index=False))
+        archive.writestr("expr_b.csv", expr_part_b.to_csv(index=False))
+
+    res_one = SampleResult(
+        stem="S1",
+        peaks=[0.1],
+        valleys=[0.2],
+        xs=np.array([0.0, 1.0]),
+        ys=np.array([0.1, 0.2]),
+        counts=np.array([1.0, 4.0]),
+        params={},
+        quality=1.0,
+        metadata={"marker": "CD3"},
+        cell_indices=np.array([0, 3]),
+        arcsinh_signature=(True, 1.0, 0.2, 0.0),
+    )
+    res_two = SampleResult(
+        stem="S2",
+        peaks=[0.1],
+        valleys=[0.2],
+        xs=np.array([0.0, 1.0]),
+        ys=np.array([0.1, 0.2]),
+        counts=np.array([0.3]),
+        params={},
+        quality=1.0,
+        metadata={"marker": "CD4"},
+        cell_indices=np.array([2]),
+        arcsinh_signature=(True, 1.0, 0.2, 0.0),
+    )
+
+    batch = BatchResults(samples=[res_one, res_two])
+    exports = peak_valley.batch._dataset_exports(
+        batch,
+        {
+            "expression_path": str(expr_zip),
+            "metadata_path": str(meta_path),
+        },
+    )
+
+    assert exports is not None
+    meta_export = pd.read_csv(io.BytesIO(exports["meta"]))
+    expr_export = pd.read_csv(io.BytesIO(exports["expr_before"]))
+
+    expected_meta = meta_df.loc[[0, 3, 2]].reset_index(drop=True)
+    pd.testing.assert_frame_equal(meta_export, expected_meta)
+
+    assert list(expr_export.columns)[:3] == ["cell_id", "CD3", "CD4"]
+    assert expr_export.loc[0, "CD3"] == 1.0
+    assert expr_export.loc[1, "CD3"] == 4.0
+    assert expr_export.loc[2, "CD4"] == 0.3
+    assert exports["expr_after"] is None
 
 
 def _dummy_result(marker: str, sample: str) -> SampleResult:

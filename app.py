@@ -912,25 +912,113 @@ def _ridge_plot_for_stems(
     if not np.isfinite(x_min) or not np.isfinite(x_max):
         return None
 
+    dx_samples: list[float] = []
+    trimmed_lows: list[float] = []
+    trimmed_highs: list[float] = []
+    for _, xs, ys, _, _, _ in curve_info:
+        finite_mask = np.isfinite(xs) & np.isfinite(ys)
+        xs_finite = np.asarray(xs[finite_mask], float)
+        ys_finite = np.asarray(ys[finite_mask], float)
+        if xs_finite.size < 2:
+            continue
+
+        order = np.argsort(xs_finite)
+        xs_sorted = xs_finite[order]
+        ys_sorted = np.clip(ys_finite[order], 0.0, None)
+
+        diffs = np.diff(xs_sorted)
+        finite_diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+        if finite_diffs.size:
+            dx_samples.append(float(np.quantile(finite_diffs, 0.2)))
+
+        avg_heights = 0.5 * (ys_sorted[:-1] + ys_sorted[1:])
+        contributions = diffs * avg_heights
+        cumulative = np.concatenate(([0.0], np.cumsum(contributions)))
+        total_area = float(cumulative[-1]) if cumulative.size else 0.0
+        if total_area <= 0:
+            trimmed_lows.append(float(xs_sorted[0]))
+            trimmed_highs.append(float(xs_sorted[-1]))
+            continue
+
+        low_quantile = total_area * 0.001
+        high_quantile = total_area * (1 - 0.001)
+        try:
+            x_low = float(np.interp(low_quantile, cumulative, xs_sorted))
+            x_high = float(np.interp(high_quantile, cumulative, xs_sorted))
+        except ValueError:
+            x_low = float(xs_sorted[0])
+            x_high = float(xs_sorted[-1])
+
+        trimmed_lows.append(x_low)
+        trimmed_highs.append(x_high)
+
+    if trimmed_lows and trimmed_highs:
+        trimmed_min = min(trimmed_lows)
+        trimmed_max = max(trimmed_highs)
+        if np.isfinite(trimmed_min) and np.isfinite(trimmed_max) and trimmed_max > trimmed_min:
+            x_min, x_max = trimmed_min, trimmed_max
+
+    heights = np.array([height for *_, height in curve_info], dtype=float)
+    finite_heights = heights[np.isfinite(heights) & (heights > 0)]
+    if finite_heights.size:
+        height_cap = float(np.quantile(finite_heights, 0.9))
+        height_cap = max(height_cap, 1e-6)
+    else:
+        height_cap = 1.0
+
+    scaled_curves: list[
+        tuple[str, np.ndarray, np.ndarray, list[float], list[float], float]
+    ] = []
+    for stem, xs, ys, peaks, valleys, height in curve_info:
+        scale = 1.0
+        if height > 0 and np.isfinite(height_cap) and height_cap > 0:
+            scale = min(1.0, height_cap / height)
+        ys_scaled = ys * scale
+        scaled_height = max(float(np.nanmax(ys_scaled)), 1e-6)
+        scaled_curves.append((stem, xs, ys_scaled, peaks, valleys, scaled_height))
+
     if x_max == x_min:
         span = abs(x_min) if x_min != 0 else 1.0
-        pad = 0.05 * span
+        pad = 0.005 * span
     else:
-        pad = 0.05 * (x_max - x_min)
+        span = max(x_max - x_min, 1e-9)
+        base_pad = span * 0.003
+        if not np.isfinite(base_pad) or base_pad <= 0:
+            base_pad = 1e-6
 
-    offsets: list[float] = []
-    current_offset = 0.0
-    for _, _, _, _, _, height in curve_info:
-        offsets.append(current_offset)
-        current_offset += max(height, 1e-6) * 1.2
+        pad = base_pad
+        if dx_samples:
+            typical_dx = float(np.median(dx_samples))
+        else:
+            typical_dx = float("nan")
+
+        if np.isfinite(typical_dx) and typical_dx > 0:
+            pad = min(pad, max(typical_dx * 0.5, 1e-6))
+
+        pad = max(pad, 1e-6)
 
     fig, ax = plt.subplots(
-        figsize=(6, 0.8 * max(len(curve_info), 1)),
+        figsize=(6, 0.6 * max(len(scaled_curves), 1)),
         dpi=150,
         sharex=True,
     )
 
-    for offset, (stem, xs, ys, peaks, valleys, height) in zip(offsets, curve_info):
+    height_values = np.asarray([height for *_, height in scaled_curves], dtype=float)
+    finite_height_values = height_values[np.isfinite(height_values) & (height_values > 0)]
+    if finite_height_values.size:
+        max_height_val = float(finite_height_values.max())
+    else:
+        max_height_val = 1.0
+
+    if not np.isfinite(max_height_val) or max_height_val <= 0:
+        max_height_val = 1.0
+
+    vertical_step = max(max_height_val * 1.15, 1e-3)
+    offsets = np.arange(len(scaled_curves), dtype=float) * vertical_step
+
+    label_positions: list[float] = []
+
+    for offset, (stem, xs, ys, peaks, valleys, height) in zip(offsets, scaled_curves):
         ax.plot(xs, ys + offset, color="black", lw=1)
         ax.fill_between(xs, offset, ys + offset, color="#FFA50088", lw=0)
 
@@ -959,18 +1047,48 @@ def _ridge_plot_for_stems(
                     linestyles=":",
                 )
 
-        ax.text(
-            x_min,
-            offset + 0.5 * ymax,
-            stem,
-            ha="right",
-            va="center",
-            fontsize=7,
-        )
+        label_positions.append(offset + 0.5 * ymax)
 
-    ax.set_yticks([])
+    if label_positions:
+        ax.set_yticks(label_positions)
+        ax.set_yticklabels([stem for stem, *_ in scaled_curves], fontsize=8)
+        ax.tick_params(axis="y", which="both", length=0, pad=8)
+    else:
+        ax.set_yticks([])
+
+    ax.spines["left"].set_visible(False)
     ax.set_xlim(x_min - pad, x_max + pad)
-    fig.tight_layout()
+    if offsets.size:
+        height_array = np.asarray([height for *_, height in scaled_curves], dtype=float)
+        if height_array.size:
+            height_array[~np.isfinite(height_array)] = 0.0
+            last_height = float(height_array[-1])
+        else:
+            last_height = 0.0
+        y_bottom = float(offsets[0])
+        y_top = float(offsets[-1] + last_height)
+    else:
+        height_array = np.array([], dtype=float)
+        last_height = 0.0
+        y_bottom = 0.0
+        y_top = 1.0
+
+    if not np.isfinite(y_bottom):
+        y_bottom = 0.0
+    if not np.isfinite(y_top) or y_top <= y_bottom:
+        y_top = y_bottom + 1.0
+
+    y_margin = max(max_height_val * 0.08, vertical_step * 0.05, 1e-3)
+    y_bottom -= y_margin
+    y_top += y_margin
+
+    ax.set_ylim(y_bottom, y_top)
+    ax.invert_yaxis()
+    ax.margins(y=0)
+    ax.tick_params(axis="x", labelsize=8)
+    ax.grid(False)
+
+    fig.tight_layout(pad=0.2)
 
     png = fig_to_png(fig)
     plt.close(fig)

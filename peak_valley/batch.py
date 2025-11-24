@@ -704,15 +704,35 @@ def run_batch(
             if error is not None:
                 raise error
             if not abort_run and serial_pending:
+                serial_timeout = timeout if timeout is not None and timeout > 0 else None
+
+                def _run_serial(sample: SampleInput) -> SampleResult:
+                    if serial_timeout is None:
+                        return process_sample(sample, options, overrides, gpt_client)
+
+                    from concurrent.futures import ThreadPoolExecutor
+
+                    with ThreadPoolExecutor(max_workers=1) as serial_pool:
+                        future = serial_pool.submit(
+                            process_sample, sample, options, overrides, gpt_client
+                        )
+                        return future.result(timeout=serial_timeout)
+
                 for sample in serial_pending:
                     if interrupted:
                         break
                     try:
-                        res = process_sample(sample, options, overrides, gpt_client)
+                        res = _run_serial(sample)
                     except KeyboardInterrupt:
                         interrupted = True
                         abort_run = True
                         break
+                    except TimeoutError:
+                        _mark_failed(
+                            sample.stem,
+                            "failed after serial fallback timeout",
+                        )
+                        continue
                     except BaseException as exc:
                         _mark_failed(sample.stem, f"failed after serial fallback: {exc}")
                         continue

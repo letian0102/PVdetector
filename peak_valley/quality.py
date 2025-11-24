@@ -2,6 +2,11 @@
 import numpy as np
 from scipy.stats import gaussian_kde
 
+# Limit the number of points used when estimating quality so that extremely
+# large samples cannot stall the detector.  The cap keeps per-sample runtime
+# bounded without materially changing the score for typical inputs.
+_QUALITY_SAMPLE_LIMIT = 50_000
+
 def _fallback_valley(peaks):
     """
     Very coarse guess for a missing first valley so that a score
@@ -53,6 +58,10 @@ def stain_quality(counts, peaks, valleys):
     Returns a single quality score *or* np.nan.
     """
     counts = np.asarray(counts, float)
+    if counts.size > _QUALITY_SAMPLE_LIMIT:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(counts.size, _QUALITY_SAMPLE_LIMIT, replace=False)
+        counts = counts[idx]
     peaks  = [p for p in peaks  if np.isfinite(p)]
     valleys= [v for v in valleys if np.isfinite(v)]
 

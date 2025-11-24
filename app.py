@@ -1048,6 +1048,7 @@ def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) 
     all_xmin = np.inf
     all_xmax = -np.inf
     all_ymax = 0.0
+    trimmed_bounds: list[tuple[float, float]] = []
 
     for _, stems in sorted(group_map.items(), key=_group_sort):
         if not stems:
@@ -1114,6 +1115,10 @@ def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) 
             if xs_aligned.size:
                 all_xmin = min(all_xmin, float(xs_aligned.min()))
                 all_xmax = max(all_xmax, float(xs_aligned.max()))
+                finite_xs = xs_aligned[np.isfinite(xs_aligned)]
+                if finite_xs.size:
+                    low, high = np.nanquantile(finite_xs, [0.01, 0.99])
+                    trimmed_bounds.append((float(low), float(high)))
             if ys_aligned.size:
                 all_ymax = max(all_ymax, float(ys_aligned.max()))
 
@@ -1158,6 +1163,10 @@ def _align_results_by_group(*, align_mode: str, target_vec: list[float] | None) 
                 "ys": ys_aligned.tolist(),
             }
             landmark_rows[stem] = list(warped_lm[idx])
+
+    if trimmed_bounds:
+        all_xmin = min(low for low, _ in trimmed_bounds)
+        all_xmax = max(high for _, high in trimmed_bounds)
 
     if not np.isfinite(all_xmin) or not np.isfinite(all_xmax):
         all_xmin, all_xmax = 0.0, 1.0

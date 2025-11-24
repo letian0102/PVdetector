@@ -1,5 +1,6 @@
 import io
 import json
+import time
 import zipfile
 from pathlib import Path
 
@@ -119,6 +120,72 @@ def test_run_batch_on_counts(tmp_path):
         manifest = json.load(fh)
     assert manifest["samples"], "Manifest should include sample entries"
     assert manifest.get("interrupted") is False
+
+    error_file = out_dir / "error_samples.txt"
+    assert error_file.exists(), "Error sample log should always be written"
+    assert error_file.read_text(encoding="utf-8").strip() == ""
+
+
+def test_timeout_skips_samples_and_logs(tmp_path, monkeypatch):
+    options = BatchOptions(apply_arcsinh=False, sample_timeout=0.05)
+
+    samples = [
+        SampleInput(
+            stem="fast",
+            counts=np.array([1.0, 2.0]),
+            metadata={},
+            arcsinh_signature=options.arcsinh_signature(),
+        ),
+        SampleInput(
+            stem="slow",
+            counts=np.array([1.0, 2.0]),
+            metadata={},
+            arcsinh_signature=options.arcsinh_signature(),
+        ),
+    ]
+
+    def fake_process(sample, _options, _overrides, _client):
+        if sample.stem == "slow":
+            time.sleep(0.2)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[1.0],
+            valleys=[0.5],
+            xs=np.array([0.0, 1.0]),
+            ys=np.array([0.1, 0.2]),
+            counts=sample.counts,
+            params={
+                "bw": 1.0,
+                "prom": 0.1,
+                "n_peaks": 1,
+                "max_peaks": 3,
+                "min_width": 0,
+                "curvature": 0.0001,
+                "turning_points": False,
+                "min_separation": 0.5,
+                "grid_size": 20_000,
+                "valley_drop": 10.0,
+                "first_valley": "slope",
+            },
+            quality=1.0,
+            metadata=sample.metadata,
+            arcsinh_signature=sample.arcsinh_signature,
+        )
+
+    for idx, sample in enumerate(samples):
+        sample.order = idx
+
+    monkeypatch.setattr("peak_valley.batch.process_sample", fake_process)
+
+    batch = run_batch(samples, options)
+    assert [res.stem for res in batch.samples] == ["fast"]
+    assert batch.failed_samples == ["slow"]
+
+    out_dir = tmp_path / "outputs"
+    save_outputs(batch, out_dir)
+
+    error_lines = (out_dir / "error_samples.txt").read_text(encoding="utf-8").splitlines()
+    assert error_lines == ["slow"]
 
 
 def test_combined_zip_has_expected_exports(tmp_path):

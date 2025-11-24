@@ -774,6 +774,54 @@ def test_dataset_export_streams_large_inputs(tmp_path):
     assert exports["expr_after"] is None
 
 
+def test_dataset_export_fills_missing_meta_with_nan(tmp_path, capsys):
+    meta_df = pd.DataFrame(
+        {
+            "sample": ["s1", "s2"],
+            "batch_id": [1, 2],
+            "cell_id": ["c0", "c1"],
+        }
+    )
+
+    expr_df = pd.DataFrame({"CD3": [1.0, 2.0], "cell_id": ["c0", "c1"]})
+
+    meta_path = tmp_path / "meta.csv"
+    expr_path = tmp_path / "expr.csv"
+    meta_df.to_csv(meta_path, index=False)
+    expr_df.to_csv(expr_path, index=False)
+
+    result = SampleResult(
+        stem="S1",
+        peaks=[0.1],
+        valleys=[0.2],
+        xs=np.array([0.0, 1.0]),
+        ys=np.array([0.1, 0.2]),
+        counts=np.array([1.0, 4.0]),
+        params={},
+        quality=1.0,
+        metadata={"marker": "CD3"},
+        cell_indices=np.array([0, 5]),
+        arcsinh_signature=(True, 1.0, 0.2, 0.0),
+    )
+
+    batch = BatchResults(samples=[result])
+    exports = peak_valley.batch._dataset_exports(
+        batch,
+        {"expression_path": str(expr_path), "metadata_path": str(meta_path)},
+    )
+
+    assert exports is not None
+
+    meta_export = pd.read_csv(io.BytesIO(exports["meta"]))
+    expr_export = pd.read_csv(io.BytesIO(exports["expr_before"]))
+    warn_output = capsys.readouterr().err.lower()
+
+    assert "metadata rows were missing" in warn_output
+    assert meta_export.shape[0] == 2
+    assert expr_export.shape[0] == 2
+    assert pd.isna(meta_export.loc[1, "sample"])
+
+
 def _dummy_result(marker: str, sample: str) -> SampleResult:
     return SampleResult(
         stem=f"{sample}_{marker}",

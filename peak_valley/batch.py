@@ -13,9 +13,11 @@ import io
 import json
 import math
 import re
+import sys
+import time
 import zipfile
 from collections.abc import Mapping as MappingABC
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 
@@ -35,6 +37,12 @@ from .quality import stain_quality
 
 
 DEFAULT_GPT_MODEL = "o4-mini"
+MAX_RIDGE_CURVES = 500
+RIDGE_DOWNSAMPLE_NOTE = (
+    "[warning] Ridge plot export is being downsampled to keep compilation responsive; "
+    "use --export-plots for per-sample PNGs if you need every curve."
+)
+MAX_MISSING_EXPORT_ROWS = 100_000
 
 try:  # optional dependency during tests
     from openai import OpenAI
@@ -113,6 +121,8 @@ class BatchOptions:
     group_by_marker: bool = False
 
     workers: int = 1
+    worker_timeout: float | None = 600.0
+    worker_retries: int = 1
 
     # GPT integration
     gpt_model: Optional[str] = None
@@ -136,6 +146,7 @@ class BatchResults:
     target_landmarks: Optional[Sequence[float]] = None
     interrupted: bool = False
     group_by_marker: bool = False
+    failed_samples: list[str] = field(default_factory=list)
 
 
 class BatchProgress(Protocol):
@@ -552,6 +563,7 @@ def run_batch(
     total = len(ordered)
     completed = 0
     interrupted = False
+    failed_samples: list[str] = []
 
     if progress is not None:
         try:
@@ -579,42 +591,107 @@ def run_batch(
 
     try:
         if options.workers and options.workers > 1:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
             error: BaseException | None = None
-            with ThreadPoolExecutor(max_workers=options.workers) as pool:
-                future_map = {
-                    pool.submit(process_sample, sample, options, overrides, gpt_client): sample
-                    for sample in ordered
-                }
-                try:
-                    for future in as_completed(future_map):
-                        sample = future_map[future]
+            abort = False
+            attempts: dict[str, int] = {}
+
+            def _submit_sample(
+                pool: ThreadPoolExecutor,
+                sample: SampleInput,
+                future_map: dict[Any, SampleInput],
+                pending: set[Any],
+                start_times: dict[Any, float],
+            ) -> None:
+                future = pool.submit(process_sample, sample, options, overrides, gpt_client)
+                future_map[future] = sample
+                pending.add(future)
+                start_times[future] = time.monotonic()
+
+            pool = ThreadPoolExecutor(max_workers=options.workers)
+            future_map: dict[Any, SampleInput] = {}
+            pending: set[Any] = set()
+            start_times: dict[Any, float] = {}
+
+            try:
+                for sample in ordered:
+                    _submit_sample(pool, sample, future_map, pending, start_times)
+
+                while pending and not abort:
+                    timeout = options.worker_timeout if options.worker_timeout and options.worker_timeout > 0 else None
+                    try:
+                        done, _ = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
+                    except KeyboardInterrupt:
+                        interrupted = True
+                        break
+
+                    if not done:
+                        if timeout is None:
+                            continue
+                        now = time.monotonic()
+                        stuck = [
+                            fut for fut in list(pending) if now - start_times.get(fut, now) >= timeout
+                        ]
+                        if not stuck:
+                            continue
+
+                        for fut in stuck:
+                            sample = future_map.pop(fut)
+                            pending.discard(fut)
+                            start_times.pop(fut, None)
+                            fut.cancel()
+
+                            attempt = attempts.get(sample.stem, 0) + 1
+                            attempts[sample.stem] = attempt
+                            if attempt > max(0, options.worker_retries):
+                                print(
+                                    f"[warning] Sample {sample.stem} exceeded worker timeout {timeout:.1f}s "
+                                    f"after {attempt} attempt(s); giving up. "
+                                    f"cells={sample.counts.size}, grid_size={options.grid_size}",
+                                    file=sys.stderr,
+                                )
+                                failed_samples.append(sample.stem)
+                                completed += 1
+                                if progress is not None:
+                                    try:
+                                        progress.advance(sample.stem, completed, total)
+                                    except Exception:
+                                        progress = None
+                                continue
+
+                            msg = (
+                                f"[warning] Worker processing {sample.stem} exceeded {timeout:.1f}s; "
+                                f"retrying ({attempt}/{options.worker_retries})."
+                            )
+                            if sample.counts.size > 50_000:
+                                msg += " Large cell count detected; consider increasing --worker-timeout."
+                            print(msg, file=sys.stderr)
+                            _submit_sample(pool, sample, future_map, pending, start_times)
+                        continue
+
+                    for future in done:
+                        pending.discard(future)
+                        sample = future_map.pop(future, None)
+                        start_times.pop(future, None)
                         try:
                             res = future.result()
                         except KeyboardInterrupt:
                             interrupted = True
+                            abort = True
                             break
                         except BaseException as exc:  # capture other errors to re-raise later
                             error = exc
                             interrupted = True
+                            abort = True
                             break
                         _append_result(res)
-                except KeyboardInterrupt:
-                    interrupted = True
-                finally:
-                    if interrupted:
-                        for future, sample in future_map.items():
-                            if future.done():
-                                try:
-                                    res = future.result()
-                                except KeyboardInterrupt:
-                                    continue
-                                except BaseException:
-                                    continue
-                                _append_result(res)
-                            else:
-                                future.cancel()
+            finally:
+                try:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                except TypeError:  # pragma: no cover - older Python without cancel_futures
+                    pool.shutdown(wait=False)
+
             if error is not None:
                 raise error
         else:
@@ -802,6 +879,7 @@ def run_batch(
         target_landmarks=options.target_landmarks,
         interrupted=interrupted,
         group_by_marker=bool(options.group_by_marker),
+        failed_samples=failed_samples if options.workers and options.workers > 1 else [],
     )
 
 
@@ -1024,6 +1102,97 @@ def _sanitize_group_label(label: str | None) -> str:
     return clean or "group"
 
 
+def _probe_csv_columns(path: str | Path) -> list[str] | None:
+    try:
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path) as archive:
+                members = [
+                    name
+                    for name in archive.namelist()
+                    if name.lower().endswith(".csv") and not name.endswith("/")
+                ]
+                members.sort()
+                if not members:
+                    return None
+                with archive.open(members[0]) as fh:
+                    return list(pd.read_csv(fh, nrows=0).columns)
+        return list(pd.read_csv(path, nrows=0).columns)
+    except Exception:
+        return None
+
+
+def _iter_csv_chunks(
+    path: str | Path,
+    *,
+    usecols: Sequence[str] | None,
+    low_memory: bool,
+    chunksize: int = 50_000,
+):
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            members = [
+                name
+                for name in archive.namelist()
+                if name.lower().endswith(".csv") and not name.endswith("/")
+            ]
+            members.sort()
+            offset = 0
+            for name in members:
+                with archive.open(name) as fh:
+                    for chunk in pd.read_csv(
+                        fh,
+                        usecols=usecols,
+                        low_memory=low_memory,
+                        chunksize=chunksize,
+                    ):
+                        yield offset, chunk
+                        offset += len(chunk)
+            return
+
+    offset = 0
+    for chunk in pd.read_csv(
+        path, usecols=usecols, low_memory=low_memory, chunksize=chunksize
+    ):
+        yield offset, chunk
+        offset += len(chunk)
+
+
+def _collect_rows_by_index(
+    path: str | Path,
+    indices: Sequence[int],
+    *,
+    usecols: Sequence[str] | None = None,
+    low_memory: bool = False,
+) -> pd.DataFrame:
+    if not indices:
+        return pd.DataFrame()
+
+    remaining = set(int(i) for i in indices)
+    parts: list[pd.DataFrame] = []
+
+    for offset, chunk in _iter_csv_chunks(
+        path, usecols=usecols, low_memory=low_memory, chunksize=50_000
+    ):
+        global_index = chunk.index.to_numpy() + offset
+        mask = np.isin(global_index, list(remaining))
+        if not mask.any():
+            continue
+
+        selected = chunk.loc[mask].copy()
+        selected.insert(0, "__pv_index__", global_index[mask])
+        parts.append(selected)
+        remaining.difference_update(global_index[mask].tolist())
+        if not remaining:
+            break
+
+    if not parts:
+        return pd.DataFrame()
+
+    combined = pd.concat(parts, ignore_index=True)
+    combined.set_index("__pv_index__", inplace=True)
+    return combined
+
+
 def _sanitize_stem_value(value: str) -> str:
     """Return a filesystem-safe value suitable for sample stems."""
 
@@ -1150,6 +1319,8 @@ def results_to_dict(batch: BatchResults) -> dict[str, Any]:
     payload["group_by_marker"] = bool(batch.group_by_marker)
 
     payload["interrupted"] = bool(batch.interrupted)
+    if batch.failed_samples:
+        payload["failed_samples"] = list(batch.failed_samples)
 
     if batch.aligned_landmarks is not None:
         payload["aligned_landmarks"] = _jsonify(batch.aligned_landmarks)
@@ -1230,6 +1401,11 @@ def save_outputs(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    print(
+        "[info] Processing complete; compiling summary, manifest, and zip exports...",
+        file=sys.stderr,
+    )
+
     summary_df = export_summary(batch)
 
     manifest = results_to_dict(batch)
@@ -1240,6 +1416,12 @@ def save_outputs(
 
     summary_name = f"summary_{slug}.csv"
     summary_df.to_csv(out / summary_name, index=False)
+
+    if batch.failed_samples:
+        error_path = out / "error_samples.txt"
+        with error_path.open("w", encoding="utf-8") as fh:
+            for stem in batch.failed_samples:
+                fh.write(f"{stem}\n")
 
     if export_plots:
         plots_dir = out / "plots"
@@ -1336,12 +1518,6 @@ def _dataset_exports(
     if not expr_path or not meta_path:
         return None
 
-    try:
-        expr_df, _ = load_combined_csv(expr_path, low_memory=False)
-        meta_df, _ = load_combined_csv(meta_path, low_memory=False)
-    except Exception:
-        return None
-
     dataset_results = [res for res in batch.samples if res.cell_indices is not None]
     if not dataset_results:
         return None
@@ -1362,10 +1538,62 @@ def _dataset_exports(
     if not union_indices:
         return None
 
-    meta_subset = meta_df.loc[union_indices].copy()
+    try:
+        meta_subset = _collect_rows_by_index(meta_path, union_indices, low_memory=False)
+        expr_columns = _probe_csv_columns(expr_path)
+        markers_to_load = [m for m in markers_order if expr_columns is None or m in expr_columns]
+        expr_usecols = markers_to_load
+        if expr_columns and "cell_id" in expr_columns:
+            expr_usecols = markers_to_load + ["cell_id"]
+        expr_subset = _collect_rows_by_index(
+            expr_path,
+            union_indices,
+            usecols=expr_usecols if expr_usecols else None,
+            low_memory=False,
+        )
+    except Exception:
+        try:
+            expr_subset, _ = load_combined_csv(expr_path, low_memory=False)
+            meta_subset, _ = load_combined_csv(meta_path, low_memory=False)
+        except Exception:
+            return None
+
+    meta_subset = meta_subset.copy()
+    expr_subset = expr_subset.copy()
+
+    missing_meta = [idx for idx in union_indices if idx not in meta_subset.index]
+    missing_expr = [idx for idx in union_indices if idx not in expr_subset.index]
+
+    total_missing = max(len(missing_meta), len(missing_expr))
+    if total_missing > MAX_MISSING_EXPORT_ROWS:
+        print(
+            (
+                f"[warning] {total_missing} dataset rows were missing; skipping combined dataset exports "
+                "to finish compilation. Check your metadata and expression inputs if you need the combined CSVs."
+            ),
+            file=sys.stderr,
+        )
+        return None
+
+    if missing_meta:
+        print(
+            f"[warning] {len(missing_meta)} cell metadata rows were missing; filling with blanks to complete exports.",
+            file=sys.stderr,
+        )
+        meta_subset = meta_subset.reindex(meta_subset.index.union(missing_meta))
+
+    if missing_expr:
+        print(
+            f"[warning] {len(missing_expr)} expression rows were missing; filling with NaNs to complete exports.",
+            file=sys.stderr,
+        )
+        expr_subset = expr_subset.reindex(expr_subset.index.union(missing_expr))
+
+    meta_subset = meta_subset.reindex(union_indices)
+    expr_subset = expr_subset.reindex(union_indices)
     meta_csv = meta_subset.reset_index(drop=True).to_csv(index=False).encode()
 
-    markers_available = [c for c in expr_df.columns if c not in meta_df.columns]
+    markers_available = [c for c in expr_subset.columns if c not in meta_subset.columns]
     ordered_markers = [m for m in markers_available if m in markers_order]
     for marker in markers_order:
         if marker not in ordered_markers:
@@ -1395,8 +1623,8 @@ def _dataset_exports(
     expr_before = expr_before.loc[union_indices]
     expr_after = expr_after.loc[union_indices]
 
-    if "cell_id" in expr_df.columns:
-        cell_ids = expr_df.loc[union_indices, "cell_id"].to_numpy()
+    if "cell_id" in expr_subset.columns:
+        cell_ids = expr_subset.loc[union_indices, "cell_id"].to_numpy()
         expr_before.insert(0, "cell_id", cell_ids)
         expr_after.insert(0, "cell_id", cell_ids)
 
@@ -1436,6 +1664,17 @@ def _ridge_plot_png(
     aligned: bool,
     group_by_marker: bool = False,
 ) -> bytes | dict[str, bytes] | None:
+    total_samples = len(samples)
+    if total_samples > MAX_RIDGE_CURVES:
+        step = math.ceil(total_samples / MAX_RIDGE_CURVES)
+        samples = samples[::step]
+        total_samples = len(samples)
+        print(
+            f"[warning] Downsampling ridge plot export to {total_samples} of "
+            f"{total_samples * step} samples to avoid hangs. {RIDGE_DOWNSAMPLE_NOTE}",
+            file=sys.stderr,
+        )
+
     if group_by_marker:
         grouped: dict[str, list[SampleResult]] = {}
         for res in samples:
@@ -1445,11 +1684,17 @@ def _ridge_plot_png(
 
         outputs: dict[str, bytes] = {}
         for group_name in sorted(grouped):
-            png = _ridge_plot_png(
-                grouped[group_name],
-                aligned=aligned,
-                group_by_marker=False,
-            )
+            group_samples = grouped[group_name]
+            if len(group_samples) > MAX_RIDGE_CURVES:
+                step = math.ceil(len(group_samples) / MAX_RIDGE_CURVES)
+                group_samples = group_samples[::step]
+                print(
+                    f"[warning] Downsampling ridge plot export for group {group_name!r} "
+                    f"to {len(group_samples)} curves. {RIDGE_DOWNSAMPLE_NOTE}",
+                    file=sys.stderr,
+                )
+
+            png = _ridge_plot_png(group_samples, aligned=aligned, group_by_marker=False)
             if isinstance(png, bytes):
                 outputs[group_name] = png
         return outputs or None

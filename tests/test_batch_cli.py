@@ -1,5 +1,6 @@
 import io
 import json
+import time
 import zipfile
 from pathlib import Path
 
@@ -7,6 +8,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import peak_valley.batch
+batch_module = peak_valley.batch
 from peak_valley.batch import (
     BatchOptions,
     BatchResults,
@@ -193,6 +196,86 @@ def test_combined_zip_has_expected_exports(tmp_path):
     assert not (out_dir / "aligned_landmarks.csv").exists()
 
 
+def test_combined_zip_tolerates_missing_indices(tmp_path, capsys):
+    expr = pd.DataFrame(
+        {
+            "CD7": [1.0, 1.2, 1.1, 4.0, 4.2],
+        }
+    )
+    meta = pd.DataFrame({"sample": ["S1"] * 5})
+
+    expr_path = tmp_path / "expr.csv"
+    meta_path = tmp_path / "meta.csv"
+    expr.to_csv(expr_path, index=False)
+    meta.to_csv(meta_path, index=False)
+
+    sample = SampleResult(
+        stem="sample",
+        peaks=[],
+        valleys=[],
+        xs=np.array([0.0, 1.0]),
+        ys=np.array([1.0, 1.0]),
+        counts=np.array([1.0, 2.0]),
+        params={},
+        quality=1.0,
+        metadata={"sample": "S1", "marker": "CD7"},
+        cell_indices=np.array([0, 10]),
+    )
+
+    batch = BatchResults(samples=[sample])
+    out_dir = tmp_path / "outputs"
+
+    save_outputs(
+        batch,
+        out_dir,
+        run_metadata={"expression_path": expr_path, "metadata_path": meta_path},
+    )
+
+    captured = capsys.readouterr()
+    assert "metadata rows were missing" in captured.err
+    assert "expression rows were missing" in captured.err
+
+    zip_candidates = list(out_dir.glob("before_after_alignment_*.zip"))
+    assert zip_candidates, "Expected combined zip even when indices are missing"
+
+
+def test_combined_zip_skips_when_missing_rows_are_huge(tmp_path, capsys, monkeypatch):
+    expr = pd.DataFrame({"CD7": [1.0, 1.2, 1.1]})
+    meta = pd.DataFrame({"sample": ["S1"] * 3})
+
+    expr_path = tmp_path / "expr.csv"
+    meta_path = tmp_path / "meta.csv"
+    expr.to_csv(expr_path, index=False)
+    meta.to_csv(meta_path, index=False)
+
+    sample = SampleResult(
+        stem="sample",
+        peaks=[],
+        valleys=[],
+        xs=np.array([0.0, 1.0]),
+        ys=np.array([1.0, 1.0]),
+        counts=np.array([1.0, 2.0]),
+        params={},
+        quality=1.0,
+        metadata={"sample": "S1", "marker": "CD7"},
+        cell_indices=np.arange(0, 120, dtype=int),
+    )
+
+    batch = BatchResults(samples=[sample])
+    out_dir = tmp_path / "outputs"
+
+    monkeypatch.setattr(batch_module, "MAX_MISSING_EXPORT_ROWS", 50)
+
+    save_outputs(
+        batch,
+        out_dir,
+        run_metadata={"expression_path": expr_path, "metadata_path": meta_path},
+    )
+
+    captured = capsys.readouterr()
+    assert "skipping combined dataset exports" in captured.err
+    assert not list(out_dir.glob("before_after_alignment_*.zip")), "Combined zip should be skipped"
+
 def test_group_marker_exports_multiple_ridges(tmp_path):
     expr = pd.DataFrame(
         {
@@ -347,6 +430,237 @@ def test_run_batch_handles_keyboard_interrupt(tmp_path, monkeypatch):
     assert manifest["samples"], "Partial samples should still be exported"
 
 
+def test_run_batch_retries_timed_out_workers(monkeypatch):
+    import peak_valley.batch as batch_mod
+
+    options = BatchOptions(apply_arcsinh=False, workers=2, worker_timeout=0.1, worker_retries=1)
+    sample_a = SampleInput(
+        stem="SampleA",
+        counts=np.array([0.1, 0.9]),
+        metadata={"sample": "S1", "marker": "CD3"},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+    sample_b = SampleInput(
+        stem="SampleB",
+        counts=np.array([0.2, 0.8]),
+        metadata={"sample": "S2", "marker": "CD19"},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+
+    call_counts: dict[str, int] = {}
+
+    def fake_process(sample, opts, overrides, gpt_client):
+        call_counts[sample.stem] = call_counts.get(sample.stem, 0) + 1
+        if sample.stem == "SampleA" and call_counts[sample.stem] == 1:
+            time.sleep(0.2)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[0.5],
+            valleys=[0.2],
+            xs=np.array([0.0, 1.0]),
+            ys=np.array([0.4, 0.6]),
+            counts=sample.counts,
+            params={"bw": 0.1, "prom": 0.05},
+            quality=0.95,
+            metadata=sample.metadata,
+            source_name=sample.source_name,
+            arcsinh_signature=sample.arcsinh_signature,
+        )
+
+    monkeypatch.setattr(batch_mod, "process_sample", fake_process)
+
+    batch = run_batch([sample_a, sample_b], options)
+
+    assert not batch.interrupted
+    assert len(batch.samples) == 2
+    assert call_counts["SampleA"] >= 2
+
+
+def test_run_batch_reports_exceeded_retries(monkeypatch, capsys):
+    import peak_valley.batch as batch_mod
+
+    options = BatchOptions(
+        apply_arcsinh=False,
+        workers=2,
+        worker_timeout=0.05,
+        worker_retries=1,
+    )
+    slow_sample = SampleInput(
+        stem="SlowOne",
+        counts=np.array([0.1, 0.9]),
+        metadata={"sample": "S1"},
+        arcsinh_signature=options.arcsinh_signature(),
+        order=0,
+    )
+    fast_sample = SampleInput(
+        stem="FastOne",
+        counts=np.array([0.2, 0.8]),
+        metadata={"sample": "S2"},
+        arcsinh_signature=options.arcsinh_signature(),
+        order=1,
+    )
+
+    attempts: dict[str, int] = {}
+
+    def fake_process(sample, opts, overrides, gpt_client):
+        attempts[sample.stem] = attempts.get(sample.stem, 0) + 1
+        if sample.stem == "SlowOne":
+            time.sleep(options.worker_timeout + 0.05)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[],
+            valleys=[],
+            xs=np.array([]),
+            ys=np.array([]),
+            counts=sample.counts,
+            params={},
+            quality=0.0,
+            metadata=sample.metadata,
+            source_name=sample.source_name,
+            arcsinh_signature=sample.arcsinh_signature,
+        )
+
+    monkeypatch.setattr(batch_mod, "process_sample", fake_process)
+
+    batch = run_batch([slow_sample, fast_sample], options)
+
+    err = capsys.readouterr().err
+    assert "giving up" in err
+    assert batch.interrupted is False
+    assert batch.failed_samples == ["SlowOne"]
+    assert [res.stem for res in batch.samples] == ["FastOne"]
+    assert attempts["SlowOne"] == options.worker_retries + 1
+
+
+def test_run_batch_does_not_block_on_exhausted_workers(monkeypatch):
+    import peak_valley.batch as batch_mod
+
+    options = BatchOptions(
+        apply_arcsinh=False,
+        workers=2,
+        worker_timeout=0.05,
+        worker_retries=0,
+    )
+
+    sleepy = SampleInput(
+        stem="NeverReturns",
+        counts=np.array([0.1, 0.9]),
+        metadata={"sample": "S1"},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+    fast = SampleInput(
+        stem="FastOne",
+        counts=np.array([0.2, 0.8]),
+        metadata={"sample": "S2"},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+
+    def fake_process(sample, opts, overrides, gpt_client):
+        if sample.stem == "NeverReturns":
+            time.sleep(opts.worker_timeout * 10)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[],
+            valleys=[],
+            xs=np.array([]),
+            ys=np.array([]),
+            counts=sample.counts,
+            params={},
+            quality=0.0,
+            metadata=sample.metadata,
+            source_name=sample.source_name,
+            arcsinh_signature=sample.arcsinh_signature,
+        )
+
+    monkeypatch.setattr(batch_mod, "process_sample", fake_process)
+
+    start = time.perf_counter()
+    batch = run_batch([sleepy, fast], options)
+    duration = time.perf_counter() - start
+
+    assert duration < options.worker_timeout * 4
+    assert batch.interrupted is False
+    assert batch.failed_samples == ["NeverReturns"]
+    assert [res.stem for res in batch.samples] == ["FastOne"]
+
+
+def test_save_outputs_after_failed_samples(monkeypatch, tmp_path, capsys):
+    import peak_valley.batch as batch_mod
+
+    expr = pd.DataFrame(
+        {
+            "Slow": [0.1, 0.2, 0.3],
+            "Fast": [1.0, 1.2, 1.1],
+        }
+    )
+    meta = pd.DataFrame({"sample": ["S1", "S1", "S1"]})
+
+    expr_path = tmp_path / "expr.csv"
+    meta_path = tmp_path / "meta.csv"
+    expr.to_csv(expr_path, index=False)
+    meta.to_csv(meta_path, index=False)
+
+    options = BatchOptions(
+        apply_arcsinh=False,
+        workers=2,
+        worker_timeout=0.05,
+        worker_retries=0,
+    )
+    samples, meta_info = collect_dataset_samples(expr_path, meta_path, options)
+
+    def fake_process(sample, opts, overrides, gpt_client):
+        if sample.metadata.get("marker") == "Slow":
+            time.sleep(options.worker_timeout + 0.05)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[],
+            valleys=[],
+            xs=np.array([]),
+            ys=np.array([]),
+            counts=sample.counts,
+            params={},
+            quality=0.0,
+            metadata=sample.metadata,
+            source_name=sample.source_name,
+            arcsinh_signature=sample.arcsinh_signature,
+            cell_indices=sample.cell_indices,
+        )
+
+    monkeypatch.setattr(batch_mod, "process_sample", fake_process)
+
+    batch = run_batch(samples, options)
+
+    out_dir = tmp_path / "outputs"
+    save_outputs(batch, out_dir, run_metadata=meta_info)
+
+    captured = capsys.readouterr()
+    assert "compiling summary, manifest, and zip" in captured.err.lower()
+    assert batch.failed_samples == [s.stem for s in samples if s.metadata.get("marker") == "Slow"]
+    assert batch.interrupted is False
+
+    error_file = out_dir / "error_samples.txt"
+    assert error_file.exists()
+    with error_file.open("r", encoding="utf-8") as fh:
+        lines = [line.strip() for line in fh.readlines() if line.strip()]
+    assert lines == batch.failed_samples
+
+    summary_files = list(out_dir.glob("summary_*.csv"))
+    assert summary_files
+    summary_df = pd.read_csv(summary_files[0])
+    assert summary_df["stem"].tolist() == [
+        s.stem for s in samples if s.metadata.get("marker") == "Fast"
+    ]
+
+    results_files = list(out_dir.glob("results_*.json"))
+    assert results_files
+    with results_files[0].open("r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    assert manifest.get("failed_samples") == batch.failed_samples
+
+    zip_candidates = list(out_dir.glob("before_after_alignment_*.zip"))
+    assert zip_candidates, "Expected zip export even when some samples failed"
+
+
 def test_alignment_normalizes_landmarks(monkeypatch):
     import peak_valley.batch as batch_mod
 
@@ -406,6 +720,151 @@ def test_alignment_normalizes_landmarks(monkeypatch):
         atol=1e-9,
     )
     np.testing.assert_allclose(batch.aligned_landmarks[0], [-2.0, 0.0, 2.0], atol=1e-9)
+
+
+def test_ridge_plot_skipped_for_large_batches(capsys):
+    samples: list[SampleResult] = []
+    xs = np.linspace(0.0, 1.0, 5)
+    ys = np.linspace(0.0, 1.0, 5)
+    for idx in range(501):
+        samples.append(
+            SampleResult(
+                stem=f"S{idx}",
+                peaks=[0.25],
+                valleys=[0.75],
+                xs=xs,
+                ys=ys,
+                counts=np.array([0.1, 0.2]),
+                params={},
+                quality=1.0,
+                metadata={"marker": "CD3"},
+                arcsinh_signature=(True, 1.0, 0.2, 0.0),
+            )
+        )
+
+    output = peak_valley.batch._ridge_plot_png(samples, aligned=False)
+    captured = capsys.readouterr()
+
+    assert isinstance(output, (bytes, dict))
+    assert "downsampling ridge plot export" in captured.err.lower()
+
+
+def test_dataset_export_streams_large_inputs(tmp_path):
+    meta_df = pd.DataFrame(
+        {
+            "sample": ["s1", "s2", "s3", "s4"],
+            "batch": ["b1", "b1", "b2", "b2"],
+            "cell_id": ["c0", "c1", "c2", "c3"],
+        }
+    )
+
+    expr_part_a = pd.DataFrame({"CD3": [1.0, 2.0], "CD4": [0.1, 0.2], "cell_id": ["c0", "c1"]})
+    expr_part_b = pd.DataFrame({"CD3": [3.0, 4.0], "CD4": [0.3, 0.4], "cell_id": ["c2", "c3"]})
+
+    meta_path = tmp_path / "meta.csv"
+    meta_df.to_csv(meta_path, index=False)
+
+    expr_zip = tmp_path / "expr.zip"
+    with zipfile.ZipFile(expr_zip, "w") as archive:
+        archive.writestr("expr_a.csv", expr_part_a.to_csv(index=False))
+        archive.writestr("expr_b.csv", expr_part_b.to_csv(index=False))
+
+    res_one = SampleResult(
+        stem="S1",
+        peaks=[0.1],
+        valleys=[0.2],
+        xs=np.array([0.0, 1.0]),
+        ys=np.array([0.1, 0.2]),
+        counts=np.array([1.0, 4.0]),
+        params={},
+        quality=1.0,
+        metadata={"marker": "CD3"},
+        cell_indices=np.array([0, 3]),
+        arcsinh_signature=(True, 1.0, 0.2, 0.0),
+    )
+    res_two = SampleResult(
+        stem="S2",
+        peaks=[0.1],
+        valleys=[0.2],
+        xs=np.array([0.0, 1.0]),
+        ys=np.array([0.1, 0.2]),
+        counts=np.array([0.3]),
+        params={},
+        quality=1.0,
+        metadata={"marker": "CD4"},
+        cell_indices=np.array([2]),
+        arcsinh_signature=(True, 1.0, 0.2, 0.0),
+    )
+
+    batch = BatchResults(samples=[res_one, res_two])
+    exports = peak_valley.batch._dataset_exports(
+        batch,
+        {
+            "expression_path": str(expr_zip),
+            "metadata_path": str(meta_path),
+        },
+    )
+
+    assert exports is not None
+    meta_export = pd.read_csv(io.BytesIO(exports["meta"]))
+    expr_export = pd.read_csv(io.BytesIO(exports["expr_before"]))
+
+    expected_meta = meta_df.loc[[0, 3, 2]].reset_index(drop=True)
+    pd.testing.assert_frame_equal(meta_export, expected_meta)
+
+    assert list(expr_export.columns)[:3] == ["cell_id", "CD3", "CD4"]
+    assert expr_export.loc[0, "CD3"] == 1.0
+    assert expr_export.loc[1, "CD3"] == 4.0
+    assert expr_export.loc[2, "CD4"] == 0.3
+    assert exports["expr_after"] is None
+
+
+def test_dataset_export_fills_missing_meta_with_nan(tmp_path, capsys):
+    meta_df = pd.DataFrame(
+        {
+            "sample": ["s1", "s2"],
+            "batch_id": [1, 2],
+            "cell_id": ["c0", "c1"],
+        }
+    )
+
+    expr_df = pd.DataFrame({"CD3": [1.0, 2.0], "cell_id": ["c0", "c1"]})
+
+    meta_path = tmp_path / "meta.csv"
+    expr_path = tmp_path / "expr.csv"
+    meta_df.to_csv(meta_path, index=False)
+    expr_df.to_csv(expr_path, index=False)
+
+    result = SampleResult(
+        stem="S1",
+        peaks=[0.1],
+        valleys=[0.2],
+        xs=np.array([0.0, 1.0]),
+        ys=np.array([0.1, 0.2]),
+        counts=np.array([1.0, 4.0]),
+        params={},
+        quality=1.0,
+        metadata={"marker": "CD3"},
+        cell_indices=np.array([0, 5]),
+        arcsinh_signature=(True, 1.0, 0.2, 0.0),
+    )
+
+    batch = BatchResults(samples=[result])
+    exports = peak_valley.batch._dataset_exports(
+        batch,
+        {"expression_path": str(expr_path), "metadata_path": str(meta_path)},
+    )
+
+    assert exports is not None
+
+    meta_export = pd.read_csv(io.BytesIO(exports["meta"]))
+    expr_export = pd.read_csv(io.BytesIO(exports["expr_before"]))
+    warn_output = capsys.readouterr().err.lower()
+
+    assert "metadata rows were missing" in warn_output
+    assert meta_export.shape[0] == 2
+    assert expr_export.shape[0] == 2
+    assert pd.isna(meta_export.loc[1, "sample"])
 
 
 def _dummy_result(marker: str, sample: str) -> SampleResult:

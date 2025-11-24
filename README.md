@@ -11,6 +11,7 @@ PVdetector is a Streamlit application for detecting density peaks and valleys in
 - Landmark alignment and piece-wise linear normalization across samples.
 - Downloadable outputs: per-sample curves, aligned data, stain-quality scores, and summary tables.
 - When selecting all markers or all samples (in the app or CLI), you can exclude specific markers/samples from processing.
+- Configurable per-sample timeout in batch mode that skips long-running samples and records them in the output folder.
 
 ## Installation
 1. **Clone the repository**
@@ -94,6 +95,7 @@ Key flags:
 | `--align` | Optional | Off | `--align` | Enable landmark alignment and normalisation. |
 | `--alignment-mode` | Optional | `negPeak_valley_posPeak` | `--alignment-mode negPeak_valley` | Alignment template: `negPeak`, `negPeak_valley`, `negPeak_valley_posPeak`, or `valley`. |
 | `--alignment-target` | Optional | Cohort medians | `--alignment-target -1.5,0.0,1.5` | Comma-separated landmark targets; defaults to cohort medians. |
+| `--sample-timeout` | Optional | `10.0` | `--sample-timeout 5` | Maximum seconds to process each sample before skipping it (`<=0` disables). Timed-out samples are listed in `error_samples.txt`. |
 | `--workers` | Optional | `1` | `--workers 4` | Number of parallel worker threads. |
 | `--override-file` | Optional | _None_ | `--override-file overrides.json` | JSON overrides for global/marker/sample/stem settings. |
 | `--gpt-model` | Optional | Auto (`o4-mini`) | `--gpt-model o4-mini` | Override GPT model name when using automatic suggestions. |
@@ -103,10 +105,11 @@ Key flags:
 ¹ Provide at least one `--counts` file or the `--expression-file`/`--metadata-file` pair.
 
 By default, outputs in `--output-dir` comprise `summary.csv`, `results.json`,
-and the `before_after_alignment.zip` bundle that mirrors the Streamlit
-"before/after" download (combined metadata/expression CSVs plus stacked ridge
-plots, without per-sample CSVs). Pass `--export-plots` to add a `plots/`
-directory containing the individual density visuals.
+`error_samples.txt` (one stem per timed-out/failed sample), and the
+`before_after_alignment.zip` bundle that mirrors the Streamlit "before/after"
+download (combined metadata/expression CSVs plus stacked ridge plots, without
+per-sample CSVs). Pass `--export-plots` to add a `plots/` directory containing
+the individual density visuals.
 
 The CLI prints a progress bar while samples are processed and automatically
 finalises partial results if an analysis is interrupted.

@@ -350,6 +350,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument("--workers", type=int, default=1, help="Number of parallel worker threads.")
+    parser.add_argument(
+        "--sample-timeout",
+        type=float,
+        default=10.0,
+        help="Maximum seconds to spend processing a sample before skipping it (<=0 disables).",
+    )
     parser.add_argument("--override-file", help="JSON file with per-sample or per-marker overrides.")
     parser.add_argument("--gpt-model", help="Custom OpenAI model name for GPT-assisted suggestions.")
     parser.add_argument(
@@ -410,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(exc))
     options.group_by_marker = group_marker_flag
     options.workers = max(1, args.workers)
+    options.sample_timeout = max(0.0, float(args.sample_timeout))
 
     if args.gpt_model:
         options.gpt_model = args.gpt_model

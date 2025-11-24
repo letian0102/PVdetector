@@ -15,8 +15,9 @@ import math
 import re
 import zipfile
 from collections.abc import Mapping as MappingABC
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+import signal
 from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 
 import numpy as np
@@ -107,6 +108,8 @@ class BatchOptions:
     apply_consistency: bool = False
     consistency_tol: float = 0.5
 
+    sample_timeout: float = 10.0
+
     align: bool = False
     align_mode: str = "negPeak_valley_posPeak"
     target_landmarks: Optional[Sequence[float]] = None
@@ -136,6 +139,7 @@ class BatchResults:
     target_landmarks: Optional[Sequence[float]] = None
     interrupted: bool = False
     group_by_marker: bool = False
+    failed_samples: list[str] = field(default_factory=list)
 
 
 class BatchProgress(Protocol):
@@ -545,6 +549,27 @@ def run_batch(
 ) -> BatchResults:
     """Process all samples and optionally align them."""
 
+    def _run_sample_with_timeout(sample: SampleInput) -> SampleResult:
+        timeout = float(options.sample_timeout)
+        if timeout <= 0:
+            return process_sample(sample, options, overrides, gpt_client)
+
+        def _raise_timeout(signum, frame):  # pragma: no cover - invoked by signal
+            raise TimeoutError(
+                f"Sample '{sample.stem}' exceeded the {timeout:.3f}-second processing timeout"
+            )
+
+        previous_handler = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, _raise_timeout)
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+        try:
+            return process_sample(sample, options, overrides, gpt_client)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+
+    worker_count = options.workers if options.sample_timeout <= 0 else 1
+
     ordered = sorted(samples, key=lambda s: s.order)
     order_map = {s.stem: idx for idx, s in enumerate(ordered)}
     results: list[SampleResult] = []
@@ -552,6 +577,7 @@ def run_batch(
     total = len(ordered)
     completed = 0
     interrupted = False
+    failed_samples: list[str] = []
 
     if progress is not None:
         try:
@@ -575,16 +601,28 @@ def run_batch(
             except Exception:
                 progress = None
 
+    def _record_failure(stem: str) -> None:
+        nonlocal completed, progress
+        if stem in seen_stems or stem in failed_samples:
+            return
+        failed_samples.append(stem)
+        completed += 1
+        if progress is not None:
+            try:
+                progress.advance(stem, completed, total)
+            except Exception:
+                progress = None
+
     aligned_landmarks: Optional[np.ndarray] = None
 
     try:
-        if options.workers and options.workers > 1:
+        if worker_count and worker_count > 1:
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             error: BaseException | None = None
-            with ThreadPoolExecutor(max_workers=options.workers) as pool:
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
                 future_map = {
-                    pool.submit(process_sample, sample, options, overrides, gpt_client): sample
+                    pool.submit(_run_sample_with_timeout, sample): sample
                     for sample in ordered
                 }
                 try:
@@ -595,6 +633,9 @@ def run_batch(
                         except KeyboardInterrupt:
                             interrupted = True
                             break
+                        except TimeoutError:
+                            _record_failure(sample.stem)
+                            continue
                         except BaseException as exc:  # capture other errors to re-raise later
                             error = exc
                             interrupted = True
@@ -622,10 +663,13 @@ def run_batch(
                 if interrupted:
                     break
                 try:
-                    res = process_sample(sample, options, overrides, gpt_client)
+                    res = _run_sample_with_timeout(sample)
                 except KeyboardInterrupt:
                     interrupted = True
                     break
+                except TimeoutError:
+                    _record_failure(sample.stem)
+                    continue
                 _append_result(res)
 
         results.sort(key=lambda r: order_map.get(r.stem, 0))
@@ -802,6 +846,7 @@ def run_batch(
         target_landmarks=options.target_landmarks,
         interrupted=interrupted,
         group_by_marker=bool(options.group_by_marker),
+        failed_samples=failed_samples,
     )
 
 
@@ -1150,6 +1195,7 @@ def results_to_dict(batch: BatchResults) -> dict[str, Any]:
     payload["group_by_marker"] = bool(batch.group_by_marker)
 
     payload["interrupted"] = bool(batch.interrupted)
+    payload["failed_samples"] = list(batch.failed_samples)
 
     if batch.aligned_landmarks is not None:
         payload["aligned_landmarks"] = _jsonify(batch.aligned_landmarks)
@@ -1231,6 +1277,11 @@ def save_outputs(
     out.mkdir(parents=True, exist_ok=True)
 
     summary_df = export_summary(batch)
+
+    error_file = out / "error_samples.txt"
+    with error_file.open("w", encoding="utf-8") as fh:
+        for stem in batch.failed_samples:
+            fh.write(f"{stem}\n")
 
     manifest = results_to_dict(batch)
     if run_metadata:

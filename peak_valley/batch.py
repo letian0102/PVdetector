@@ -1540,8 +1540,25 @@ def _ridge_plot_png(
     if not curves:
         return None
 
-    x_min = min(float(xs.min()) for _, xs, _, _, _, _ in curves)
-    x_max = max(float(xs.max()) for _, xs, _, _, _, _ in curves)
+    if aligned:
+        x_min = min(float(xs.min()) for _, xs, _, _, _, _ in curves)
+        x_max = max(float(xs.max()) for _, xs, _, _, _, _ in curves)
+    else:
+        trimmed_bounds: list[tuple[float, float]] = []
+        for _, xs, _, _, _, _ in curves:
+            finite_xs = xs[np.isfinite(xs)]
+            if finite_xs.size == 0:
+                continue
+            low, high = np.nanquantile(finite_xs, [0.01, 0.99])
+            trimmed_bounds.append((float(low), float(high)))
+
+        if trimmed_bounds:
+            x_min = min(low for low, _ in trimmed_bounds)
+            x_max = max(high for _, high in trimmed_bounds)
+        else:
+            x_min = min(float(xs.min()) for _, xs, _, _, _, _ in curves)
+            x_max = max(float(xs.max()) for _, xs, _, _, _, _ in curves)
+
     if not np.isfinite(x_min) or not np.isfinite(x_max):
         return None
 

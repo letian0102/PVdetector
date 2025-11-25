@@ -4,6 +4,6 @@ numpy
 pandas
 matplotlib
 scipy
-streamlit
 openai
 scikit-learn
+joblib

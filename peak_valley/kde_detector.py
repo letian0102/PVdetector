@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import numpy as np
 from scipy.stats import gaussian_kde
 from scipy.signal import fftconvolve, find_peaks
 
 from .consistency import _enforce_valley_rule
+from .peak_model import GradientBoostingPeakScorer, load_peak_scorer
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
 
@@ -62,6 +64,46 @@ def _merge_close_peaks(
             i -= 1
 
     return np.asarray(keep, dtype=int)
+
+
+def _grid_min_distance(min_x_sep: float | None, grid_dx: float) -> int | None:
+    if min_x_sep is None or not np.isfinite(min_x_sep) or min_x_sep <= 0:
+        return None
+    return max(1, int(math.ceil(min_x_sep / grid_dx)))
+
+
+def _probability_peak_candidates(
+    xs: np.ndarray,
+    probs: np.ndarray,
+    *,
+    min_x_sep: float | None,
+    threshold: float,
+    n_peaks: int | None,
+) -> np.ndarray:
+    """Non-maximum suppression over a probability map."""
+
+    if probs.size == 0:
+        return np.array([], dtype=int)
+
+    grid_dx = float(xs[1] - xs[0]) if xs.size > 1 else 1.0
+    min_cells = _grid_min_distance(min_x_sep, grid_dx)
+
+    valid = np.where(np.asarray(probs) >= float(threshold))[0]
+    if valid.size == 0:
+        return np.array([], dtype=int)
+
+    order = valid[np.argsort(probs[valid])[::-1]]
+    keep: list[int] = []
+    for idx in order:
+        if min_cells is None:
+            keep.append(int(idx))
+        elif all(abs(idx - kept) >= min_cells for kept in keep):
+            keep.append(int(idx))
+
+        if n_peaks is not None and len(keep) >= n_peaks:
+            break
+
+    return np.sort(np.array(keep, dtype=int))
 
 
 def _peak_height(xs: np.ndarray, ys: np.ndarray, peak_x: float) -> float:
@@ -593,6 +635,10 @@ def kde_peaks_valleys(
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,
     first_valley   : str = "slope",
+    peak_model: GradientBoostingPeakScorer | None = None,
+    peak_model_path: str | Path | None = None,
+    peak_model_threshold: float = 0.6,
+    peak_model_min_confidence: float = 0.55,
 ):
     x = np.asarray(data, float)
     x = x[np.isfinite(x)]
@@ -611,61 +657,103 @@ def kde_peaks_valleys(
     ys  = _evaluate_kde(x, xs, kde)
 
     # ---------- primary peaks ----------
-
-    grid_dx  = xs[1] - xs[0]
-    distance = None                       # (NEW)  hard x-spacing
-    if min_x_sep is not None:
-        # ``scipy.signal.find_peaks`` requires ``distance`` >= 1.  For very
-        # small ``min_x_sep`` relative to the grid spacing the integer
-        # division above could yield ``0`` which would raise a ``ValueError``.
-        # Clamp the value so that ``find_peaks`` always receives a valid
-        # minimum distance.
-        distance = max(1, int(math.ceil(min_x_sep / grid_dx)))
+    grid_dx = xs[1] - xs[0]
+    distance = _grid_min_distance(min_x_sep, grid_dx)
     kw = {"prominence": prominence}
     if min_width:
         kw["width"] = min_width
-    locs, _ = find_peaks(ys, **kw, distance=distance)
 
-    if turning_peak and curvature_thresh and curvature_thresh > 0:
-        dy  = np.gradient(ys, xs)                 # 1st derivative
-        d2y = np.gradient(dy,  xs)                # 2nd derivative
-        slope_tol = 0.05 * np.max(np.abs(dy))     # “almost flat”
+    # model-backed map (optional)
+    locs: np.ndarray | None = None
+    model_conf = 0.0
+    model_obj = peak_model
+    if model_obj is None and peak_model_path:
+        try:
+            model_obj = load_peak_scorer(peak_model_path)
+        except Exception:
+            model_obj = None
 
-        turning = np.where(
-            (np.abs(dy) < slope_tol) &           # near-flat slope
-            (d2y < -curvature_thresh)            # concave-down
-        )[0]
+    if model_obj is not None:
+        try:
+            probs = np.nan_to_num(
+                np.asarray(model_obj.score_grid(xs, ys), float),
+                nan=0.0,
+                neginf=0.0,
+                posinf=0.0,
+            )
+            if probs.shape[0] == ys.shape[0]:
+                locs_model = _probability_peak_candidates(
+                    xs,
+                    probs,
+                    min_x_sep=min_x_sep,
+                    threshold=peak_model_threshold,
+                    n_peaks=n_peaks,
+                )
+                if locs_model.size:
+                    model_conf = float(np.max(probs[locs_model]))
+                else:
+                    model_conf = float(np.max(probs)) if probs.size else 0.0
+                if locs_model.size and model_conf >= peak_model_min_confidence:
+                    locs = locs_model
+        except Exception:
+            locs = None
 
-        # keep only the strongest point inside every min_x_sep window
-        if turning.size:
-            strongest = [turning[0]]
-            for idx in turning[1:]:
-                if xs[idx] - xs[strongest[-1]] >= min_x_sep:
-                    strongest.append(idx)
-                elif ys[idx] > ys[strongest[-1]]:     # higher shoulder wins
-                    strongest[-1] = idx
-            locs = np.unique(np.concatenate([locs, strongest]))
+    if locs is None:
+        locs, _ = find_peaks(ys, **kw, distance=distance)
 
-    locs = _merge_close_peaks(xs, ys, locs,
-            min_x_sep=min_x_sep, min_valley_drop=min_valley_drop)
+        if turning_peak and curvature_thresh and curvature_thresh > 0:
+            dy  = np.gradient(ys, xs)                 # 1st derivative
+            d2y = np.gradient(dy,  xs)                # 2nd derivative
+            slope_tol = 0.05 * np.max(np.abs(dy))     # “almost flat”
 
-    # relax prominence if too few
-    if n_peaks is not None and locs.size < n_peaks:
-        prom = prominence
-        for _ in range(4):
-            prom /= 2
-            locs, _ = find_peaks(ys, prominence=prom,
-                                 **({"width": min_width} if min_width else {}))
-            if locs.size >= n_peaks:
-                break
+            turning = np.where(
+                (np.abs(dy) < slope_tol) &           # near-flat slope
+                (d2y < -curvature_thresh)            # concave-down
+            )[0]
 
-    if locs.size == 0 and n_peaks is None:
+            # keep only the strongest point inside every min_x_sep window
+            if turning.size:
+                strongest = [turning[0]]
+                for idx in turning[1:]:
+                    if xs[idx] - xs[strongest[-1]] >= min_x_sep:
+                        strongest.append(idx)
+                    elif ys[idx] > ys[strongest[-1]]:     # higher shoulder wins
+                        strongest[-1] = idx
+                locs = np.unique(np.concatenate([locs, strongest]))
+
+        locs = _merge_close_peaks(
+            xs,
+            ys,
+            locs,
+            min_x_sep=min_x_sep,
+            min_valley_drop=min_valley_drop,
+        )
+
+        # relax prominence if too few
+        if n_peaks is not None and locs.size < n_peaks:
+            prom = prominence
+            for _ in range(4):
+                prom /= 2
+                locs, _ = find_peaks(
+                    ys,
+                    prominence=prom,
+                    **({"width": min_width} if min_width else {}),
+                )
+                if locs.size >= n_peaks:
+                    break
+
+    if (locs is None or locs.size == 0) and n_peaks is None:
         return [], [], xs, ys
 
     # keep tallest as before
-    if n_peaks is None or locs.size >= n_peaks:
-        peaks_idx = np.sort(locs) if n_peaks is None else \
-                    np.sort(locs[np.argsort(ys[locs])[-n_peaks:]])
+    if locs is None:
+        locs = np.array([], dtype=int)
+    if n_peaks is None or locs.size >= (n_peaks or 0):
+        peaks_idx = (
+            np.sort(locs)
+            if n_peaks is None
+            else np.sort(locs[np.argsort(ys[locs])[-n_peaks:]])
+        )
     else:
         peaks_idx = np.sort(locs)
     

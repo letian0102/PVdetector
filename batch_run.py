@@ -19,6 +19,7 @@ from peak_valley.batch import (
     save_outputs,
     DEFAULT_GPT_MODEL,
 )
+from peak_valley.peak_model import load_peak_scorer
 
 try:  # optional dependency – only needed when GPT features requested
     from openai import OpenAI
@@ -298,6 +299,23 @@ def build_parser() -> argparse.ArgumentParser:
         default="slope",
         help="Method for the first valley after the leading peak.",
     )
+    parser.add_argument(
+        "--peak-model",
+        dest="peak_model_path",
+        help="Optional joblib/pickle path to a trained peak scorer.",
+    )
+    parser.add_argument(
+        "--peak-model-threshold",
+        type=float,
+        default=0.6,
+        help="Minimum probability to seed a model-driven peak.",
+    )
+    parser.add_argument(
+        "--peak-model-confidence",
+        type=float,
+        default=0.55,
+        help="Fallback to heuristics when the model's best score is below this value.",
+    )
 
     parser.add_argument(
         "--consistency-tol",
@@ -402,6 +420,19 @@ def main(argv: list[str] | None = None) -> int:
     options.grid_size = max(4000, args.grid_size)
     options.valley_drop = args.valley_drop
     options.first_valley = args.first_valley
+    options.peak_model_path = args.peak_model_path
+    options.peak_model_threshold = float(args.peak_model_threshold)
+    options.peak_model_confidence = float(args.peak_model_confidence)
+    if options.peak_model_path:
+        try:
+            options.peak_model = load_peak_scorer(Path(options.peak_model_path))
+        except Exception as exc:
+            print(
+                f"[warning] Failed to load peak model '{options.peak_model_path}': {exc}",
+                file=sys.stderr,
+            )
+            options.peak_model = None
+            options.peak_model_path = None
     options.consistency_tol = args.consistency_tol
     options.apply_consistency = bool(args.apply_consistency)
 

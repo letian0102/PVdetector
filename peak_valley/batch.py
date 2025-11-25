@@ -118,6 +118,7 @@ class BatchOptions:
     workers: int = 1
 
     # GPT integration
+    smart_mode: bool = False
     gpt_model: Optional[str] = None
 
     def arcsinh_signature(self) -> tuple[bool, float, float, float]:
@@ -352,10 +353,160 @@ def _resolve_parameters(
     params["n_peaks"] = n_fixed
     params["n_peaks_auto"] = bool(n_auto)
 
-    # --- GPT powered bits -------------------------------------------------
+    # --- Automatic parameter selection (GPT or Smart mode) ---
     if params["bandwidth_auto"] or params["prominence_auto"] or params["n_peaks_auto"]:
-        if gpt_client is None:
-            debug["gpt_warning"] = "GPT client unavailable; falling back to defaults"
+        if options.smart_mode:
+            # Import needed tools for adaptive detection
+            from scipy.signal import find_peaks
+            from scipy.stats import gaussian_kde
+
+            # Prepare data for KDE
+            x = np.asarray(counts, float)
+            x = x[np.isfinite(x)]
+            n_pts = x.size
+
+            # 1. Estimate peak count via Gaussian Mixture (up to max_peaks)
+            best_k = 1
+            if n_pts > 1 and params["max_peaks"] >= 2:
+                try:
+                    from sklearn.mixture import GaussianMixture
+                except ImportError:
+                    GaussianMixture = None
+                lowest_bic = math.inf
+                if GaussianMixture:
+                    for k in range(1, params["max_peaks"] + 1):
+                        if k > n_pts:
+                            break
+                        try:
+                            gm = GaussianMixture(
+                                n_components=k,
+                                covariance_type="full",
+                                n_init=2,
+                                max_iter=200,
+                                random_state=42,
+                            ).fit(x.reshape(-1, 1))
+                        except Exception:
+                            continue
+                        bic = gm.bic(x.reshape(-1, 1))
+                        if bic < lowest_bic:
+                            lowest_bic, best_k = bic, k
+            debug["smart_gmm_count"] = int(best_k)
+            target_peaks = int(max(1, min(best_k, params["max_peaks"])))
+
+            # Helper to count peaks given KDE bandwidth factor and prominence
+            def _count_peaks(bw_factor: float | str, prom: float) -> int:
+                # Limit sample for performance (max 10000 points for KDE)
+                data = x if x.size <= 10000 else np.random.choice(x, 10000, replace=False)
+                kde = gaussian_kde(data, bw_method=bw_factor)
+                # KDE evaluation grid (at least 4000 points or 4*n_pts, cap at params["grid_size"])
+                h = kde.factor * data.std(ddof=1)
+                grid_n = max(4000, min(int(params["grid_size"]), 4 * data.size))
+                xs = np.linspace(data.min() - h, data.max() + h, grid_n)
+                ys = kde(xs)
+                # Enforce minimum peak spacing (in index terms)
+                dx = xs[1] - xs[0] if xs.size > 1 else 1.0
+                min_sep = params["min_separation"]
+                distance = None
+                if min_sep and min_sep > 0 and np.isfinite(min_sep):
+                    distance = max(1, int(math.ceil(min_sep / dx)))
+                # Find peaks with given prominence (and min width if specified)
+                kwargs = {"prominence": prom}
+                if params["min_width"]:
+                    kwargs["width"] = params["min_width"]
+                locs, _ = find_peaks(ys, distance=distance, **kwargs)
+                # Merge peaks closer than min_separation (keeping higher peak)
+                locs = np.sort(locs)
+                merged = []
+                for idx in locs:
+                    if merged and xs[idx] - xs[merged[-1]] < (min_sep or 0):
+                        # If too close, keep only the taller peak
+                        if ys[idx] > ys[merged[-1]]:
+                            merged[-1] = idx
+                        # else, skip this peak
+                    else:
+                        merged.append(idx)
+                return len(merged)
+
+            # 2. Adaptive bandwidth selection
+            # Start from default (Scott) estimate
+            initial_count = _count_peaks("scott", params["prominence"])
+            debug["smart_initial_peaks"] = int(initial_count)
+            chosen_bw = "scott"
+            chosen_prom = float(params["prominence"])
+
+            # (a) If Scott finds more peaks than target (oversmoothing not needed), we may increase bandwidth to merge noise
+            if initial_count > target_peaks:
+                high_bw = 2.0  # broaden up to 2× default
+                high_count = _count_peaks(high_bw, params["prominence"])
+                # Binary search for bandwidth where peak count ~ target_peaks
+                lo, hi = 1.0, high_bw
+                best_bw = lo
+                for _ in range(5):
+                    mid = (lo + hi) / 2
+                    mid_count = _count_peaks(mid, params["prominence"])
+                    if mid_count <= target_peaks:
+                        best_bw = mid
+                        hi = mid
+                        if mid_count == target_peaks:
+                            break
+                    else:
+                        lo = mid
+                chosen_bw = best_bw
+            else:
+                # start from Scott
+                chosen_bw = 1.0
+
+            # (b) If initial_count (or adjusted above) is below target, decrease bandwidth to reveal peaks
+            if initial_count < target_peaks:
+                low_bw = 0.1  # narrow to 0.1× default
+                low_count = _count_peaks(low_bw, params["prominence"])
+                if low_count >= target_peaks:
+                    # Binary search for narrowest bandwidth that still yields target peaks
+                    lo, hi = low_bw, chosen_bw
+                    best_bw = lo
+                    for _ in range(5):
+                        mid = (lo + hi) / 2
+                        mid_count = _count_peaks(mid, params["prominence"])
+                        if mid_count >= target_peaks:
+                            best_bw = mid
+                            hi = mid
+                        else:
+                            lo = mid
+                    chosen_bw = best_bw
+                else:
+                    # Even at very narrow bandwidth, not enough peaks: maybe peaks are subtle – try lowering prominence
+                    new_count = low_count
+                    for prom_test in [0.04, 0.03, 0.02, 0.01]:
+                        new_count = _count_peaks(low_bw, prom_test)
+                        if new_count >= target_peaks:
+                            chosen_bw = low_bw
+                            chosen_prom = prom_test
+                            debug["smart_prom_adjusted"] = prom_test
+                            break
+                    # If still fewer than target, trust what we found
+                    if new_count < target_peaks:
+                        target_peaks = new_count
+                        chosen_bw = low_bw
+
+            # Finalize effective parameters
+            bw_use = "scott" if (isinstance(chosen_bw, float) and abs(chosen_bw - 1.0) < 1e-6) else float(round(chosen_bw, 3))
+            prom_use = float(chosen_prom)
+            n_use = int(max(1, min(target_peaks, params["max_peaks"])))
+            params["bandwidth_effective"] = bw_use
+            params["prominence_effective"] = prom_use
+            params["n_peaks_effective"] = n_use
+            # Enable turning-point detection for concave shoulder peaks unless explicitly disabled
+            params["turning_points"] = bool(
+                _boolean_override(overrides.get("turning_points"), options.turning_points or True)
+            )
+            debug["smart_bw"] = bw_use
+            debug["smart_prom"] = prom_use
+            debug["smart_peaks"] = n_use
+            return params, debug
+        else:
+            # GPT-based logic (if not in smart mode)
+            if gpt_client is None:
+                debug["gpt_warning"] = "GPT client unavailable; falling back to defaults"
 
     bw_use = params["bandwidth"]
     if params["bandwidth_auto"] and gpt_client is not None:

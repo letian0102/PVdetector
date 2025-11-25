@@ -368,6 +368,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also write per-sample density plots into an output 'plots' folder.",
     )
+    parser.add_argument(
+        "--smart",
+        action="store_true",
+        help="Enable smart adaptive parameter selection for peak detection.",
+    )
 
     return parser
 
@@ -377,6 +382,11 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    # If smart mode is requested, force auto parameter selection
+    if getattr(args, "smart", False):
+        args.n_peaks = None
+        args.bandwidth = "auto"
+        args.prominence = "auto"
 
     counts_paths = args.counts or []
     markers = _normalize_all(_parse_multi(args.markers))
@@ -417,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
     options.group_by_marker = group_marker_flag
     options.workers = max(1, args.workers)
     options.sample_timeout = max(0.0, float(args.sample_timeout))
+    options.smart_mode = bool(getattr(args, "smart", False))
 
     if args.gpt_model:
         options.gpt_model = args.gpt_model
@@ -490,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
     for idx, sample in enumerate(samples_inputs):
         sample.order = idx
 
-    need_gpt = options.bandwidth_auto or options.prominence_auto or options.n_peaks_auto
+    need_gpt = (options.bandwidth_auto or options.prominence_auto or options.n_peaks_auto) and not options.smart_mode
     gpt_client = None
     if need_gpt:
         api_key = args.api_key or os.environ.get("OPENAI_API_KEY")

@@ -782,7 +782,10 @@ def run_batch(
                 pool.submit(_run_sample_with_timeout, sample): sample
                 for sample in ordered
             }
-            start_times = {future: time.time() for future in future_map}
+            # Track start times only once futures begin executing to avoid
+            # cancelling tasks that are still queued and have not begun
+            # processing.
+            start_times: dict[Any, float | None] = {future: None for future in future_map}
             pending = set(future_map)
             done: set[Any] = set()
             try:
@@ -813,7 +816,11 @@ def run_batch(
                     if timeout > 0 and pending:
                         now = time.time()
                         for future in list(pending):
-                            start = start_times.get(future, now)
+                            start = start_times.get(future)
+                            if start is None:
+                                if future.running():
+                                    start_times[future] = now
+                                continue
                             if now - start > timeout:
                                 sample = future_map[future]
                                 future.cancel()

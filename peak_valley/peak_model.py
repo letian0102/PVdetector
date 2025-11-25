@@ -16,17 +16,30 @@ import joblib
 
 
 def _window_features(trace: np.ndarray, radius: int) -> np.ndarray:
-    """Return normalised sliding windows for a 1D trace."""
+    """Return shape-aware, normalised sliding windows for a 1D trace."""
 
     radius = max(1, int(radius))
     padded = np.pad(trace.astype(float), radius, mode="edge")
-    windows = []
+    windows: list[np.ndarray] = []
     width = 2 * radius + 1
     for start in range(trace.size):
         window = padded[start : start + width]
         centred = window - float(window.mean())
         scale = float(np.max(np.abs(centred))) or 1.0
-        windows.append(centred / scale)
+        normalised = centred / scale
+
+        grad = np.gradient(window)
+        grad_scale = float(np.max(np.abs(grad))) or 1.0
+        grad_norm = grad / grad_scale
+        curvature = np.gradient(grad_norm)
+
+        centre = float(window[radius])
+        local_range = float(window.max() - window.min()) or 1.0
+        peakiness = (centre - float(window.min())) / local_range
+
+        windows.append(
+            np.concatenate([normalised, grad_norm, curvature, [centre, peakiness]])
+        )
     return np.vstack(windows)
 
 

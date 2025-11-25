@@ -27,7 +27,7 @@ def test_kde_peaks_valleys_prefers_model_map():
     class DummyModel:
         def score_grid(self, xs, ys):
             probs = np.zeros_like(xs, dtype=float)
-            probs[len(xs) // 2] = 0.9
+            probs[np.argmax(ys)] = 0.9
             return probs
 
     peaks, valleys, xs, ys = kde_peaks_valleys(
@@ -39,7 +39,7 @@ def test_kde_peaks_valleys_prefers_model_map():
         peak_model_min_confidence=0.8,
     )
 
-    assert peaks == [pytest.approx(xs[len(xs) // 2])]
+    assert peaks == [pytest.approx(xs[int(np.argmax(ys))])]
     assert valleys
 
 

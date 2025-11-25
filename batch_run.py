@@ -371,7 +371,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--smart",
         action="store_true",
-        help="Enable smart adaptive parameter selection for peak detection.",
+        help=(
+            "Enable smart adaptive parameter selection for peak detection (runs extra KDE/GMM passes "
+            "and can be slower)."
+        ),
     )
 
     return parser

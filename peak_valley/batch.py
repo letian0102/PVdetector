@@ -13,11 +13,13 @@ import io
 import json
 import math
 import re
+import time
 import zipfile
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field
 from pathlib import Path
 import signal
+import threading
 from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 
 import numpy as np
@@ -702,7 +704,8 @@ def run_batch(
 
     def _run_sample_with_timeout(sample: SampleInput) -> SampleResult:
         timeout = float(options.sample_timeout)
-        if timeout <= 0:
+        use_signal_timeout = timeout > 0 and threading.current_thread() is threading.main_thread()
+        if timeout <= 0 or not use_signal_timeout:
             return process_sample(sample, options, overrides, gpt_client)
 
         def _raise_timeout(signum, frame):  # pragma: no cover - invoked by signal
@@ -719,7 +722,8 @@ def run_batch(
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous_handler)
 
-    worker_count = options.workers if options.sample_timeout <= 0 else 1
+    worker_count = max(1, options.workers)
+    timeout = float(options.sample_timeout)
 
     ordered = sorted(samples, key=lambda s: s.order)
     order_map = {s.stem: idx for idx, s in enumerate(ordered)}
@@ -768,16 +772,27 @@ def run_batch(
 
     try:
         if worker_count and worker_count > 1:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
             error: BaseException | None = None
-            with ThreadPoolExecutor(max_workers=worker_count) as pool:
-                future_map = {
-                    pool.submit(_run_sample_with_timeout, sample): sample
-                    for sample in ordered
-                }
-                try:
-                    for future in as_completed(future_map):
+            timed_out = False
+            poll_interval = min(1.0, timeout / 3) if timeout > 0 else 0.5
+            pool = ThreadPoolExecutor(max_workers=worker_count)
+            future_map = {
+                pool.submit(_run_sample_with_timeout, sample): sample
+                for sample in ordered
+            }
+            start_times = {future: time.time() for future in future_map}
+            pending = set(future_map)
+            done: set[Any] = set()
+            try:
+                while pending and not interrupted:
+                    done, pending = wait(
+                        pending,
+                        timeout=poll_interval if pending else None,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    for future in list(done):
                         sample = future_map[future]
                         try:
                             res = future.result()
@@ -792,21 +807,42 @@ def run_batch(
                             interrupted = True
                             break
                         _append_result(res)
-                except KeyboardInterrupt:
-                    interrupted = True
-                finally:
-                    if interrupted:
-                        for future, sample in future_map.items():
-                            if future.done():
-                                try:
-                                    res = future.result()
-                                except KeyboardInterrupt:
-                                    continue
-                                except BaseException:
-                                    continue
-                                _append_result(res)
-                            else:
+                        start_times.pop(future, None)
+                    if interrupted or error is not None:
+                        break
+                    if timeout > 0 and pending:
+                        now = time.time()
+                        for future in list(pending):
+                            start = start_times.get(future, now)
+                            if now - start > timeout:
+                                sample = future_map[future]
                                 future.cancel()
+                                _record_failure(sample.stem)
+                                pending.discard(future)
+                                start_times.pop(future, None)
+                                timed_out = True
+            except KeyboardInterrupt:
+                interrupted = True
+            finally:
+                pool.shutdown(wait=not (interrupted or error or timed_out), cancel_futures=True)
+                if interrupted or error is not None:
+                    for future in list(pending):
+                        sample = future_map[future]
+                        if future.cancel():
+                            _record_failure(sample.stem)
+                        else:
+                            try:
+                                res = future.result()
+                            except BaseException:
+                                continue
+                            _append_result(res)
+                    for future in list(done):
+                        if future in future_map:
+                            try:
+                                res = future.result()
+                            except BaseException:
+                                continue
+                            _append_result(res)
             if error is not None:
                 raise error
         else:

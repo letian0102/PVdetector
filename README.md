@@ -90,6 +90,9 @@ Key flags:
 | `--grid-size` | Optional | `20000` | `--grid-size 40000` | Number of KDE evaluation points (minimum 4000). |
 | `--valley-drop` | Optional | `10.0` | `--valley-drop 12.5` | Percent drop required between peaks. |
 | `--first-valley` | Optional | `slope` | `--first-valley drop` | Strategy for the first valley: `slope` or `drop`. |
+| `--peak-model` | Optional | _None_ | `--peak-model weights.joblib` | Path to a saved peak/non-peak classifier; when omitted, heuristics are used. |
+| `--peak-model-threshold` | Optional | `0.6` | `--peak-model-threshold 0.7` | Minimum probability required for a model-proposed peak. |
+| `--peak-model-confidence` | Optional | `0.55` | `--peak-model-confidence 0.6` | If the model's best score is below this value, the detector falls back to the heuristic path. |
 | `--apply-consistency-match` / `--skip-consistency-match` | Optional | Skip consistency | `--apply-consistency-match` | Toggle cross-sample marker consistency; disabled by default. |
 | `--consistency-tol` | Optional | `0.5` | `--consistency-tol 0.3` | Allowed variation when consistency matching is enabled. |
 | `--align` | Optional | Off | `--align` | Enable landmark alignment and normalisation. |
@@ -157,6 +160,25 @@ Run unit tests with:
 ```bash
 pytest
 ```
+
+### Training the optional peak scorer
+The detector can bootstrap peaks from a lightweight gradient-boosted classifier
+that scores each KDE grid cell using local windows of the density curve.
+
+1. Create labelled traces (binary arrays aligned to the KDE grid where `1` marks
+   a peak location).
+2. Fit and persist the model:
+   ```python
+   from peak_valley.peak_model import GradientBoostingPeakScorer
+
+   scorer = GradientBoostingPeakScorer(window_radius=5)
+   scorer.fit([trace1, trace2], [labels1, labels2])
+   scorer.save("weights/peaks.joblib")
+   ```
+3. Run the CLI with `--peak-model weights/peaks.joblib` to enable the
+   probability-driven candidate peaks. The detector will automatically fall
+   back to the existing heuristics when the model's best score drops below the
+   configured confidence threshold.
 
 ## Contributing
 Issues and pull requests are welcome. Please include tests for new features or bug fixes.

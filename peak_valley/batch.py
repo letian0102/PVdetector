@@ -16,6 +16,7 @@ import re
 import zipfile
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field
+import inspect
 from pathlib import Path
 import signal
 from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
@@ -32,6 +33,7 @@ from .gpt_adapter import (
     ask_gpt_prominence,
 )
 from .kde_detector import kde_peaks_valleys, quick_peak_estimate
+from .peak_model import GradientBoostingPeakScorer, load_peak_scorer
 from .quality import stain_quality
 
 
@@ -104,6 +106,10 @@ class BatchOptions:
     grid_size: int = 20_000
     valley_drop: float = 10.0  # percent of peak height
     first_valley: str = "slope"  # or "drop"
+    peak_model_path: str | None = None
+    peak_model_threshold: float = 0.6
+    peak_model_confidence: float = 0.55
+    peak_model: "GradientBoostingPeakScorer | None" = None
 
     apply_consistency: bool = False
     consistency_tol: float = 0.5
@@ -307,6 +313,20 @@ def _resolve_parameters(
     else:
         params["first_valley"] = options.first_valley
 
+    params["peak_model_path"] = overrides.get("peak_model_path", options.peak_model_path)
+    thr_override = _coerce_float(overrides.get("peak_model_threshold"))
+    conf_override = _coerce_float(overrides.get("peak_model_confidence"))
+    params["peak_model_threshold"] = (
+        float(thr_override)
+        if thr_override is not None
+        else float(options.peak_model_threshold)
+    )
+    params["peak_model_confidence"] = (
+        float(conf_override)
+        if conf_override is not None
+        else float(options.peak_model_confidence)
+    )
+
     # --- prominence -------------------------------------------------------
     prom_override = overrides.get("prom")
     prom_default = options.prominence
@@ -490,6 +510,24 @@ def process_sample(
 
     drop_frac = params["valley_drop"] / 100.0
 
+    detector_kwargs = {
+        "drop_frac": drop_frac,
+        "min_x_sep": params["min_separation"],
+        "curvature_thresh": curvature,
+        "turning_peak": params["turning_points"],
+        "first_valley": params["first_valley"],
+    }
+    optional_kwargs = {
+        "peak_model": options.peak_model,
+        "peak_model_path": params.get("peak_model_path"),
+        "peak_model_threshold": params.get("peak_model_threshold", 0.6),
+        "peak_model_min_confidence": params.get("peak_model_confidence", 0.55),
+    }
+    signature = inspect.signature(kde_peaks_valleys)
+    for key, value in optional_kwargs.items():
+        if key in signature.parameters:
+            detector_kwargs[key] = value
+
     peaks, valleys, xs, ys = kde_peaks_valleys(
         counts,
         params["n_peaks_effective"],
@@ -497,11 +535,7 @@ def process_sample(
         params["bandwidth_effective"],
         min_width,
         params["grid_size"],
-        drop_frac=drop_frac,
-        min_x_sep=params["min_separation"],
-        curvature_thresh=curvature,
-        turning_peak=params["turning_points"],
-        first_valley=params["first_valley"],
+        **detector_kwargs,
     )
 
     valleys = _postprocess_valleys(peaks, valleys, xs, ys, drop_frac)
@@ -520,6 +554,9 @@ def process_sample(
         "grid_size": params["grid_size"],
         "valley_drop": params["valley_drop"],
         "first_valley": params["first_valley"],
+        "peak_model_path": params.get("peak_model_path"),
+        "peak_model_threshold": params.get("peak_model_threshold"),
+        "peak_model_confidence": params.get("peak_model_confidence"),
     }
     if debug:
         details["debug"] = debug

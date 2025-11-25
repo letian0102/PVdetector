@@ -5,3 +5,8 @@ from .kde_detector   import kde_peaks_valleys, quick_peak_estimate
 from .plotting       import fig_to_png, thumb64
 from .gpt_adapter    import ask_gpt_peak_count           # noqa: F401
 from .consistency    import enforce_marker_consistency    # noqa: F401
+from .peak_model     import (
+    GradientBoostingPeakScorer,
+    load_peak_scorer,
+    training_rows_from_labels,
+)

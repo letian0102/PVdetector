@@ -468,6 +468,8 @@ def _resolve_parameters(
                 debug["roughness_error"] = str(exc)
                 params["bandwidth_effective"] = options.bandwidth
 
+    bw_use = params["bandwidth_effective"]
+
     prom_use = params["prominence"]
     if params["prominence_auto"] and gpt_client is not None:
         try:

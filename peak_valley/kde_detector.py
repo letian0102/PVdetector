@@ -8,7 +8,7 @@ from scipy.signal import fftconvolve, find_peaks
 
 from .consistency import _enforce_valley_rule
 
-__all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
+__all__ = ["kde_peaks_valleys", "quick_peak_estimate", "select_adaptive_bandwidth"]
 
 
 # ----------------------------------------------------------------------
@@ -366,6 +366,106 @@ def _evaluate_kde(
     return _fft_gaussian_kde(x, xs, bandwidth)
 
 
+def _bandwidth_separation_score(
+    ys: np.ndarray, peaks: np.ndarray, prominences: np.ndarray, expected: int | None
+) -> float:
+    """Score how well-separated peaks are for a given KDE profile.
+
+    The score rewards strong prominences, deep valleys, and matching the
+    expected peak count (when provided).  All terms are normalized by the
+    KDE height to keep the score comparable across bandwidths.
+    """
+
+    if ys.size == 0:
+        return float("-inf")
+
+    height = float(np.max(ys))
+    if height <= 0 or peaks.size == 0:
+        return float("-inf")
+
+    prom_score = float(np.mean(prominences) / height) if prominences.size else 0.0
+
+    valley_score = 0.0
+    if peaks.size > 1:
+        drops: list[float] = []
+        for left, right in zip(peaks[:-1], peaks[1:]):
+            if right <= left + 1:
+                continue
+            valley = float(np.min(ys[left:right]))
+            drops.append(max(0.0, min(ys[left], ys[right]) - valley))
+        if drops:
+            valley_score = float(np.mean(drops) / height)
+
+    count_score = 1.0
+    if expected is not None and expected > 0:
+        count_score -= min(1.0, abs(peaks.size - expected) / expected)
+    elif peaks.size > 6:
+        count_score = 1.0 / (1.0 + 0.25 * (peaks.size - 6))
+
+    return 0.55 * prom_score + 0.35 * valley_score + 0.10 * count_score
+
+
+def select_adaptive_bandwidth(
+    data: np.ndarray,
+    base_rule: str | float = "scott",
+    *,
+    expected_peaks: int | None = None,
+    max_grid: int = 1_200,
+) -> float:
+    """Pick a KDE bandwidth scale that maximizes peak separation.
+
+    A handful of scale factors around the chosen ``base_rule`` are scored on a
+    small evaluation grid to avoid large runtime overhead.  The winning scale
+    factor is returned in *factor* form, ready to be passed to
+    ``gaussian_kde(..., bw_method=factor)``.
+    """
+
+    x = np.asarray(data, float)
+    x = x[np.isfinite(x)]
+    if x.size < 2:
+        return 1.0
+
+    if x.size > 4_000:
+        x = np.random.choice(x, 4_000, replace=False)
+
+    kde = gaussian_kde(x, bw_method=base_rule)
+    base_factor = float(kde.factor)
+
+    data_min = float(np.min(x))
+    data_max = float(np.max(x))
+    span = data_max - data_min
+    if not np.isfinite(span) or span <= 0:
+        span = 1.0
+        data_min -= 0.5
+        data_max += 0.5
+
+    xs = np.linspace(
+        data_min,
+        data_max,
+        min(max_grid, max(600, 3 * x.size)),
+    )
+
+    scales = (0.65, 0.85, 1.0, 1.2, 1.45)
+    best_scale = 1.0
+    best_score = float("-inf")
+
+    prom_threshold_scale = 0.02
+
+    for scale in scales:
+        kde.set_bandwidth(base_factor * scale)
+        ys = _evaluate_kde(x, xs, kde)
+        prom_thresh = prom_threshold_scale * float(np.max(ys))
+        peaks, props = find_peaks(ys, prominence=prom_thresh, distance=2)
+        prominences = props.get("prominences", np.array([]))
+        score = _bandwidth_separation_score(ys, peaks, prominences, expected_peaks)
+        if score > best_score:
+            best_score = score
+            best_scale = scale
+
+    kde.set_bandwidth(base_factor)
+    return base_factor * best_scale
+
+
 def _first_valley_slope(
     xs: np.ndarray,
     ys: np.ndarray,
@@ -602,7 +702,16 @@ def kde_peaks_valleys(
     # ---------- KDE grid ----------
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
-    kde = gaussian_kde(x, bw_method=bw)
+    bw_method = bw
+    if isinstance(bw, str) and bw.strip().lower() in {"auto", "adaptive"}:
+        bw_method = select_adaptive_bandwidth(
+            x,
+            base_rule="scott",
+            expected_peaks=n_peaks,
+            max_grid=min(grid_size, 4_000),
+        )
+
+    kde = gaussian_kde(x, bw_method=bw_method)
     if _mostly_small_discrete(x):
         kde.set_bandwidth(kde.factor * 4.0)
     h   = kde.factor * x.std(ddof=1)

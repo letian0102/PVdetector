@@ -214,6 +214,31 @@ def _bandwidth_config(value: Any, default: str | float, auto_flag: bool) -> tupl
     return default, auto_flag
 
 
+def _normalise_bandwidth(value: Any, fallback: str | float = "scott") -> str | float:
+    """Coerce user/GPT-provided bandwidth into a ``gaussian_kde`` friendly form."""
+
+    if callable(value):  # pragma: no cover - passthrough for advanced users
+        return value
+
+    if isinstance(value, (int, float, np.floating)):
+        return float(value)
+
+    if isinstance(value, str):
+        label = value.strip().lower()
+        if not label:
+            return fallback
+        if label in {"scott", "silverman", "roughness"}:
+            return label
+        if label in {"auto", "default", "gpt", "none"}:
+            return fallback
+        try:
+            return float(label)
+        except ValueError:
+            return fallback
+
+    return fallback
+
+
 def _boolean_override(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -412,7 +437,7 @@ def _resolve_parameters(
         if gpt_client is None:
             debug["gpt_warning"] = "GPT client unavailable; falling back to defaults"
 
-    bw_use = params["bandwidth"]
+    bw_use = _normalise_bandwidth(params["bandwidth"], options.bandwidth)
     if params["bandwidth_auto"] and gpt_client is not None:
         expected = (
             params["n_peaks"]
@@ -430,6 +455,7 @@ def _resolve_parameters(
         except Exception as exc:  # pragma: no cover - depends on API
             debug["gpt_bandwidth_error"] = str(exc)
             bw_use = options.bandwidth
+    bw_use = _normalise_bandwidth(bw_use, options.bandwidth)
     params["bandwidth_effective"] = bw_use
 
     if isinstance(params["bandwidth_effective"], str):

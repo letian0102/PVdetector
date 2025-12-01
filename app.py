@@ -555,6 +555,7 @@ def _render_override_controls(
         None,
         "scott",
         "silverman",
+        "MS",
         0.5,
         0.8,
         1.0,
@@ -570,8 +571,10 @@ def _render_override_controls(
             bw_index = bw_options.index("custom")
         bw_custom_default = float(bw_prev)
     elif isinstance(bw_prev, str):
-        if bw_prev in ("scott", "silverman"):
-            bw_index = bw_options.index(bw_prev)
+        lowered = bw_prev.strip().lower()
+        if lowered in {"scott", "silverman", "ms"}:
+            lookup = "MS" if lowered == "ms" else lowered
+            bw_index = bw_options.index(lookup)
         else:
             try:
                 bw_custom_default = float(bw_prev)
@@ -587,7 +590,7 @@ def _render_override_controls(
         if opt == "custom":
             return "Custom numeric"
         if isinstance(opt, str):
-            return opt.title()
+            return "Mean-shift (MS)" if opt.lower() == "ms" else opt.title()
         return f"{opt:.2f}"
 
     bw_choice = col_bw.selectbox(
@@ -3550,7 +3553,9 @@ def _render_dataset_overrides(
                 ),
                 "Bandwidth": st.column_config.TextColumn(
                     "Bandwidth",
-                    help="Enter a preset (scott, silverman, 0.5, …) or numeric bandwidth.",
+                    help=(
+                        "Enter a preset (scott, silverman, MS, 0.5, …) or numeric bandwidth."
+                    ),
                 ),
                 "Prominence": st.column_config.NumberColumn(
                     "Prominence",
@@ -3743,11 +3748,12 @@ def render_results(container):
                     help="Use a preset rule or enter a numeric bandwidth value."
                 )
                 if bw_input_type == "Preset":
+                    preset_options = ["scott", "silverman", "MS", "0.5", "0.8", "1.0"]
                     bw_opt = st.selectbox(
                         "Preset rule",
-                        ["scott", "silverman", "0.5", "0.8", "1.0"],
-                        index=(["scott","silverman","0.5","0.8","1.0"].index(str(bw0))
-                            if str(bw0) in ["scott","silverman","0.5","0.8","1.0"] else 0),
+                        preset_options,
+                        index=(preset_options.index(str(bw0))
+                            if str(bw0) in preset_options else 0),
                         key=f"{stem}_bw_preset",
                         help="Bandwidth rule or scaling factor for KDE smoothing."
                     )
@@ -4245,7 +4251,7 @@ with st.sidebar:
     if bw_mode == "Manual":
         bw_opt = st.selectbox(
             "Rule / scale",
-            ["scott", "silverman", "0.5", "0.8", "1.0"],
+            ["scott", "silverman", "MS", "0.5", "0.8", "1.0"],
             key="bw_sel",
             help="Bandwidth rule or multiplier when set manually."
         )

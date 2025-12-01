@@ -5,6 +5,7 @@ import math
 import numpy as np
 from scipy.stats import gaussian_kde
 from scipy.signal import fftconvolve, find_peaks
+from sklearn.cluster import MeanShift, estimate_bandwidth
 
 from .consistency import _enforce_valley_rule
 
@@ -366,6 +367,173 @@ def _evaluate_kde(
     return _fft_gaussian_kde(x, xs, bandwidth)
 
 
+def _ms_bandwidth_candidates(
+    x: np.ndarray, base_factor: float, sample_std: float
+) -> list[float]:
+    """Generate a small grid of candidate bandwidth factors."""
+
+    scales = np.linspace(0.5, 1.6, 8)
+    candidates = [float(base_factor * s) for s in scales if base_factor * s > 0]
+
+    if sample_std > 0:
+        try:
+            bw_est = estimate_bandwidth(
+                x.reshape(-1, 1),
+                quantile=0.25,
+                n_samples=min(800, x.size),
+            )
+        except Exception:
+            bw_est = None
+        if bw_est and np.isfinite(bw_est) and bw_est > 0:
+            factor_est = bw_est / sample_std
+            if np.isfinite(factor_est) and factor_est > 0:
+                candidates.extend(
+                    [
+                        float(factor_est),
+                        float(0.8 * factor_est),
+                        float(1.25 * factor_est),
+                    ]
+                )
+
+    uniq = {round(c, 8) for c in candidates if np.isfinite(c) and c > 0}
+    return sorted(uniq)
+
+
+def _bandwidth_profile_score(
+    x: np.ndarray,
+    factor: float,
+    sample_std: float,
+    *,
+    expected_peaks: int | None,
+    grid_size: int,
+    prominence: float,
+    min_x_sep: float,
+    drop_frac: float,
+) -> tuple[float, int, float]:
+    """Score one bandwidth factor using peak separation and mean-shift cues."""
+
+    bandwidth = factor * sample_std
+    if not np.isfinite(bandwidth) or bandwidth <= 0:
+        return float("-inf"), 0, float("nan")
+
+    kde = gaussian_kde(x, bw_method=factor)
+    span = bandwidth
+    xs = np.linspace(
+        x.min() - span,
+        x.max() + span,
+        min(grid_size, max(4000, 4 * x.size)),
+    )
+    ys = _evaluate_kde(x, xs, kde)
+    if xs.size < 3 or not np.isfinite(ys).any():
+        return float("-inf"), 0, bandwidth
+
+    grid_dx = xs[1] - xs[0]
+    distance = None
+    if min_x_sep is not None:
+        distance = max(1, int(math.ceil(min_x_sep / grid_dx)))
+
+    locs, _ = find_peaks(ys, prominence=prominence, distance=distance)
+    locs = _merge_close_peaks(
+        xs, ys, locs, min_x_sep=min_x_sep, min_valley_drop=drop_frac
+    )
+    peaks_x = _enforce_min_separation(xs[locs].tolist(), xs, ys, min_x_sep)
+    peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+
+    if not peaks_idx:
+        return float("-inf"), 0, bandwidth
+
+    valley_depths: list[float] = []
+    if len(peaks_idx) > 1:
+        for left, right in zip(peaks_idx[:-1], peaks_idx[1:]):
+            valley_x = _valley_between(xs, ys, left, right, drop_frac)
+            v_idx = int(np.argmin(np.abs(xs - valley_x)))
+            peak_floor = min(ys[left], ys[right])
+            drop = peak_floor - ys[v_idx]
+            denom = max(peak_floor, 1e-12)
+            valley_depths.append(drop / denom)
+
+    separation = float(np.mean(valley_depths)) if valley_depths else 0.25
+
+    try:
+        ms = MeanShift(bandwidth=bandwidth, cluster_all=False)
+        labels = ms.fit_predict(x.reshape(-1, 1))
+        ms_clusters = int(np.unique(labels[labels >= 0]).size)
+    except Exception:
+        ms_clusters = len(peaks_idx)
+
+    target = expected_peaks or ms_clusters or len(peaks_idx)
+    count_score = 1.0 / (1.0 + abs(len(peaks_idx) - target))
+    ms_score = 1.0 / (1.0 + abs(len(peaks_idx) - ms_clusters)) if ms_clusters else 1.0
+
+    score = 0.35 * separation + 0.4 * count_score + 0.25 * ms_score
+    return score, len(peaks_idx), bandwidth
+
+
+def _mean_shift_bandwidth(
+    data: np.ndarray,
+    *,
+    expected_peaks: int | None,
+    grid_size: int,
+    prominence: float,
+    min_x_sep: float,
+    drop_frac: float,
+) -> tuple[float, dict[str, float | int]]:
+    """Choose a KDE bandwidth via a mean-shift informed sweep."""
+
+    x = np.asarray(data, float)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return 1.0, {"ms_score": float("nan"), "ms_peaks": 0}
+
+    if x.size > 5000:
+        x = np.random.choice(x, 5000, replace=False)
+
+    sample_std = float(np.std(x, ddof=1)) if x.size > 1 else 0.0
+    if sample_std <= 0 or not np.isfinite(sample_std):
+        return 1.0, {"ms_score": float("nan"), "ms_peaks": 0}
+
+    base_kde = gaussian_kde(x, bw_method="scott")
+    base_factor = float(base_kde.factor)
+
+    candidates = _ms_bandwidth_candidates(x, base_factor, sample_std)
+    if not candidates:
+        return base_factor, {"ms_score": float("nan"), "ms_peaks": 0}
+
+    best_factor = candidates[0]
+    best_bandwidth = best_factor * sample_std
+    best_score = float("-inf")
+    best_peaks = 0
+    for factor in candidates:
+        score, n_peaks, bandwidth = _bandwidth_profile_score(
+            x,
+            factor,
+            sample_std,
+            expected_peaks=expected_peaks,
+            grid_size=min(grid_size, 12_000),
+            prominence=prominence,
+            min_x_sep=min_x_sep,
+            drop_frac=drop_frac,
+        )
+
+        if score > best_score or (
+            math.isclose(score, best_score, rel_tol=1e-6) and n_peaks > best_peaks
+        ):
+            best_score = score
+            best_peaks = n_peaks
+            best_factor = factor
+            best_bandwidth = bandwidth
+
+    debug = {
+        "method": "MS",
+        "ms_score": float(best_score),
+        "ms_peaks": int(best_peaks),
+        "bandwidth_abs": float(best_bandwidth),
+        "bandwidth_factor": float(best_factor),
+        "candidates": int(len(candidates)),
+    }
+    return float(best_factor), debug
+
+
 def _first_valley_slope(
     xs: np.ndarray,
     ys: np.ndarray,
@@ -599,10 +767,21 @@ def kde_peaks_valleys(
     if x.size == 0:
         return [], [], np.array([]), np.array([])
 
+    bw_method = bw
+    if isinstance(bw_method, str) and bw_method.strip().lower() == "ms":
+        bw_method, _ = _mean_shift_bandwidth(
+            x,
+            expected_peaks=n_peaks,
+            grid_size=grid_size,
+            prominence=prominence,
+            min_x_sep=min_x_sep,
+            drop_frac=drop_frac,
+        )
+
     # ---------- KDE grid ----------
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
-    kde = gaussian_kde(x, bw_method=bw)
+    kde = gaussian_kde(x, bw_method=bw_method)
     if _mostly_small_discrete(x):
         kde.set_bandwidth(kde.factor * 4.0)
     h   = kde.factor * x.std(ddof=1)

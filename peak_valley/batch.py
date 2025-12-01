@@ -31,7 +31,7 @@ from .gpt_adapter import (
     ask_gpt_peak_count,
     ask_gpt_prominence,
 )
-from .kde_detector import kde_peaks_valleys, quick_peak_estimate
+from .kde_detector import _mean_shift_bandwidth, kde_peaks_valleys, quick_peak_estimate
 from .quality import stain_quality
 
 
@@ -329,6 +329,8 @@ def _resolve_parameters(
         options.bandwidth,
         options.bandwidth_auto,
     )
+    if isinstance(bw_value, str) and bw_value.strip().lower() == "ms":
+        bw_value = "MS"
     params["bandwidth"] = bw_value
     params["bandwidth_auto"] = bw_auto
 
@@ -358,6 +360,17 @@ def _resolve_parameters(
             debug["gpt_warning"] = "GPT client unavailable; falling back to defaults"
 
     bw_use = params["bandwidth"]
+    if isinstance(bw_use, str) and bw_use.strip().lower() == "ms":
+        bw_use, bw_debug = _mean_shift_bandwidth(
+            counts,
+            expected_peaks=params.get("n_peaks") or params.get("max_peaks"),
+            grid_size=params["grid_size"],
+            prominence=params["prominence"],
+            min_x_sep=params["min_separation"],
+            drop_frac=params["valley_drop"] / 100.0,
+        )
+        debug["bandwidth_ms"] = bw_debug
+
     if params["bandwidth_auto"] and gpt_client is not None:
         expected = (
             params["n_peaks"]

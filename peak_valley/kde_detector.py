@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -501,11 +502,17 @@ def _mean_shift_bandwidth(
     if not candidates:
         return base_factor, {"ms_score": float("nan"), "ms_peaks": 0}
 
-    ms_workers = 1
+    ms_workers = None
     if max_workers is not None:
         try:
             ms_workers = max(1, int(max_workers))
         except (TypeError, ValueError):
+            ms_workers = None
+    if ms_workers is None or ms_workers <= 1:
+        try:
+            cpu_guess = os.cpu_count() or 1
+            ms_workers = max(1, min(int(cpu_guess), len(candidates) or 1))
+        except Exception:
             ms_workers = 1
 
     best_factor = candidates[0]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import Sequence
 
 import numpy as np
 from scipy.stats import gaussian_kde
@@ -64,6 +65,61 @@ def _merge_close_peaks(
     return np.asarray(keep, dtype=int)
 
 
+def _vote_consensus_peaks(
+    xs: np.ndarray,
+    peak_sets: Sequence[np.ndarray],
+    *,
+    tol: float,
+    min_votes: int,
+) -> list[float]:
+    """Aggregate peaks that recur across smoothing scales.
+
+    Parameters
+    ----------
+    xs : np.ndarray
+        KDE grid positions.
+    peak_sets : Sequence[np.ndarray]
+        Peak indices detected at different scales.
+    tol : float
+        Maximum distance between peaks (in data units) for them to be
+        considered the same feature.
+    min_votes : int
+        Minimum number of times a feature must appear to be kept.
+
+    Returns
+    -------
+    list[float]
+        Consensus peak locations (X coordinates).
+    """
+
+    if not peak_sets:
+        return []
+
+    tol = abs(float(tol))
+    if tol == 0:
+        tol = float(xs[1] - xs[0]) if xs.size > 1 else 1.0
+
+    centres: list[float] = []
+    votes: list[int] = []
+
+    for peaks in peak_sets:
+        for idx in np.unique(peaks):
+            px = float(xs[idx])
+            matched = False
+            for j, cx in enumerate(centres):
+                if abs(px - cx) <= tol:
+                    votes[j] += 1
+                    # refine centre with a running average to reduce bias
+                    centres[j] = cx + (px - cx) / votes[j]
+                    matched = True
+                    break
+            if not matched:
+                centres.append(px)
+                votes.append(1)
+
+    return [c for c, v in zip(centres, votes) if v >= min_votes]
+
+
 def _peak_height(xs: np.ndarray, ys: np.ndarray, peak_x: float) -> float:
     """Return KDE height at the closest grid point to ``peak_x``."""
 
@@ -118,6 +174,64 @@ def _enforce_min_separation(
 
         if i > 0:
             i -= 1
+
+    return keep
+
+
+def _prune_shallow_valleys(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    peaks_idx: list[int],
+    *,
+    min_valley_drop: float,
+    valley_area_frac: float,
+    drop_frac: float,
+) -> list[int]:
+    """Merge peaks separated by only shallow valleys.
+
+    Two heuristics guard against over-counting minor shoulders:
+    - the valley must drop by at least ``min_valley_drop`` relative to the
+      lower neighbouring peak, otherwise the weaker peak is discarded;
+    - the probability mass between the peaks must form a substantial pond
+      (``valley_area_frac`` of the total KDE area) to justify separation.
+    """
+
+    if len(peaks_idx) < 2:
+        return peaks_idx
+
+    total_area = float(np.trapz(ys, xs)) if xs.size else 0.0
+    if not np.isfinite(total_area) or total_area <= 0:
+        return peaks_idx
+
+    keep = sorted(int(i) for i in peaks_idx)
+
+    changed = True
+    while changed and len(keep) > 1:
+        changed = False
+        for i in range(len(keep) - 1):
+            left, right = keep[i], keep[i + 1]
+            valley_x = _valley_between(xs, ys, left, right, drop_frac)
+            valley_idx = int(np.argmin(np.abs(xs - valley_x)))
+
+            left_h = float(ys[left])
+            right_h = float(ys[right])
+            valley_h = float(ys[valley_idx])
+
+            if min(left_h, right_h) <= 0:
+                continue
+
+            drop = 1.0 - valley_h / min(left_h, right_h)
+
+            interval = slice(min(left, right), max(left, right) + 1)
+            area = float(np.trapz(ys[interval], xs[interval])) / total_area
+
+            if drop < min_valley_drop and area > valley_area_frac:
+                if left_h >= right_h:
+                    del keep[i + 1]
+                else:
+                    del keep[i]
+                changed = True
+                break
 
     return keep
 
@@ -366,6 +480,44 @@ def _evaluate_kde(
     return _fft_gaussian_kde(x, xs, bandwidth)
 
 
+def _detect_turning_points(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    *,
+    curvature_thresh: float,
+    min_x_sep: float | None,
+) -> np.ndarray:
+    """Identify concave-down shoulders with near-flat slope."""
+
+    if curvature_thresh <= 0:
+        return np.array([], dtype=int)
+
+    dx = float(xs[1] - xs[0]) if xs.size > 1 else 1.0
+    sep = dx if min_x_sep is None or min_x_sep <= 0 else float(min_x_sep)
+
+    dy = np.gradient(ys, xs)
+    # short moving average to stabilise the derivative sign
+    if dy.size >= 5:
+        kernel = np.ones(5) / 5.0
+        dy = np.convolve(dy, kernel, mode="same")
+
+    d2y = np.gradient(dy, xs)
+    slope_tol = 0.05 * np.max(np.abs(dy)) if dy.size else 0.0
+
+    turning = np.where((np.abs(dy) < slope_tol) & (d2y < -curvature_thresh))[0]
+    if not turning.size:
+        return np.array([], dtype=int)
+
+    keep = [int(turning[0])]
+    for idx in turning[1:]:
+        if xs[idx] - xs[keep[-1]] >= sep:
+            keep.append(int(idx))
+        elif ys[idx] > ys[keep[-1]]:
+            keep[-1] = int(idx)
+
+    return np.asarray(keep, dtype=int)
+
+
 def _first_valley_slope(
     xs: np.ndarray,
     ys: np.ndarray,
@@ -593,6 +745,10 @@ def kde_peaks_valleys(
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,
     first_valley   : str = "slope",
+    multiscale     : bool = True,
+    multiscale_factors: Sequence[float] | None = None,
+    auto_turning   : bool = True,
+    valley_area_frac: float = 0.02,
 ):
     x = np.asarray(data, float)
     x = x[np.isfinite(x)]
@@ -626,25 +782,56 @@ def kde_peaks_valleys(
         kw["width"] = min_width
     locs, _ = find_peaks(ys, **kw, distance=distance)
 
-    if turning_peak and curvature_thresh and curvature_thresh > 0:
-        dy  = np.gradient(ys, xs)                 # 1st derivative
-        d2y = np.gradient(dy,  xs)                # 2nd derivative
-        slope_tol = 0.05 * np.max(np.abs(dy))     # “almost flat”
+    d2y = np.gradient(np.gradient(ys, xs), xs)
+    curv = float(np.nanmax(np.abs(d2y))) if d2y.size else 0.0
+    eff_curvature = curvature_thresh if curvature_thresh else None
+    if eff_curvature is None and (turning_peak or auto_turning):
+        eff_curvature = 0.25 * curv if curv > 0 else None
 
-        turning = np.where(
-            (np.abs(dy) < slope_tol) &           # near-flat slope
-            (d2y < -curvature_thresh)            # concave-down
-        )[0]
-
-        # keep only the strongest point inside every min_x_sep window
+    do_turning = turning_peak or (auto_turning and locs.size <= 1)
+    if do_turning and eff_curvature and eff_curvature > 0:
+        turning = _detect_turning_points(
+            xs, ys, curvature_thresh=eff_curvature, min_x_sep=min_x_sep
+        )
         if turning.size:
-            strongest = [turning[0]]
-            for idx in turning[1:]:
-                if xs[idx] - xs[strongest[-1]] >= min_x_sep:
-                    strongest.append(idx)
-                elif ys[idx] > ys[strongest[-1]]:     # higher shoulder wins
-                    strongest[-1] = idx
-            locs = np.unique(np.concatenate([locs, strongest]))
+            locs = np.unique(np.concatenate([locs, turning]))
+
+    if multiscale:
+        factors = [float(f) for f in (multiscale_factors or (0.5, 1.0, 2.0))]
+        factors = [f for f in factors if np.isfinite(f) and f > 0]
+        if not any(abs(f - 1.0) < 1e-9 for f in factors):
+            factors.append(1.0)
+
+        peak_sets: list[np.ndarray] = []
+        base_bandwidth = float(h)
+
+        for factor in sorted(set(factors)):
+            if base_bandwidth <= 0:
+                continue
+            bw_scaled = base_bandwidth * factor
+            if abs(factor - 1.0) < 1e-9:
+                peak_sets.append(np.asarray(locs, dtype=int))
+            else:
+                ys_scaled = _fft_gaussian_kde(x, xs, bw_scaled)
+                locs_scaled, _ = find_peaks(ys_scaled, **kw, distance=distance)
+                peak_sets.append(np.asarray(locs_scaled, dtype=int))
+
+        if len(peak_sets) > 1:
+            if min_x_sep is not None and np.isfinite(min_x_sep) and min_x_sep > 0:
+                vote_tol = 0.5 * float(min_x_sep)
+            else:
+                vote_tol = 3.0 * abs(grid_dx)
+
+            min_votes = max(2, math.ceil(len(peak_sets) / 2))
+            consensus = _vote_consensus_peaks(
+                xs, peak_sets, tol=vote_tol, min_votes=min_votes
+            )
+
+            if consensus:
+                locs = np.asarray(
+                    [int(np.argmin(np.abs(xs - cx))) for cx in consensus],
+                    dtype=int,
+                )
 
     locs = _merge_close_peaks(xs, ys, locs,
             min_x_sep=min_x_sep, min_valley_drop=min_valley_drop)
@@ -662,6 +849,17 @@ def kde_peaks_valleys(
     peaks_x = _enforce_min_separation(xs[peaks_idx].tolist(), xs, ys, min_x_sep)
 
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+
+    if n_peaks is None and len(peaks_idx) > 1:
+        peaks_idx = _prune_shallow_valleys(
+            xs,
+            ys,
+            peaks_idx,
+            min_valley_drop=min_valley_drop,
+            valley_area_frac=valley_area_frac,
+            drop_frac=drop_frac,
+        )
+        peaks_x = [float(xs[idx]) for idx in peaks_idx]
 
     # ---------- GMM fallback (unchanged) ----------
     if n_peaks is not None and len(peaks_x) < n_peaks:

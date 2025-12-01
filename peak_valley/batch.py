@@ -516,10 +516,8 @@ def _resolve_parameters(
                     n_gmm = _estimate_n_peaks_bic(counts, params["max_peaks"])
                     debug["n_peaks_gmm_bic"] = n_gmm
                     if quick_n > 0:
-                        debug["n_peaks_kde_cap"] = quick_n
-                        n_use = min(n_gmm, quick_n)
-                    else:
-                        n_use = n_gmm
+                        debug["n_peaks_quick_hint"] = quick_n
+                    n_use = n_gmm
                 except Exception as exc:  # pragma: no cover - sklearn optional
                     debug["gmm_bic_error"] = str(exc)
                     n_use = quick_n if quick_n > 0 else None

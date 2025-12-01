@@ -9,6 +9,7 @@ distributions, and export all intermediate and final artefacts.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import io
 import json
 import math
@@ -256,6 +257,7 @@ def _resolve_parameters(
     gpt_client: OpenAI | None,
     counts: np.ndarray,
     marker: str | None,
+    worker_count: int = 1,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return detector parameters and a debug dictionary."""
 
@@ -368,6 +370,7 @@ def _resolve_parameters(
             prominence=params["prominence"],
             min_x_sep=params["min_separation"],
             drop_frac=params["valley_drop"] / 100.0,
+            max_workers=worker_count,
         )
         debug["bandwidth_ms"] = bw_debug
 
@@ -460,6 +463,7 @@ def process_sample(
     options: BatchOptions,
     overrides: Mapping[str, Any] | None,
     gpt_client: OpenAI | None = None,
+    worker_count: int = 1,
 ) -> SampleResult:
     """Run the detector for a single sample."""
 
@@ -494,6 +498,7 @@ def process_sample(
         gpt_client,
         counts,
         sample.metadata.get("marker"),
+        worker_count,
     )
 
     min_width = params["min_width"] if params["min_width"] else None
@@ -562,6 +567,19 @@ def run_batch(
 ) -> BatchResults:
     """Process all samples and optionally align them."""
 
+    worker_count = max(1, int(options.workers))
+
+    process_fn = process_sample
+    try:
+        supports_worker_kw = "worker_count" in inspect.signature(process_fn).parameters
+    except (TypeError, ValueError):
+        supports_worker_kw = False
+
+    def _invoke_process(sample: SampleInput) -> SampleResult:
+        if supports_worker_kw:
+            return process_fn(sample, options, overrides, gpt_client, worker_count)
+        return process_fn(sample, options, overrides, gpt_client)
+
     def _run_sample_with_timeout(sample: SampleInput) -> SampleResult:
         timeout = float(options.sample_timeout)
 
@@ -569,7 +587,7 @@ def run_batch(
         # When running samples in parallel we disable the alarm to keep worker
         # threads usable and rely on the caller to manage long-running samples.
         if timeout <= 0 or worker_count > 1:
-            return process_sample(sample, options, overrides, gpt_client)
+            return _invoke_process(sample)
 
         def _raise_timeout(signum, frame):  # pragma: no cover - invoked by signal
             raise TimeoutError(
@@ -580,12 +598,10 @@ def run_batch(
         signal.signal(signal.SIGALRM, _raise_timeout)
         signal.setitimer(signal.ITIMER_REAL, timeout)
         try:
-            return process_sample(sample, options, overrides, gpt_client)
+            return _invoke_process(sample)
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous_handler)
-
-    worker_count = max(1, int(options.workers))
 
     ordered = sorted(samples, key=lambda s: s.order)
     order_map = {s.stem: idx for idx, s in enumerate(ordered)}

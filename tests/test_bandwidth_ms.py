@@ -38,3 +38,27 @@ def test_ms_bandwidth_drives_bimodal_detection():
     assert len(xs) > 0 and len(ys) > 0
     assert len(peaks) == 2
     assert len(valleys) == 1
+
+
+def test_ms_bandwidth_works_with_workers():
+    rng = np.random.default_rng(7)
+    data = np.concatenate([
+        rng.normal(-1.5, 0.3, size=300),
+        rng.normal(1.75, 0.35, size=300),
+    ])
+
+    sample = batch_mod.SampleInput(
+        stem="sample",
+        counts=data,
+        metadata={},
+        arcsinh_signature=(False, 1.0, 0.2, 0.0),
+    )
+    options = BatchOptions(apply_arcsinh=False, bandwidth="MS", workers=2)
+
+    results = batch_mod.run_batch([sample], options)
+    assert results.samples
+
+    debug = results.samples[0].params["debug"]["bandwidth_ms"]
+    assert debug["method"] == "MS"
+    assert debug["ms_workers"] >= 2
+    assert results.samples[0].peaks

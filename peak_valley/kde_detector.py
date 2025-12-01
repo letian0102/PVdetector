@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from scipy.stats import gaussian_kde
@@ -477,6 +478,7 @@ def _mean_shift_bandwidth(
     prominence: float,
     min_x_sep: float,
     drop_frac: float,
+    max_workers: int | None = None,
 ) -> tuple[float, dict[str, float | int]]:
     """Choose a KDE bandwidth via a mean-shift informed sweep."""
 
@@ -499,11 +501,19 @@ def _mean_shift_bandwidth(
     if not candidates:
         return base_factor, {"ms_score": float("nan"), "ms_peaks": 0}
 
+    ms_workers = 1
+    if max_workers is not None:
+        try:
+            ms_workers = max(1, int(max_workers))
+        except (TypeError, ValueError):
+            ms_workers = 1
+
     best_factor = candidates[0]
     best_bandwidth = best_factor * sample_std
     best_score = float("-inf")
     best_peaks = 0
-    for factor in candidates:
+
+    def _score_candidate(factor: float) -> tuple[float, float, int, float]:
         score, n_peaks, bandwidth = _bandwidth_profile_score(
             x,
             factor,
@@ -514,6 +524,15 @@ def _mean_shift_bandwidth(
             min_x_sep=min_x_sep,
             drop_frac=drop_frac,
         )
+        return factor, score, n_peaks, bandwidth
+
+    if len(candidates) > 1 and ms_workers > 1:
+        with ThreadPoolExecutor(max_workers=min(ms_workers, len(candidates))) as pool:
+            scored = list(pool.map(_score_candidate, candidates))
+    else:
+        scored = [_score_candidate(factor) for factor in candidates]
+
+    for factor, score, n_peaks, bandwidth in scored:
 
         if score > best_score or (
             math.isclose(score, best_score, rel_tol=1e-6) and n_peaks > best_peaks
@@ -527,6 +546,7 @@ def _mean_shift_bandwidth(
         "method": "MS",
         "ms_score": float(best_score),
         "ms_peaks": int(best_peaks),
+        "ms_workers": int(ms_workers),
         "bandwidth_abs": float(best_bandwidth),
         "bandwidth_factor": float(best_factor),
         "candidates": int(len(candidates)),

@@ -649,16 +649,6 @@ def kde_peaks_valleys(
     locs = _merge_close_peaks(xs, ys, locs,
             min_x_sep=min_x_sep, min_valley_drop=min_valley_drop)
 
-    # relax prominence if too few
-    if n_peaks is not None and locs.size < n_peaks:
-        prom = prominence
-        for _ in range(4):
-            prom /= 2
-            locs, _ = find_peaks(ys, prominence=prom,
-                                 **({"width": min_width} if min_width else {}))
-            if locs.size >= n_peaks:
-                break
-
     if locs.size == 0 and n_peaks is None:
         return [], [], xs, ys
 

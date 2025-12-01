@@ -564,7 +564,11 @@ def run_batch(
 
     def _run_sample_with_timeout(sample: SampleInput) -> SampleResult:
         timeout = float(options.sample_timeout)
-        if timeout <= 0:
+
+        # Timeouts rely on signal alarms which are only available on the main thread.
+        # When running samples in parallel we disable the alarm to keep worker
+        # threads usable and rely on the caller to manage long-running samples.
+        if timeout <= 0 or worker_count > 1:
             return process_sample(sample, options, overrides, gpt_client)
 
         def _raise_timeout(signum, frame):  # pragma: no cover - invoked by signal
@@ -581,7 +585,7 @@ def run_batch(
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous_handler)
 
-    worker_count = options.workers if options.sample_timeout <= 0 else 1
+    worker_count = max(1, int(options.workers))
 
     ordered = sorted(samples, key=lambda s: s.order)
     order_map = {s.stem: idx for idx, s in enumerate(ordered)}

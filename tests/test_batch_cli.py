@@ -188,6 +188,50 @@ def test_timeout_skips_samples_and_logs(tmp_path, monkeypatch):
     assert error_lines == ["slow"]
 
 
+def test_workers_allow_parallel_even_with_timeout_flag(monkeypatch):
+    options = BatchOptions(apply_arcsinh=False, sample_timeout=0.1, workers=2)
+
+    samples = [
+        SampleInput(
+            stem="one",
+            counts=np.array([1.0, 2.0]),
+            metadata={},
+            arcsinh_signature=options.arcsinh_signature(),
+        ),
+        SampleInput(
+            stem="two",
+            counts=np.array([3.0, 4.0]),
+            metadata={},
+            arcsinh_signature=options.arcsinh_signature(),
+        ),
+    ]
+
+    def fake_process(sample, _options, _overrides, _client):
+        time.sleep(0.02)
+        return SampleResult(
+            stem=sample.stem,
+            peaks=[1.0],
+            valleys=[0.5],
+            xs=np.array([0.0, 1.0]),
+            ys=np.array([0.1, 0.2]),
+            counts=sample.counts,
+            params={},
+            quality=1.0,
+            metadata=sample.metadata,
+            arcsinh_signature=sample.arcsinh_signature,
+        )
+
+    for idx, sample in enumerate(samples):
+        sample.order = idx
+
+    monkeypatch.setattr("peak_valley.batch.process_sample", fake_process)
+
+    batch = run_batch(samples, options)
+    assert [res.stem for res in batch.samples] == ["one", "two"]
+    assert batch.failed_samples == []
+    assert not batch.interrupted
+
+
 def test_combined_zip_has_expected_exports(tmp_path):
     expr = pd.DataFrame(
         {

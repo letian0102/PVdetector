@@ -31,7 +31,11 @@ from .gpt_adapter import (
     ask_gpt_peak_count,
     ask_gpt_prominence,
 )
-from .kde_detector import kde_peaks_valleys, quick_peak_estimate
+from .kde_detector import (
+    kde_peaks_valleys,
+    quick_peak_estimate,
+    select_adaptive_bandwidth,
+)
 from .quality import stain_quality
 
 
@@ -197,6 +201,8 @@ def _bandwidth_config(value: Any, default: str | float, auto_flag: bool) -> tupl
     if isinstance(value, str):
         stripped = value.strip()
         lowered = stripped.lower()
+        if lowered == "adaptive":
+            return "adaptive", False
         if lowered in {"auto", "gpt"}:
             return default, True
         try:
@@ -358,7 +364,10 @@ def _resolve_parameters(
             debug["gpt_warning"] = "GPT client unavailable; falling back to defaults"
 
     bw_use = params["bandwidth"]
-    if params["bandwidth_auto"] and gpt_client is not None:
+    bw_auto = bool(params.get("bandwidth_auto"))
+    bw_adaptive_requested = isinstance(bw_use, str) and bw_use.strip().lower() == "adaptive"
+
+    if bw_auto and gpt_client is not None:
         expected = (
             params["n_peaks"]
             if params["n_peaks"] is not None
@@ -375,7 +384,25 @@ def _resolve_parameters(
         except Exception as exc:  # pragma: no cover - depends on API
             debug["gpt_bandwidth_error"] = str(exc)
             bw_use = options.bandwidth
+
     params["bandwidth_effective"] = bw_use
+
+    need_adaptive = bw_adaptive_requested or (
+        bw_auto and (gpt_client is None or bw_use == params["bandwidth"])
+    )
+
+    if need_adaptive:
+        base_rule = "scott" if bw_adaptive_requested else params["bandwidth"]
+        try:
+            params["bandwidth_effective"] = select_adaptive_bandwidth(
+                counts,
+                base_rule=base_rule,
+                expected_peaks=params.get("n_peaks") or params.get("n_peaks_effective"),
+            )
+            debug["bandwidth_strategy"] = "adaptive"
+            debug["bandwidth_base_rule"] = base_rule
+        except Exception as exc:  # pragma: no cover - deterministic data path
+            debug["adaptive_bandwidth_error"] = str(exc)
 
     prom_use = params["prominence"]
     if params["prominence_auto"] and gpt_client is not None:

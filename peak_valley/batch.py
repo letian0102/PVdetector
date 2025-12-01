@@ -22,6 +22,7 @@ from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
+from sklearn.mixture import GaussianMixture
 
 from .alignment import align_distributions
 from .consistency import enforce_marker_consistency
@@ -37,6 +38,8 @@ from .roughness import find_bw_for_roughness
 
 
 DEFAULT_GPT_MODEL = "o4-mini"
+GMM_SAMPLE_SIZE = 5_000
+BIC_IMPROVEMENT_THRESHOLD = 6.0
 
 try:  # optional dependency during tests
     from openai import OpenAI
@@ -221,6 +224,57 @@ def _boolean_override(value: Any, default: bool) -> bool:
         if lowered in {"false", "no", "0", "off"}:
             return False
     return default
+
+
+def _estimate_n_peaks_bic(
+    counts: np.ndarray,
+    max_peaks: int,
+    sample_size: int = GMM_SAMPLE_SIZE,
+    bic_improvement_threshold: float = BIC_IMPROVEMENT_THRESHOLD,
+    random_state: int = 0,
+) -> int:
+    """Estimate the number of peaks using 1-D GMMs scored by BIC.
+
+    The heuristic caps the search space by unique values, subsamples for
+    speed, and requires a minimum BIC improvement before accepting extra
+    components to avoid over-splitting skewed unimodal distributions.
+    """
+
+    x = np.asarray(counts, float)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return 1
+
+    if x.size > sample_size:
+        x = np.random.choice(x, sample_size, replace=False)
+
+    unique = np.unique(x)
+    max_k = max(1, min(max_peaks, unique.size))
+
+    bics: list[float] = []
+    X = x.reshape(-1, 1)
+    for k in range(1, max_k + 1):
+        gm = GaussianMixture(
+            n_components=k,
+            covariance_type="full",
+            n_init=5,
+            random_state=random_state,
+        )
+        gm.fit(X)
+        bics.append(gm.bic(X))
+
+    bics = np.asarray(bics)
+    k_best = int(np.argmin(bics) + 1)
+
+    # Demand strong enough evidence for additional components.
+    for k in range(k_best, 1, -1):
+        delta = bics[k - 2] - bics[k - 1]
+        if delta < bic_improvement_threshold:
+            k_best = k - 1
+        else:
+            break
+
+    return int(max(1, min(k_best, max_k)))
 
 
 def _merge_overrides(
@@ -417,14 +471,30 @@ def _resolve_parameters(
                 debug["gpt_peak_error"] = str(exc)
                 n_use = None
         if n_use is None:
-            n_est, confident = quick_peak_estimate(
+            quick_n, confident = quick_peak_estimate(
                 counts,
                 params["prominence_effective"],
                 bw_use,
                 params["min_width"] or None,
                 params["grid_size"],
             )
-            n_use = n_est if confident else None
+            debug["n_peaks_quick"] = quick_n
+            debug["n_peaks_quick_confident"] = bool(confident)
+
+            if confident and quick_n > 0:
+                n_use = quick_n
+            else:
+                try:
+                    n_gmm = _estimate_n_peaks_bic(counts, params["max_peaks"])
+                    debug["n_peaks_gmm_bic"] = n_gmm
+                    if quick_n > 0:
+                        debug["n_peaks_kde_cap"] = quick_n
+                        n_use = min(n_gmm, quick_n)
+                    else:
+                        n_use = n_gmm
+                except Exception as exc:  # pragma: no cover - sklearn optional
+                    debug["gmm_bic_error"] = str(exc)
+                    n_use = quick_n if quick_n > 0 else None
 
     if n_use is None:
         n_use = params["max_peaks"]

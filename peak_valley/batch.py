@@ -257,18 +257,18 @@ def _estimate_n_peaks_bic(
     sample_size: int = GMM_SAMPLE_SIZE,
     bic_improvement_threshold: float = BIC_IMPROVEMENT_THRESHOLD,
     random_state: int = 0,
-) -> int:
+) -> tuple[int, dict[str, Any]]:
     """Estimate the number of peaks using 1-D GMMs scored by BIC.
 
-    The heuristic caps the search space by unique values, subsamples for
-    speed, and requires a minimum BIC improvement before accepting extra
-    components to avoid over-splitting skewed unimodal distributions.
+    Returns both the chosen peak count and a debug payload with the raw BIC
+    scores and any adaptive decisions (e.g. when a subtle first peak is
+    recovered despite a dominant second peak).
     """
 
     x = np.asarray(counts, float)
     x = x[np.isfinite(x)]
     if x.size == 0:
-        return 1
+        return 1, {"reason": "no_data"}
 
     if x.size > sample_size:
         x = np.random.choice(x, sample_size, replace=False)
@@ -277,6 +277,7 @@ def _estimate_n_peaks_bic(
     max_k = max(1, min(max_peaks, unique.size))
 
     bics: list[float] = []
+    models: list[GaussianMixture] = []
     X = x.reshape(-1, 1)
     for k in range(1, max_k + 1):
         gm = GaussianMixture(
@@ -287,19 +288,54 @@ def _estimate_n_peaks_bic(
         )
         gm.fit(X)
         bics.append(gm.bic(X))
+        models.append(gm)
 
     bics = np.asarray(bics)
-    k_best = int(np.argmin(bics) + 1)
+    k_raw = int(np.argmin(bics) + 1)
 
     # Demand strong enough evidence for additional components.
-    for k in range(k_best, 1, -1):
+    k_pruned = k_raw
+    for k in range(k_pruned, 1, -1):
         delta = bics[k - 2] - bics[k - 1]
         if delta < bic_improvement_threshold:
-            k_best = k - 1
+            k_pruned = k - 1
         else:
             break
 
-    return int(max(1, min(k_best, max_k)))
+    debug: dict[str, Any] = {
+        "bic_scores": bics.tolist(),
+        "k_raw": k_raw,
+        "k_pruned": k_pruned,
+    }
+
+    # Adaptive rescue: if a dominant second peak hides a smaller first one,
+    # allow a modest BIC improvement to keep two components when they are well
+    # separated and both have non-trivial weight.
+    if k_pruned == 1 and max_k >= 2 and bics.size >= 2:
+        delta_12 = bics[0] - bics[1]
+        gm2 = models[1]
+        means = np.sort(gm2.means_.ravel())
+        stdevs = np.sqrt(np.array(gm2.covariances_).reshape(gm2.n_components, -1)[:, 0])
+        sep = float(abs(np.diff(means)[0])) if means.size >= 2 else 0.0
+        pooled = float(np.sqrt(np.mean(np.square(stdevs)))) if stdevs.size else 0.0
+        weight_floor = float(np.min(gm2.weights_)) if gm2.weights_.size else 0.0
+        separation_score = sep / pooled if pooled > 0 else 0.0
+        debug.update(
+            {
+                "delta_12": delta_12,
+                "separation_score": separation_score,
+                "weight_floor": weight_floor,
+            }
+        )
+
+        if delta_12 > 0 and separation_score >= 0.8 and weight_floor >= 0.03:
+            k_pruned = 2
+            debug["promotion"] = "rescued_second_peak"
+
+    k_final = int(max(1, min(k_pruned, max_k)))
+    debug["k_final"] = k_final
+
+    return k_final, debug
 
 
 def _merge_overrides(
@@ -513,14 +549,21 @@ def _resolve_parameters(
                 n_use = quick_n
             else:
                 try:
-                    n_gmm = _estimate_n_peaks_bic(counts, params["max_peaks"])
+                    n_gmm, bic_debug = _estimate_n_peaks_bic(
+                        counts, params["max_peaks"]
+                    )
                     debug["n_peaks_gmm_bic"] = n_gmm
+                    debug["n_peaks_gmm_debug"] = bic_debug
                     if quick_n > 0:
                         debug["n_peaks_quick_hint"] = quick_n
-                    n_use = n_gmm
+
+                    if n_use is None:
+                        n_use = n_gmm
+                    else:
+                        n_use = max(int(n_use), int(n_gmm))
                 except Exception as exc:  # pragma: no cover - sklearn optional
                     debug["gmm_bic_error"] = str(exc)
-                    n_use = quick_n if quick_n > 0 else None
+                    n_use = quick_n if quick_n > 0 else n_use
 
     if n_use is None:
         n_use = params["max_peaks"]

@@ -974,10 +974,11 @@ def _ridge_plot_for_stems(
 
     ax.set_yticks([])
     total_height = offsets[-1] + curve_info[-1][5]
-    y_margin = max(0.02 * total_height, 0.05)
+    spacing = float(np.median(np.diff(offsets))) if len(offsets) > 1 else float(total_height)
+    y_margin = 0.35 * spacing if spacing > 0 else 0.0
     ax.set_ylim(-y_margin, total_height + y_margin)
     ax.set_xlim(x_min - pad, x_max + pad)
-    ax.margins(x=0)
+    ax.margins(x=0, y=0)
     fig.tight_layout()
 
     png = fig_to_png(fig)

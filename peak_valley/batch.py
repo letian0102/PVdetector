@@ -388,6 +388,19 @@ def _resolve_parameters(
                 debug["roughness_error"] = str(exc)
                 params["bandwidth_effective"] = options.bandwidth
 
+        # Normalise any string bandwidth to something ``gaussian_kde`` accepts.
+        bw_eff = params["bandwidth_effective"]
+        if isinstance(bw_eff, str):
+            try:
+                params["bandwidth_effective"] = float(bw_eff)
+            except ValueError:
+                label = bw_eff.strip().lower()
+                if label not in {"scott", "silverman"}:
+                    debug["bandwidth_warning"] = (
+                        f"Unsupported bandwidth '{bw_eff}', falling back to 'scott'"
+                    )
+                    params["bandwidth_effective"] = "scott"
+
     prom_use = params["prominence"]
     if params["prominence_auto"] and gpt_client is not None:
         try:

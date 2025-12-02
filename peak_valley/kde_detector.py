@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from typing import Any, Callable, Sequence
 
 import numpy as np
 from scipy.stats import gaussian_kde
@@ -10,6 +10,36 @@ from scipy.signal import fftconvolve, find_peaks
 from .consistency import _enforce_valley_rule
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
+
+
+def _coerce_kde_bandwidth(bw: Any) -> str | float | Callable:
+    """Return a ``gaussian_kde``-compatible bandwidth value.
+
+    ``gaussian_kde`` accepts only the strings ``"scott"`` and ``"silverman``",
+    a positive scalar, or a callable.  Everything else is coerced to the safe
+    default ``"scott"`` so callers can pass through user-provided bandwidths
+    without risking a runtime ``ValueError``.
+    """
+
+    if callable(bw):  # pragma: no cover - passthrough for advanced users
+        return bw
+
+    if isinstance(bw, (int, float, np.floating)):
+        if float(bw) > 0:
+            return float(bw)
+        return "scott"
+
+    if isinstance(bw, str):
+        label = bw.strip().lower()
+        if label in {"scott", "silverman"}:
+            return label
+        try:
+            coerced = float(label)
+        except ValueError:
+            return "scott"
+        return coerced if coerced > 0 else "scott"
+
+    return "scott"
 
 
 # ----------------------------------------------------------------------
@@ -721,7 +751,7 @@ def kde_peaks_valleys(
     # ---------- KDE grid ----------
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
-    kde = gaussian_kde(x, bw_method=bw)
+    kde = gaussian_kde(x, bw_method=_coerce_kde_bandwidth(bw))
     if _mostly_small_discrete(x):
         kde.set_bandwidth(kde.factor * 4.0)
     sample_std = x.std(ddof=1)

@@ -13,6 +13,7 @@ import io
 import json
 import math
 import re
+import inspect
 import zipfile
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field
@@ -37,6 +38,18 @@ from .roughness import find_bw_for_roughness
 
 
 DEFAULT_GPT_MODEL = "o4-mini"
+
+
+def _call_kde(func, *args, **kwargs):
+    """Invoke ``kde_peaks_valleys``-like callables with backward-compatible kwargs."""
+
+    sig = inspect.signature(func)
+    params = sig.parameters
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return func(*args, **kwargs)
+
+    filtered = {k: v for k, v in kwargs.items() if k in params}
+    return func(*args, **filtered)
 
 try:  # optional dependency during tests
     from openai import OpenAI
@@ -541,7 +554,8 @@ def process_sample(
 
     drop_frac = params["valley_drop"] / 100.0
 
-    peaks, valleys, xs, ys = kde_peaks_valleys(
+    peaks, valleys, xs, ys = _call_kde(
+        kde_peaks_valleys,
         counts,
         params["n_peaks_effective"],
         params["prominence_effective"],

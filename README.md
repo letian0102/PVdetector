@@ -5,7 +5,7 @@ PVdetector is a Streamlit application for detecting density peaks and valleys in
 ## Features
 - Upload raw counts or full datasets (expression matrix + metadata).
 - Optional arcsinh transformation with adjustable parameters \(a, b, c\).
-- Automatic or manual control over KDE bandwidth, peak count, and prominence. GPT-based suggestions (bandwidth scans multiple candidates for optimal peak separation) are available when an OpenAI API key is provided.
+- Automatic or manual control over KDE bandwidth, peak count, and prominence. GPT-based suggestions (bandwidth scans multiple candidates for optimal peak separation) are available when an OpenAI API key is provided. A roughness-based heuristic bandwidth is also available for runs without GPT.
 - Interactive per-sample visualization with manual editing of peaks and valleys.
 - Optional enforcement of marker consistency across samples (disabled by default for batch runs).
 - Landmark alignment and piece-wise linear normalization across samples.
@@ -81,7 +81,7 @@ Key flags:
 | `--arcsinh-c` | Optional | `0.0` | `--arcsinh-c -1.0` | Offset parameter `c`; may be negative. |
 | `--n-peaks` | Optional | Auto | `--n-peaks 2` | Fixed peak count or `auto`/`gpt` for automatic selection. |
 | `--max-peaks` | Optional | `2` | `--max-peaks 4` | Upper bound on peaks considered during automatic runs. |
-| `--bandwidth` | Optional | `scott` | `--bandwidth 0.6` | KDE bandwidth value, preset (`scott`, `silverman`), or `auto`/`gpt`. |
+| `--bandwidth` | Optional | `scott` | `--bandwidth 0.6` | KDE bandwidth value, preset (`scott`, `silverman`), `roughness`, or `auto`/`gpt`. |
 | `--prominence` | Optional | `0.05` | `--prominence 0.08` | Minimum prominence (`auto`/`gpt` allowed). |
 | `--min-width` | Optional | `0` | `--min-width 30` | Minimum sample count per detected peak. |
 | `--curvature` | Optional | `0.0001` | `--curvature 0.0005` | Curvature threshold for peak detection. |

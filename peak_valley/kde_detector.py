@@ -8,6 +8,8 @@ import numpy as np
 from scipy.stats import gaussian_kde
 from scipy.signal import fftconvolve, find_peaks
 
+from .roughness import find_bw_for_roughness
+
 from .consistency import _enforce_valley_rule
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
@@ -596,7 +598,7 @@ def _normalise_bandwidth(bw: str | float | Callable | None) -> str | float | Cal
         if not label:
             return "scott"
         lowered = label.lower()
-        if lowered in {"scott", "silverman"}:
+        if lowered in {"scott", "silverman", "roughness"}:
             return lowered
         try:
             return float(label)
@@ -638,6 +640,17 @@ def kde_peaks_valleys(
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
     bw_use = _normalise_bandwidth(bw)
+    if bw_use == "roughness":
+        try:
+            bw_use = _normalise_bandwidth(find_bw_for_roughness(x))
+        except Exception as exc:
+            warnings.warn(
+                "Roughness bandwidth search failed; defaulting to 'scott'"
+                f" ({exc})",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            bw_use = "scott"
     try:
         kde = gaussian_kde(x, bw_method=bw_use)
     except ValueError:

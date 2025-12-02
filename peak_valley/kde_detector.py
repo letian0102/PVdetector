@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any, Callable, Sequence
 
 import numpy as np
 from scipy.stats import gaussian_kde
@@ -9,6 +10,36 @@ from scipy.signal import fftconvolve, find_peaks
 from .consistency import _enforce_valley_rule
 
 __all__ = ["kde_peaks_valleys", "quick_peak_estimate"]
+
+
+def _coerce_kde_bandwidth(bw: Any) -> str | float | Callable:
+    """Return a ``gaussian_kde``-compatible bandwidth value.
+
+    ``gaussian_kde`` accepts only the strings ``"scott"`` and ``"silverman``",
+    a positive scalar, or a callable.  Everything else is coerced to the safe
+    default ``"scott"`` so callers can pass through user-provided bandwidths
+    without risking a runtime ``ValueError``.
+    """
+
+    if callable(bw):  # pragma: no cover - passthrough for advanced users
+        return bw
+
+    if isinstance(bw, (int, float, np.floating)):
+        if float(bw) > 0:
+            return float(bw)
+        return "scott"
+
+    if isinstance(bw, str):
+        label = bw.strip().lower()
+        if label in {"scott", "silverman"}:
+            return label
+        try:
+            coerced = float(label)
+        except ValueError:
+            return "scott"
+        return coerced if coerced > 0 else "scott"
+
+    return "scott"
 
 
 # ----------------------------------------------------------------------
@@ -366,6 +397,119 @@ def _evaluate_kde(
     return _fft_gaussian_kde(x, xs, bandwidth)
 
 
+def _moving_average(values: np.ndarray, window: int = 5) -> np.ndarray:
+    """Return a simple centred moving average with edge padding."""
+
+    if window <= 1 or values.size == 0:
+        return values
+
+    window = min(window, values.size)
+    kernel = np.ones(window) / window
+    padded = np.pad(values, (window // 2, window - 1 - window // 2), mode="edge")
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def _vote_peaks_across_scales(
+    xs: np.ndarray,
+    densities: list[np.ndarray | None],
+    peak_sets: list[np.ndarray],
+    min_x_sep: float | None,
+    base_scale: int,
+    min_votes: int = 2,
+) -> np.ndarray:
+    """Return consensus peaks seen on at least ``min_votes`` scales."""
+
+    if not peak_sets:
+        return np.array([], dtype=int)
+
+    grid_dx = float(xs[1] - xs[0]) if xs.size > 1 else 0.0
+    tol = None
+    if min_x_sep is not None and np.isfinite(min_x_sep) and min_x_sep > 0:
+        tol = float(min_x_sep)
+    elif grid_dx > 0:
+        tol = 3.0 * grid_dx
+
+    if tol is None:
+        return peak_sets[base_scale] if peak_sets[base_scale].size else np.array([], dtype=int)
+
+    clusters: list[list[tuple[float, int, int]]] = []  # (x, scale_idx, peak_idx)
+    for scale_idx, locs in enumerate(peak_sets):
+        for pk_idx in locs:
+            x_val = float(xs[pk_idx])
+            for cluster in clusters:
+                if abs(x_val - cluster[0][0]) <= tol:
+                    cluster.append((x_val, scale_idx, int(pk_idx)))
+                    break
+            else:
+                clusters.append([(x_val, scale_idx, int(pk_idx))])
+
+    winners: list[int] = []
+    for cluster in clusters:
+        unique_scales = {entry[1] for entry in cluster}
+        if len(unique_scales) < min_votes:
+            continue
+
+        best_idx = None
+        best_height = -float("inf")
+        for _, scale_idx, pk_idx in cluster:
+            density = densities[scale_idx]
+            if density is None:
+                continue
+            height = float(density[pk_idx])
+            if height > best_height:
+                best_height = height
+                best_idx = pk_idx
+
+        if best_idx is not None:
+            winners.append(int(best_idx))
+
+    if winners:
+        return np.unique(np.asarray(winners, dtype=int))
+
+    base = peak_sets[base_scale]
+    return base if base.size else np.array([], dtype=int)
+
+
+def _prune_shallow_valleys(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    peaks_idx: list[int],
+    *,
+    drop_frac: float,
+    area_fraction: float | None,
+) -> list[int]:
+    """Merge peaks separated by very small valley area."""
+
+    if area_fraction is None or area_fraction <= 0 or len(peaks_idx) < 2:
+        return peaks_idx
+
+    total_area = float(np.trapz(ys, xs)) if xs.size > 1 else 0.0
+    if not np.isfinite(total_area) or total_area <= 0:
+        return peaks_idx
+
+    keep: list[int] = [peaks_idx[0]]
+    for right in peaks_idx[1:]:
+        left = keep[-1]
+        valley_x = _valley_between(xs, ys, left, right, drop_frac)
+        valley_idx = int(np.argmin(np.abs(xs - valley_x)))
+        lo = min(left, valley_idx, right)
+        hi = max(left, valley_idx, right)
+
+        seg_xs = xs[lo : hi + 1]
+        seg_ys = ys[lo : hi + 1]
+        baseline = min(ys[left], ys[right])
+        depth = np.maximum(0.0, baseline - seg_ys)
+        valley_area = float(np.trapz(depth, seg_xs))
+
+        if total_area > 0 and valley_area / total_area < area_fraction:
+            if ys[right] > ys[left]:
+                keep[-1] = right
+        else:
+            keep.append(right)
+
+    return keep
+
+
 def _first_valley_slope(
     xs: np.ndarray,
     ys: np.ndarray,
@@ -592,6 +736,11 @@ def kde_peaks_valleys(
     min_valley_drop: float        = 0.15,
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,
+    auto_turning   : bool = True,
+    multiscale     : bool = True,
+    bandwidth_factors: Sequence[float] | None = None,
+    multiscale_votes: int = 2,
+    valley_area_fraction: float | None = 0.01,
     first_valley   : str = "slope",
 ):
     x = np.asarray(data, float)
@@ -602,10 +751,11 @@ def kde_peaks_valleys(
     # ---------- KDE grid ----------
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
-    kde = gaussian_kde(x, bw_method=bw)
+    kde = gaussian_kde(x, bw_method=_coerce_kde_bandwidth(bw))
     if _mostly_small_discrete(x):
         kde.set_bandwidth(kde.factor * 4.0)
-    h   = kde.factor * x.std(ddof=1)
+    sample_std = x.std(ddof=1)
+    h   = kde.factor * sample_std
     xs  = np.linspace(x.min() - h, x.max() + h,
                       min(grid_size, max(4000, 4 * x.size)))
     ys  = _evaluate_kde(x, xs, kde)
@@ -626,14 +776,67 @@ def kde_peaks_valleys(
         kw["width"] = min_width
     locs, _ = find_peaks(ys, **kw, distance=distance)
 
-    if turning_peak and curvature_thresh and curvature_thresh > 0:
-        dy  = np.gradient(ys, xs)                 # 1st derivative
-        d2y = np.gradient(dy,  xs)                # 2nd derivative
-        slope_tol = 0.05 * np.max(np.abs(dy))     # “almost flat”
+    # --- multi-scale voting to reject noisy single-scale peaks -------------
+    base_bandwidth = kde.factor * sample_std
+    if (
+        multiscale
+        and base_bandwidth is not None
+        and np.isfinite(base_bandwidth)
+        and base_bandwidth > 0
+    ):
+        factors = tuple(bandwidth_factors) if bandwidth_factors else (2.0, 1.0, 0.5)
+        densities: list[np.ndarray | None] = []
+        peak_sets: list[np.ndarray] = []
 
+        closest_to_unity = int(np.argmin([abs(f - 1.0) for f in factors])) if factors else 0
+
+        for idx, factor in enumerate(factors):
+            scaled_bw = base_bandwidth * float(factor)
+            if not np.isfinite(scaled_bw) or scaled_bw <= 0:
+                densities.append(None)
+                peak_sets.append(np.array([], dtype=int))
+                continue
+
+            if math.isclose(factor, 1.0, rel_tol=1e-6):
+                density = ys
+            else:
+                density = _fft_gaussian_kde(x, xs, scaled_bw)
+
+            densities.append(density)
+            locs_scaled, _ = find_peaks(density, **kw, distance=distance)
+            peak_sets.append(locs_scaled)
+
+        voted = _vote_peaks_across_scales(
+            xs,
+            densities,
+            peak_sets,
+            min_x_sep,
+            base_scale=closest_to_unity,
+            min_votes=max(1, int(multiscale_votes)),
+        )
+        if voted.size:
+            locs = voted
+
+    # --- adaptive shoulder/turning-point detection ------------------------
+    dy  = np.gradient(ys, xs)                 # 1st derivative
+    d2y = np.gradient(dy,  xs)                # 2nd derivative
+
+    curv_thresh = curvature_thresh
+    if (curv_thresh is None or curv_thresh <= 0) and d2y.size:
+        concave = float(np.max(-d2y))
+        if concave > 0:
+            curv_thresh = 0.2 * concave
+
+    slope_smooth = _moving_average(dy, window=7)
+    slope_tol = 0.05 * np.max(np.abs(slope_smooth)) if slope_smooth.size else 0.0
+    should_search_turning = bool(curv_thresh) and (
+        turning_peak or (auto_turning and (locs.size <= 1))
+    )
+
+    if should_search_turning:
         turning = np.where(
-            (np.abs(dy) < slope_tol) &           # near-flat slope
-            (d2y < -curvature_thresh)            # concave-down
+            (np.abs(slope_smooth) < slope_tol) &           # near-flat slope
+            (d2y < -float(curv_thresh))                    # concave-down
         )[0]
 
         # keep only the strongest point inside every min_x_sep window
@@ -646,8 +849,9 @@ def kde_peaks_valleys(
                     strongest[-1] = idx
             locs = np.unique(np.concatenate([locs, strongest]))
 
-    locs = _merge_close_peaks(xs, ys, locs,
-            min_x_sep=min_x_sep, min_valley_drop=min_valley_drop)
+    locs = _merge_close_peaks(
+        xs, ys, locs, min_x_sep=min_x_sep, min_valley_drop=min_valley_drop
+    )
 
     if locs.size == 0 and n_peaks is None:
         return [], [], xs, ys
@@ -694,6 +898,13 @@ def kde_peaks_valleys(
 
     # ---------- *re-derive* indices for every peak we now have ----------
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+    peaks_idx = _prune_shallow_valleys(
+        xs,
+        ys,
+        peaks_idx,
+        drop_frac=drop_frac,
+        area_fraction=valley_area_fraction,
+    )
 
     # ---------- valleys ----------
     valleys_x: list[float] = []

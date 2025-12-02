@@ -33,6 +33,7 @@ from .gpt_adapter import (
 )
 from .kde_detector import kde_peaks_valleys, quick_peak_estimate
 from .quality import stain_quality
+from .roughness import find_bw_for_roughness
 
 
 DEFAULT_GPT_MODEL = "o4-mini"
@@ -376,6 +377,19 @@ def _resolve_parameters(
             debug["gpt_bandwidth_error"] = str(exc)
             bw_use = options.bandwidth
     params["bandwidth_effective"] = bw_use
+
+    if isinstance(params["bandwidth_effective"], str):
+        bw_label = params["bandwidth_effective"].strip().lower()
+        if bw_label == "roughness":
+            try:
+                params["bandwidth_effective"] = find_bw_for_roughness(counts)
+                debug["bandwidth_method"] = "roughness"
+            except Exception as exc:
+                debug["roughness_error"] = str(exc)
+                params["bandwidth_effective"] = options.bandwidth
+
+    # ensure downstream helpers receive the resolved numeric bandwidth
+    bw_use = params["bandwidth_effective"]
 
     prom_use = params["prominence"]
     if params["prominence_auto"] and gpt_client is not None:

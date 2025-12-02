@@ -56,26 +56,73 @@ def _find_extrema(
     return idx_max, idx_min
 
 
+def _normalise_bw(bw: float | str) -> float | str:
+    """Normalise bandwidth labels to values accepted by ``gaussian_kde``."""
+
+    if isinstance(bw, (int, float)):
+        return float(bw)
+    label = str(bw).strip().lower()
+    if label in {"scott", "silverman"}:
+        return label
+    try:
+        return float(label)
+    except ValueError:
+        return "scott"
+
+
+def _stable_values(values: np.ndarray) -> np.ndarray:
+    """Ensure we have at least two distinct finite points for KDE stability."""
+
+    vals = np.asarray(values, float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        raise ValueError("At least one finite value is required for KDE")
+
+    if vals.size == 1 or np.allclose(vals, vals[0]):
+        base = float(vals[0])
+        span = max(1e-6, 0.001 * max(1.0, abs(base)))
+        offsets = np.linspace(-0.5, 0.5, num=max(2, vals.size)) * span
+        vals = base + offsets
+
+    return vals
+
+
 def _compute_density(
     values: np.ndarray, bandwidth: float | str, grid_size: int
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Evaluate a 1-D Gaussian KDE on an evenly spaced grid."""
+    """Evaluate a 1-D Gaussian KDE on an evenly spaced grid with fallbacks."""
 
-    values = np.asarray(values, float)
-    values = values[np.isfinite(values)]
-    if values.size < 2:
-        raise ValueError("At least two finite values are required for KDE")
+    vals = _stable_values(values)
+    bw_norm = _normalise_bw(bandwidth)
 
-    if isinstance(bandwidth, str):
-        kde = gaussian_kde(values, bw_method=bandwidth)
-    else:
-        kde = gaussian_kde(values)
-        bw = float(bandwidth)
-        sample_std = float(np.std(values, ddof=1))
-        if np.isfinite(bw) and bw > 0 and sample_std > 0:
-            kde.set_bandwidth(bw_method=bw / sample_std)
+    def _build_kde(v: np.ndarray, bw_use: float | str):
+        if isinstance(bw_use, str):
+            return gaussian_kde(v, bw_method=bw_use)
+        kde_obj = gaussian_kde(v)
+        bw_float = float(bw_use)
+        sample_std = float(np.std(v, ddof=1))
+        if np.isfinite(bw_float) and bw_float > 0 and sample_std > 0:
+            kde_obj.set_bandwidth(bw_method=bw_float / sample_std)
+        return kde_obj
 
-    xs = np.linspace(values.min(), values.max(), grid_size)
+    try:
+        kde = _build_kde(vals, bw_norm)
+    except Exception:
+        jitter = _stable_values(vals + np.linspace(-1e-6, 1e-6, vals.size))
+        fallback_bw = "scott" if isinstance(bw_norm, str) else bw_norm
+        try:
+            kde = _build_kde(jitter, fallback_bw)
+        except Exception:
+            kde = _build_kde(jitter, "scott")
+
+    v_min, v_max = float(np.min(vals)), float(np.max(vals))
+    span = v_max - v_min
+    if not np.isfinite(span) or span <= 0:
+        pad = max(1e-6, 0.001 * max(abs(v_min), abs(v_max), 1.0))
+        v_min -= pad
+        v_max += pad
+
+    xs = np.linspace(v_min, v_max, grid_size)
     ys = kde(xs)
     return xs, ys
 
@@ -173,8 +220,8 @@ def find_bw_for_roughness(
 
     data = np.asarray(list(values), float)
     data = data[np.isfinite(data)]
-    if data.size < 2:
-        raise ValueError("Bandwidth search requires at least two finite values")
+    if data.size == 0:
+        raise ValueError("Bandwidth search requires at least one finite value")
 
     def good_bw(bw: float) -> bool:
         xs, ys = _compute_density(data, bw, grid_size)

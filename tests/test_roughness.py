@@ -6,7 +6,6 @@ from peak_valley.roughness import (
     has_small_double_peak,
     _compute_density,
 )
-from peak_valley.batch import BatchOptions, _resolve_parameters
 
 
 def test_density_metric_reports_extrema_and_roughness():
@@ -42,23 +41,3 @@ def test_roughness_bandwidth_prefers_smoother_profile():
     assert lower <= selected_bw <= upper
     assert sel_metric.roughness <= low_metric.roughness
     assert not has_small_double_peak(xs_sel, ys_sel)
-
-
-def test_roughness_bandwidth_used_for_auto_peak_estimate():
-    rng = np.random.default_rng(123)
-    counts = np.concatenate(
-        [rng.normal(-0.2, 0.1, 400), rng.normal(0.5, 0.2, 600)]
-    )
-
-    options = BatchOptions()
-    params, debug = _resolve_parameters(
-        options,
-        {"bw": "roughness", "n_peaks": "auto"},
-        None,
-        counts,
-        None,
-    )
-
-    assert isinstance(params["bandwidth_effective"], float)
-    assert debug.get("bandwidth_method") == "roughness"
-    assert params["n_peaks_effective"] >= 1

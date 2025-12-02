@@ -9,10 +9,19 @@ def gmm_component_means(x: np.ndarray, k: int) -> list[float]:
     Return the k component means of a 1-D GaussianMixture,
     sorted from left to right.
     """
+    rng = np.random.default_rng()
+
     if x.size > 10_000:                       # speed, like KDE
-        x = np.random.choice(x, 10_000, False).reshape(-1, 1)
-    else:
-        x = x.reshape(-1, 1)
+        if x.size > 200_000:
+            # ``np.random.choice`` without replacement shuffles the full input.
+            # For very large arrays that partial shuffle can dominate runtime for
+            # an individual sample, so switch to replacement to keep the draw
+            # proportional to the requested sample size.
+            x = rng.choice(x, 10_000, replace=True)
+        else:
+            x = rng.choice(x, 10_000, replace=False)
+
+    x = x.reshape(-1, 1)
 
     gm = GaussianMixture(
         n_components=k,

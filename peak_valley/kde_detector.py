@@ -601,7 +601,18 @@ def kde_peaks_valleys(
 
     # ---------- KDE grid ----------
     if x.size > 10_000:
-        x = np.random.choice(x, 10_000, replace=False)
+        # ``np.random.choice`` without replacement performs a partial shuffle of the
+        # entire input array which becomes **O(n)** work.  Extremely large samples
+        # (millions of events) can therefore stall a single-sample run for minutes
+        # or hours even though we only keep a tiny subset.  Switching to sampling
+        # *with* replacement for very large inputs preserves the representative
+        # nature of the subsample while keeping the cost proportional to the
+        # requested draw size.
+        rng = np.random.default_rng()
+        if x.size > 200_000:
+            x = rng.choice(x, 10_000, replace=True)
+        else:
+            x = rng.choice(x, 10_000, replace=False)
     kde = gaussian_kde(x, bw_method=bw)
     if _mostly_small_discrete(x):
         kde.set_bandwidth(kde.factor * 4.0)

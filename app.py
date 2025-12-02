@@ -930,6 +930,8 @@ def _ridge_plot_for_stems(
         sharex=True,
     )
 
+    text_transform = ax.get_yaxis_transform()
+
     for offset, (stem, xs, ys, peaks, valleys, height) in zip(offsets, curve_info):
         ax.plot(xs, ys + offset, color="black", lw=1)
         ax.fill_between(xs, offset, ys + offset, color="#FFA50088", lw=0)
@@ -960,16 +962,23 @@ def _ridge_plot_for_stems(
                 )
 
         ax.text(
-            x_min,
+            -0.02,
             offset + 0.5 * ymax,
             stem,
             ha="right",
             va="center",
             fontsize=7,
+            transform=text_transform,
+            clip_on=False,
         )
 
     ax.set_yticks([])
+    total_height = offsets[-1] + curve_info[-1][5]
+    spacing = float(np.median(np.diff(offsets))) if len(offsets) > 1 else float(total_height)
+    y_margin = 0.35 * spacing if spacing > 0 else 0.0
+    ax.set_ylim(-y_margin, total_height + y_margin)
     ax.set_xlim(x_min - pad, x_max + pad)
+    ax.margins(x=0, y=0)
     fig.tight_layout()
 
     png = fig_to_png(fig)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import warnings
+from typing import Callable
 
 import numpy as np
 from scipy.stats import gaussian_kde
@@ -580,6 +582,39 @@ def _valley_between(xs: np.ndarray,
 
 
 # ----------------------------------------------------------------------
+def _normalise_bandwidth(bw: str | float | Callable | None) -> str | float | Callable:
+    """Coerce an arbitrary bandwidth specification to something scipy accepts."""
+
+    if bw is None:
+        return "scott"
+    if callable(bw):
+        return bw
+    if isinstance(bw, (int, float)):
+        return float(bw)
+    if isinstance(bw, str):
+        label = bw.strip()
+        if not label:
+            return "scott"
+        lowered = label.lower()
+        if lowered in {"scott", "silverman"}:
+            return lowered
+        try:
+            return float(label)
+        except ValueError:
+            warnings.warn(
+                f"Invalid bandwidth '{bw}' provided; defaulting to 'scott'",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return "scott"
+    warnings.warn(
+        "Unrecognised bandwidth type; defaulting to 'scott'",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return "scott"
+
+
 def kde_peaks_valleys(
     data           : np.ndarray,
     n_peaks        : int  | None = None,
@@ -602,7 +637,17 @@ def kde_peaks_valleys(
     # ---------- KDE grid ----------
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
-    kde = gaussian_kde(x, bw_method=bw)
+    bw_use = _normalise_bandwidth(bw)
+    try:
+        kde = gaussian_kde(x, bw_method=bw_use)
+    except ValueError:
+        warnings.warn(
+            "Invalid KDE bandwidth provided; falling back to 'scott'",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        bw_use = "scott"
+        kde = gaussian_kde(x, bw_method=bw_use)
     if _mostly_small_discrete(x):
         kde.set_bandwidth(kde.factor * 4.0)
     h   = kde.factor * x.std(ddof=1)

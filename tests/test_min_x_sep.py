@@ -12,12 +12,13 @@ def test_min_x_sep_smaller_than_grid_spacing():
     data = rng.normal(0, 1, 100)
     # Use a tiny ``min_x_sep`` to ensure the computed distance would
     # previously be zero and raise a ValueError in ``find_peaks``.
-    peaks, valleys, xs, ys = kde_peaks_valleys(
+    peaks, valleys, xs, ys, bw = kde_peaks_valleys(
         data, n_peaks=None, min_x_sep=1e-9, grid_size=50
     )
     # The call should succeed and return lists for peaks/valleys.
     assert isinstance(peaks, list)
     assert isinstance(valleys, list)
+    assert np.isfinite(bw)
 
 
 def test_default_min_separation_detects_close_doublet():

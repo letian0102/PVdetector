@@ -630,11 +630,11 @@ def kde_peaks_valleys(
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,
     first_valley   : str = "slope",
-):
+) -> tuple[list[float], list[float], np.ndarray, np.ndarray, float | None]:
     x = np.asarray(data, float)
     x = x[np.isfinite(x)]
     if x.size == 0:
-        return [], [], np.array([]), np.array([])
+        return [], [], np.array([]), np.array([]), None
 
     # ---------- KDE grid ----------
     if x.size > 10_000:
@@ -708,7 +708,7 @@ def kde_peaks_valleys(
             min_x_sep=min_x_sep, min_valley_drop=min_valley_drop)
 
     if locs.size == 0 and n_peaks is None:
-        return [], [], xs, ys
+        return [], [], xs, ys, float(h)
 
     # keep tallest as before
     if n_peaks is None or locs.size >= n_peaks:
@@ -807,7 +807,7 @@ def kde_peaks_valleys(
             first_valley=first_valley,
         )[1][0]]
 
-    return peaks_x, valleys_x, xs, ys
+    return peaks_x, valleys_x, xs, ys, float(h)
 
 # ----------------------------------------------------------------------
 def quick_peak_estimate(

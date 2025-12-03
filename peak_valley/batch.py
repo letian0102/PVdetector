@@ -491,6 +491,8 @@ def _effective_bandwidth(counts: np.ndarray, bw: str | float) -> float:
     if x_kde.size <= 1:
         return 0.0
 
+    # ``gaussian_kde`` scales the sample covariance by ``factor**2`` for 1-D inputs,
+    # so the scalar bandwidth (standard deviation of the kernel) is ``factor * std``.
     return float(kde.factor * float(np.std(x_kde, ddof=1)))
 
 

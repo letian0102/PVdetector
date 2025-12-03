@@ -630,6 +630,7 @@ def kde_peaks_valleys(
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,
     first_valley   : str = "slope",
+    return_bandwidth: bool = False,
 ):
     x = np.asarray(data, float)
     x = x[np.isfinite(x)]
@@ -663,7 +664,12 @@ def kde_peaks_valleys(
         kde = gaussian_kde(x, bw_method=bw_use)
     if _mostly_small_discrete(x):
         kde.set_bandwidth(kde.factor * 4.0)
-    h   = kde.factor * x.std(ddof=1)
+    if x.size:
+        sample_std = float(np.sqrt(float(np.var(kde.dataset, ddof=1))))
+        bandwidth = float(kde.factor * sample_std)
+    else:
+        bandwidth = 0.0
+    h   = bandwidth
     xs  = np.linspace(x.min() - h, x.max() + h,
                       min(grid_size, max(4000, 4 * x.size)))
     ys  = _evaluate_kde(x, xs, kde)
@@ -806,6 +812,9 @@ def kde_peaks_valleys(
             drop_frac=drop_frac,
             first_valley=first_valley,
         )[1][0]]
+
+    if return_bandwidth:
+        return peaks_x, valleys_x, xs, ys, bandwidth
 
     return peaks_x, valleys_x, xs, ys
 

@@ -312,19 +312,27 @@ def _prepare_boundary_kde_data(
 
     use_boundary = False
     if boundary_correction and boundary_lower is not None and np.isfinite(boundary_lower):
-        min_val = float(np.min(finite))
         boundary_lower = float(boundary_lower)
 
         # Avoid reflecting when the distribution sits well away from the boundary.
-        # Only turn on correction if the lower tail actually hugs the boundary.
-        iqr = np.subtract(*np.percentile(finite, [75, 25]))
-        if not np.isfinite(iqr) or iqr <= 0:
-            iqr = float(np.std(finite, ddof=1))
-        if not np.isfinite(iqr) or iqr <= 0:
-            iqr = float(np.max(finite) - np.min(finite))
+        # Only turn on correction if the lower tail actually hugs the boundary and
+        # a meaningful fraction of points live there.
+        low_q, high_q = np.percentile(finite, [5, 95])
+        span = float(high_q - low_q)
+        if not np.isfinite(span) or span <= 0:
+            span = float(np.std(finite, ddof=1))
+        if not np.isfinite(span) or span <= 0:
+            span = float(np.max(finite) - np.min(finite))
 
-        tol = max(1e-6, 0.05 * iqr)
-        if min_val >= boundary_lower - 1e-9 and (min_val - boundary_lower) <= tol:
+        tol = max(1e-6, 0.02 * span)
+        lower_tail = float(np.percentile(finite, 2))
+        frac_near = float(np.mean(finite <= boundary_lower + tol))
+
+        if (
+            lower_tail >= boundary_lower - 1e-9
+            and (lower_tail - boundary_lower) <= tol
+            and frac_near >= 0.05
+        ):
             use_boundary = True
 
     if not use_boundary:

@@ -418,7 +418,7 @@ def _evaluate_kde(
     if brute_cost <= 5_000_000 or bandwidth <= 0:
         return kde(xs)
 
-    return _fft_gaussian_kde(x, xs, bandwidth)
+    return _fft_gaussian_kde(sample, xs, bandwidth)
 
 
 def _first_valley_slope(

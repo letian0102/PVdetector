@@ -138,16 +138,17 @@ for key, default in {
       "batch_error": None,
       "batch_progress": {"completed": 0, "total": 0},
       "workers": DEFAULT_WORKERS,
-    "aligned_counts":    None,
-    "aligned_landmarks": None,
-    "aligned_results": {},   # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
-    "aligned_fig_pngs": {},  # stem_aligned.png → bytes
-    "aligned_ridge_png":    None,
-    "apply_consistency": False,  # enforce marker consistency across samples
-    "raw_ridge_png": None,
-    "excluded_markers": [],
-    "excluded_samples": [],
-}.items():
+      "aligned_counts":    None,
+      "aligned_landmarks": None,
+      "aligned_results": {},   # stem → {"peaks":…, "valleys":…, "xs":…, "ys":…}
+      "aligned_fig_pngs": {},  # stem_aligned.png → bytes
+      "aligned_ridge_png":    None,
+      "apply_consistency": False,  # enforce marker consistency across samples
+      "consistency_tol": 0.5,
+      "raw_ridge_png": None,
+      "excluded_markers": [],
+      "excluded_samples": [],
+  }.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -555,6 +556,7 @@ def _render_override_controls(
         None,
         "scott",
         "silverman",
+        "roughness",
         0.5,
         0.8,
         1.0,
@@ -570,7 +572,7 @@ def _render_override_controls(
             bw_index = bw_options.index("custom")
         bw_custom_default = float(bw_prev)
     elif isinstance(bw_prev, str):
-        if bw_prev in ("scott", "silverman"):
+        if bw_prev in ("scott", "silverman", "roughness"):
             bw_index = bw_options.index(bw_prev)
         else:
             try:
@@ -4247,19 +4249,22 @@ with st.sidebar:
 
     # Bandwidth
     bw_mode = st.selectbox(
-        "Bandwidth mode", ["Manual", "GPT automatic"],
-        help="Choose manual bandwidth or let GPT estimate it."
+        "Bandwidth mode",
+        ["Manual", "Roughness heuristic", "GPT automatic"],
+        help="Choose manual bandwidth, a roughness-based heuristic, or let GPT estimate it."
     )
     bw_opt = None
     if bw_mode == "Manual":
         bw_opt = st.selectbox(
             "Rule / scale",
-            ["scott", "silverman", "0.5", "0.8", "1.0"],
+            ["scott", "silverman", "roughness", "0.5", "0.8", "1.0"],
             key="bw_sel",
             help="Bandwidth rule or multiplier when set manually."
         )
         bw_val = (float(bw_opt)
                   if bw_opt.replace(".", "", 1).isdigit() else bw_opt)
+    elif bw_mode == "Roughness heuristic":
+        bw_val = "roughness"
     else:
         bw_val = None  # GPT later
 
@@ -4323,12 +4328,27 @@ with st.sidebar:
         key="apply_consistency",
         help="Use the same marker selection for all samples."
     )
+    st.slider(
+        "Consistency tolerance",
+        0.0,
+        2.0,
+        0.5,
+        0.05,
+        key="consistency_tol",
+        disabled=not bool(st.session_state.get("apply_consistency", False)),
+        help=(
+            "Distance tolerance used when matching markers across samples."
+            " Only applied when consistency matching is enabled."
+        ),
+    )
 
     if bw_mode == "Manual":
         if isinstance(bw_val, (int, float)):
             bw_label = f"Manual ({bw_val:.2f})"
         else:
             bw_label = f"Manual ({bw_opt})"
+    elif bw_mode == "Roughness heuristic":
+        bw_label = "Roughness heuristic"
     else:
         bw_label = "GPT automatic"
 
@@ -4503,7 +4523,11 @@ with st.sidebar:
         help="Number of parallel workers to use during batch processing.",
     )
     st.session_state.workers = workers
-    gpt_features_selected = (n_fixed is None) or prom_mode == "GPT automatic" or bw_mode == "GPT automatic"
+    gpt_features_selected = (
+        (n_fixed is None)
+        or prom_mode == "GPT automatic"
+        or bw_mode == "GPT automatic"
+    )
     if workers > 1 and gpt_features_selected:
         st.caption(
             "Multiple workers will send concurrent GPT requests. Reduce workers if you encounter API rate limits."
@@ -4596,8 +4620,8 @@ def _start_batch_run(
         n_peaks=n_fixed,
         n_peaks_auto=n_fixed is None,
         max_peaks=int(max_peaks),
-        bandwidth=bw_val if bw_mode == "Manual" else "scott",
-        bandwidth_auto=bw_mode != "Manual",
+        bandwidth=bw_val if bw_val is not None else "scott",
+        bandwidth_auto=bw_mode == "GPT automatic",
         prominence=prom_val if prom_val is not None else 0.05,
         prominence_auto=prom_mode != "Manual",
         min_width=int(min_w),
@@ -4608,6 +4632,7 @@ def _start_batch_run(
         valley_drop=float(val_drop),
         first_valley="drop" if val_mode == "Valley drop" else "slope",
         apply_consistency=bool(st.session_state.get("apply_consistency", False)),
+        consistency_tol=float(st.session_state.get("consistency_tol", 0.5)),
         align=False,
         align_mode=align_mode,
         target_landmarks=target_vec,

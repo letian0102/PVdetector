@@ -514,7 +514,7 @@ def process_sample(
 
     drop_frac = params["valley_drop"] / 100.0
 
-    peaks, valleys, xs, ys, bw_used = kde_peaks_valleys(
+    kde_result = kde_peaks_valleys(
         counts,
         params["n_peaks_effective"],
         params["prominence_effective"],
@@ -527,6 +527,16 @@ def process_sample(
         turning_peak=params["turning_points"],
         first_valley=params["first_valley"],
     )
+
+    if len(kde_result) == 5:
+        peaks, valleys, xs, ys, bw_used = kde_result
+    elif len(kde_result) == 4:
+        peaks, valleys, xs, ys = kde_result
+        bw_used = None
+    else:
+        raise ValueError(
+            "kde_peaks_valleys must return 4 or 5 values (peaks, valleys, xs, ys[, bw])"
+        )
 
     valleys = _postprocess_valleys(peaks, valleys, xs, ys, drop_frac)
 

@@ -13,6 +13,7 @@ import io
 import json
 import math
 import re
+import inspect
 import zipfile
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field
@@ -37,6 +38,18 @@ from .roughness import find_bw_for_roughness
 
 
 DEFAULT_GPT_MODEL = "o4-mini"
+
+
+def _call_kde(func, *args, **kwargs):
+    """Invoke ``kde_peaks_valleys``-like callables with backward-compatible kwargs."""
+
+    sig = inspect.signature(func)
+    params = sig.parameters
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return func(*args, **kwargs)
+
+    filtered = {k: v for k, v in kwargs.items() if k in params}
+    return func(*args, **filtered)
 
 try:  # optional dependency during tests
     from openai import OpenAI
@@ -101,10 +114,16 @@ class BatchOptions:
     min_width: int = 0
     curvature: float = 0.0001
     turning_points: bool = False
+    auto_shoulders: bool = False
     min_separation: float = 0.5
     grid_size: int = 20_000
     valley_drop: float = 10.0  # percent of peak height
     first_valley: str = "slope"  # or "drop"
+    valley_merge: float = 0.0
+
+    multiscale: bool = False
+    multiscale_scales: tuple[float, ...] = (0.5, 1.0, 2.0)
+    multiscale_fraction: float = 0.67
 
     apply_consistency: bool = False
     consistency_tol: float = 0.5
@@ -284,6 +303,10 @@ def _resolve_parameters(
         overrides.get("turning_points"), options.turning_points
     )
 
+    params["auto_shoulders"] = _boolean_override(
+        overrides.get("auto_shoulders"), options.auto_shoulders
+    )
+
     min_sep_val = _coerce_float(overrides.get("min_separation"))
     params["min_separation"] = (
         max(0.0, float(min_sep_val))
@@ -300,6 +323,13 @@ def _resolve_parameters(
         float(drop_override) if drop_override is not None else float(options.valley_drop)
     )
 
+    merge_override = _coerce_float(overrides.get("valley_merge"))
+    params["valley_merge"] = (
+        float(merge_override)
+        if merge_override is not None
+        else float(options.valley_merge)
+    )
+
     first_mode = overrides.get("first_valley")
     if isinstance(first_mode, str) and first_mode.strip().lower().startswith("valley"):
         params["first_valley"] = "drop"
@@ -307,6 +337,29 @@ def _resolve_parameters(
         params["first_valley"] = "slope"
     else:
         params["first_valley"] = options.first_valley
+
+    params["multiscale"] = _boolean_override(
+        overrides.get("multiscale"), options.multiscale
+    )
+
+    scales_override = overrides.get("multiscale_scales")
+    if isinstance(scales_override, (list, tuple)):
+        scales = [float(s) for s in scales_override if _coerce_float(s) is not None]
+    elif isinstance(scales_override, str):
+        try:
+            scales = [float(part) for part in scales_override.split(",")]
+        except Exception:
+            scales = list(options.multiscale_scales)
+    else:
+        scales = list(options.multiscale_scales)
+    params["multiscale_scales"] = tuple(scales)
+
+    fraction_override = _coerce_float(overrides.get("multiscale_fraction"))
+    params["multiscale_fraction"] = (
+        float(fraction_override)
+        if fraction_override is not None
+        else float(options.multiscale_fraction)
+    )
 
     # --- prominence -------------------------------------------------------
     prom_override = overrides.get("prom")
@@ -514,7 +567,8 @@ def process_sample(
 
     drop_frac = params["valley_drop"] / 100.0
 
-    peaks, valleys, xs, ys = kde_peaks_valleys(
+    peaks, valleys, xs, ys = _call_kde(
+        kde_peaks_valleys,
         counts,
         params["n_peaks_effective"],
         params["prominence_effective"],
@@ -526,6 +580,10 @@ def process_sample(
         curvature_thresh=curvature,
         turning_peak=params["turning_points"],
         first_valley=params["first_valley"],
+        auto_shoulders=params["auto_shoulders"],
+        multiscale=params["multiscale_scales"] if params["multiscale"] else False,
+        multiscale_fraction=params["multiscale_fraction"],
+        valley_merge=params["valley_merge"],
     )
 
     valleys = _postprocess_valleys(peaks, valleys, xs, ys, drop_frac)
@@ -544,6 +602,11 @@ def process_sample(
         "grid_size": params["grid_size"],
         "valley_drop": params["valley_drop"],
         "first_valley": params["first_valley"],
+        "valley_merge": params["valley_merge"],
+        "auto_shoulders": params["auto_shoulders"],
+        "multiscale": params["multiscale"],
+        "multiscale_scales": params["multiscale_scales"],
+        "multiscale_fraction": params["multiscale_fraction"],
     }
     if debug:
         details["debug"] = debug

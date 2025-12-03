@@ -68,6 +68,60 @@ def _merge_close_peaks(
     return np.asarray(keep, dtype=int)
 
 
+def _vote_peaks(
+    xs: np.ndarray,
+    peak_sets: list[np.ndarray],
+    *,
+    min_x_sep: float | None,
+    grid_dx: float,
+    min_fraction: float,
+) -> np.ndarray:
+    """Merge peak candidates across multiple smoothing scales.
+
+    Peaks are clustered if they fall within a tolerance defined by a fraction
+    of the requested minimum separation (or a few grid cells when that value
+    is not provided).  A cluster is kept when it appears in at least
+    ``min_fraction`` of the supplied peak sets.
+    """
+
+    if not peak_sets:
+        return np.array([], dtype=int)
+
+    min_fraction = float(min_fraction)
+    if min_fraction <= 0:
+        min_fraction = 1.0
+
+    tol = 3.0 * grid_dx
+    if min_x_sep is not None and np.isfinite(min_x_sep) and min_x_sep > 0:
+        tol = max(tol, 0.25 * float(min_x_sep))
+
+    clusters: list[dict[str, float]] = []
+    for locs in peak_sets:
+        for idx in locs:
+            px = float(xs[idx])
+            match = None
+            for cl in clusters:
+                if abs(px - cl["x"]) <= tol:
+                    match = cl
+                    break
+            if match is None:
+                clusters.append({"x": px, "count": 1.0, "seen": 1})
+            else:
+                match["x"] = (match["x"] * match["seen"] + px) / (match["seen"] + 1)
+                match["seen"] += 1
+                match["count"] += 1.0
+
+    required = max(1, math.ceil(min_fraction * len(peak_sets)))
+    merged: list[int] = []
+    for cl in clusters:
+        if cl["seen"] >= required:
+            target = float(cl["x"])
+            idx = int(np.argmin(np.abs(xs - target)))
+            merged.append(idx)
+
+    return np.asarray(sorted(set(merged)), dtype=int)
+
+
 def _peak_height(xs: np.ndarray, ys: np.ndarray, peak_x: float) -> float:
     """Return KDE height at the closest grid point to ``peak_x``."""
 
@@ -370,6 +424,32 @@ def _evaluate_kde(
     return _fft_gaussian_kde(x, xs, bandwidth)
 
 
+def _bandwidth_peaks(
+    x: np.ndarray,
+    xs: np.ndarray,
+    base_factor: float,
+    scale: float,
+    distance: int | None,
+    kw: dict[str, float],
+    *,
+    min_x_sep: float | None,
+    min_valley_drop: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Evaluate KDE at a specific bandwidth scale and return its peaks."""
+
+    try:
+        kde = gaussian_kde(x, bw_method=float(base_factor * scale))
+        ys = _evaluate_kde(x, xs, kde)
+    except Exception:
+        return np.array([], dtype=int), np.zeros_like(xs)
+
+    locs, _ = find_peaks(ys, **kw, distance=distance)
+    locs = _merge_close_peaks(
+        xs, ys, locs, min_x_sep=min_x_sep, min_valley_drop=min_valley_drop
+    )
+    return locs, ys
+
+
 def _first_valley_slope(
     xs: np.ndarray,
     ys: np.ndarray,
@@ -582,6 +662,152 @@ def _valley_between(xs: np.ndarray,
     return float(xs[valley_idx])
 
 
+def _shoulder_candidates(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    *,
+    min_x_sep: float | None,
+    curvature_thresh: float | None,
+    min_span: int,
+    drop_frac: float,
+) -> np.ndarray:
+    """Return shoulder-like peaks detected from curvature patterns."""
+
+    if ys.size == 0:
+        return np.array([], dtype=int)
+
+    dy = np.gradient(ys, xs)
+    d2y = np.gradient(dy, xs)
+
+    slope_tol = 0.05 * np.max(np.abs(dy)) if dy.size else 0.0
+    max_concave = np.max(-d2y) if d2y.size else 0.0
+
+    if curvature_thresh is None or curvature_thresh <= 0:
+        curvature_thresh = 0.2 * max_concave if max_concave > 0 else 0.0
+
+    if curvature_thresh <= 0 or max_concave <= 0:
+        return np.array([], dtype=int)
+
+    mask = (np.abs(dy) < slope_tol) & (d2y < -curvature_thresh)
+    if not mask.any():
+        return np.array([], dtype=int)
+
+    # group contiguous spans
+    runs: list[tuple[int, int]] = []
+    start = None
+    for i, val in enumerate(mask):
+        if val and start is None:
+            start = i
+        elif not val and start is not None:
+            runs.append((start, i - 1))
+            start = None
+    if start is not None:
+        runs.append((start, len(mask) - 1))
+
+    picks: list[int] = []
+    grid_dx = float(xs[1] - xs[0]) if xs.size > 1 else 1.0
+    min_span = max(3, min_span)
+    if min_x_sep is not None and np.isfinite(min_x_sep) and min_x_sep > 0:
+        min_span = max(min_span, int(np.ceil(min_x_sep / grid_dx)))
+
+    for lo, hi in runs:
+        if hi - lo + 1 < min_span:
+            continue
+        seg_y = ys[lo : hi + 1]
+        peak_rel = int(np.argmax(seg_y))
+        idx = lo + peak_rel
+
+        left_val = ys[lo] if lo < ys.size else seg_y[0]
+        right_val = ys[hi] if hi < ys.size else seg_y[-1]
+        peak_val = ys[idx]
+
+        if peak_val <= 0:
+            continue
+
+        shoulder_drop = peak_val - max(left_val, right_val)
+        drop_rule = max(0.02, drop_frac)
+        if shoulder_drop < drop_rule * peak_val:
+            continue
+
+        picks.append(idx)
+
+    return np.asarray(sorted(set(picks)), dtype=int)
+
+
+def _valley_depth_score(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    left_idx: int,
+    right_idx: int,
+    valley_idx: int,
+) -> float:
+    """Depth score inspired by the lowland algorithm (0 = shallow)."""
+
+    if left_idx >= right_idx or valley_idx <= left_idx or valley_idx >= right_idx:
+        return 0.0
+
+    baseline = min(float(ys[left_idx]), float(ys[right_idx]))
+    if baseline <= 0:
+        return 0.0
+
+    seg_x = xs[left_idx : right_idx + 1]
+    seg_y = ys[left_idx : right_idx + 1]
+    depth = baseline - seg_y
+    depth = np.where(depth > 0, depth, 0.0)
+    area = np.trapz(depth, seg_x)
+    max_area = baseline * (seg_x[-1] - seg_x[0])
+    if max_area <= 0:
+        return 0.0
+    return float(area / max_area)
+
+
+def _merge_shallow_valleys(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    peaks_idx: list[int],
+    valleys_x: list[float],
+    *,
+    min_x_sep: float | None,
+    drop_frac: float,
+    first_valley: str,
+    merge_thresh: float | None,
+) -> tuple[list[int], list[float]]:
+    """Merge adjacent peaks when the separating valley is too shallow."""
+
+    if merge_thresh is None or merge_thresh <= 0 or len(peaks_idx) < 2:
+        return peaks_idx, valleys_x
+
+    def _recompute(current: list[int]) -> tuple[list[int], list[float]]:
+        return _resolve_peak_valley_conflicts(
+            xs,
+            ys,
+            current,
+            min_x_sep=min_x_sep,
+            drop_frac=drop_frac,
+            first_valley=first_valley,
+        )
+
+    peaks_idx = list(peaks_idx)
+    valleys_x = list(valleys_x)
+
+    while len(peaks_idx) > 1 and valleys_x:
+        valleys_idx = [int(np.argmin(np.abs(xs - vx))) for vx in valleys_x]
+        merged = False
+        for i, v_idx in enumerate(valleys_idx):
+            if i >= len(peaks_idx) - 1:
+                break
+            score = _valley_depth_score(xs, ys, peaks_idx[i], peaks_idx[i + 1], v_idx)
+            if score < merge_thresh:
+                del peaks_idx[i + 1]
+                merged = True
+                break
+        if not merged:
+            break
+        peaks_idx, valleys_x = _recompute(peaks_idx)
+
+    return peaks_idx, valleys_x
+
+
 
 # ----------------------------------------------------------------------
 def _normalise_bandwidth(bw: str | float | Callable | None) -> str | float | Callable:
@@ -630,6 +856,10 @@ def kde_peaks_valleys(
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,
     first_valley   : str = "slope",
+    multiscale     : bool | list[float] = False,
+    multiscale_fraction: float = 0.67,
+    auto_shoulders : bool = False,
+    valley_merge   : float | None = None,
 ):
     x = np.asarray(data, float)
     x = x[np.isfinite(x)]
@@ -682,30 +912,99 @@ def kde_peaks_valleys(
     kw = {"prominence": prominence}
     if min_width:
         kw["width"] = min_width
+
     locs, _ = find_peaks(ys, **kw, distance=distance)
 
-    if turning_peak and curvature_thresh and curvature_thresh > 0:
-        dy  = np.gradient(ys, xs)                 # 1st derivative
-        d2y = np.gradient(dy,  xs)                # 2nd derivative
-        slope_tol = 0.05 * np.max(np.abs(dy))     # “almost flat”
+    # ---------- multi-scale consensus (optional) ----------
+    if multiscale:
+        if isinstance(multiscale, (list, tuple, np.ndarray)):
+            scales = [float(s) for s in multiscale if np.isfinite(s) and s > 0]
+        else:
+            scales = [0.5, 1.0, 2.0]
+        if not scales:
+            scales = [1.0]
+        if 1.0 not in scales:
+            scales.append(1.0)
+        scales = sorted(set(scales))
 
-        turning = np.where(
-            (np.abs(dy) < slope_tol) &           # near-flat slope
-            (d2y < -curvature_thresh)            # concave-down
-        )[0]
+        peak_sets: list[np.ndarray] = []
+        for scale in scales:
+            loc_scale, _ = _bandwidth_peaks(
+                x,
+                xs,
+                kde.factor,
+                scale,
+                distance,
+                kw,
+                min_x_sep=min_x_sep,
+                min_valley_drop=min_valley_drop,
+            )
+            peak_sets.append(loc_scale)
 
-        # keep only the strongest point inside every min_x_sep window
-        if turning.size:
-            strongest = [turning[0]]
-            for idx in turning[1:]:
-                if xs[idx] - xs[strongest[-1]] >= min_x_sep:
-                    strongest.append(idx)
-                elif ys[idx] > ys[strongest[-1]]:     # higher shoulder wins
-                    strongest[-1] = idx
-            locs = np.unique(np.concatenate([locs, strongest]))
+        consensus = _vote_peaks(
+            xs,
+            peak_sets,
+            min_x_sep=min_x_sep,
+            grid_dx=grid_dx,
+            min_fraction=multiscale_fraction,
+        )
+        if consensus.size:
+            locs = consensus
 
-    locs = _merge_close_peaks(xs, ys, locs,
-            min_x_sep=min_x_sep, min_valley_drop=min_valley_drop)
+    # ---------- shoulder / plateau detection ----------
+    turning_needed = bool(turning_peak) or (auto_shoulders and locs.size <= 1)
+    if turning_needed:
+        shoulder_candidates = _shoulder_candidates(
+            xs,
+            ys,
+            min_x_sep=min_x_sep,
+            curvature_thresh=curvature_thresh if turning_peak else None,
+            min_span=max(3, int(0.005 * xs.size)),
+            drop_frac=drop_frac,
+        )
+        if shoulder_candidates.size:
+            locs = np.unique(np.concatenate([locs, shoulder_candidates]))
+
+        if auto_shoulders and locs.size <= 1:
+            alt_sets: list[np.ndarray] = []
+            alt_kw = dict(kw)
+            if "prominence" in alt_kw:
+                alt_kw["prominence"] = 0.5 * float(prominence)
+            for scale in (0.6, 0.85):
+                loc_scale, _ = _bandwidth_peaks(
+                    x,
+                    xs,
+                    kde.factor,
+                    scale,
+                    distance,
+                    alt_kw,
+                    min_x_sep=min_x_sep,
+                    min_valley_drop=min_valley_drop,
+                )
+                alt_sets.append(loc_scale)
+
+            extras = _vote_peaks(
+                xs,
+                alt_sets,
+                min_x_sep=min_x_sep,
+                grid_dx=grid_dx,
+                min_fraction=0.5,
+            )
+
+            if extras.size and locs.size:
+                tol = 0.5 * min_x_sep if min_x_sep else 2 * grid_dx
+                filtered = []
+                for idx in extras:
+                    if all(abs(xs[idx] - xs[p]) >= tol for p in locs):
+                        filtered.append(idx)
+                extras = np.asarray(filtered, dtype=int)
+
+            if extras.size:
+                locs = np.unique(np.concatenate([locs, extras]))
+
+    locs = _merge_close_peaks(
+        xs, ys, locs, min_x_sep=min_x_sep, min_valley_drop=min_valley_drop
+    )
 
     if locs.size == 0 and n_peaks is None:
         return [], [], xs, ys
@@ -791,6 +1090,17 @@ def kde_peaks_valleys(
         min_x_sep=min_x_sep,
         drop_frac=drop_frac,
         first_valley=first_valley,
+    )
+
+    peaks_idx, valleys_x = _merge_shallow_valleys(
+        xs,
+        ys,
+        peaks_idx,
+        valleys_x,
+        min_x_sep=min_x_sep,
+        drop_frac=drop_frac,
+        first_valley=first_valley,
+        merge_thresh=valley_merge,
     )
     peaks_x = [float(xs[idx]) for idx in peaks_idx]
     peaks_x = np.round(peaks_x, 10).tolist()

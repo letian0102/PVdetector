@@ -514,7 +514,7 @@ def process_sample(
 
     drop_frac = params["valley_drop"] / 100.0
 
-    peaks, valleys, xs, ys = kde_peaks_valleys(
+    peaks, valleys, xs, ys, bw_used = kde_peaks_valleys(
         counts,
         params["n_peaks_effective"],
         params["prominence_effective"],
@@ -533,7 +533,8 @@ def process_sample(
     quality = float(stain_quality(counts, peaks, valleys))
 
     details = {
-        "bw": params["bandwidth_effective"],
+        "bw": bw_used,
+        "bw_label": params["bandwidth_effective"],
         "prom": params["prominence_effective"],
         "n_peaks": params["n_peaks_effective"],
         "max_peaks": params["max_peaks"],

@@ -750,13 +750,13 @@ def kde_peaks_valleys(
         span = float(np.max(x) - np.min(x)) if x.size else 1.0
         h = max(1e-3, 0.1 * span)
 
-    # When boundary correction is active we still extend the grid slightly below
-    # the boundary so the reflected mass is visible in ridge plots (otherwise the
-    # left half of the first peak can look "cut off" at zero).  The lower bound
-    # stays anchored to the data range when reflection is disabled.
+    # Keep the evaluation grid anchored at the lower boundary whenever
+    # reflection is enabled so we never emit negative x-values for downstream
+    # ridge plots.  When no boundary handling is needed, fall back to the
+    # data-driven lower limit.
     if used_boundary and boundary_lower is not None:
         candidate_min = float(np.min(x) - h)
-        grid_min = min(candidate_min, float(boundary_lower) - 0.1 * abs(h))
+        grid_min = max(candidate_min, float(boundary_lower))
     else:
         grid_min = float(np.min(x) - h)
     grid_max = float(np.max(x) + h)

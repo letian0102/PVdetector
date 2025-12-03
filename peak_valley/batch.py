@@ -31,7 +31,14 @@ from .gpt_adapter import (
     ask_gpt_peak_count,
     ask_gpt_prominence,
 )
-from .kde_detector import kde_peaks_valleys, quick_peak_estimate
+from scipy.stats import gaussian_kde
+
+from .kde_detector import (
+    _mostly_small_discrete,
+    _normalise_bandwidth,
+    kde_peaks_valleys,
+    quick_peak_estimate,
+)
 from .quality import stain_quality
 from .roughness import find_bw_for_roughness
 
@@ -448,6 +455,45 @@ def _resolve_parameters(
     return params, debug
 
 
+def _effective_bandwidth(counts: np.ndarray, bw: str | float) -> float:
+    """Return the scalar KDE bandwidth actually applied.
+
+    Mirrors the logic inside :func:`kde_peaks_valleys` so presets such as
+    ``"scott"``/``"silverman"`` resolve to the concrete numerical bandwidth
+    used during estimation.
+    """
+
+    x = np.asarray(counts, float)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return float("nan")
+
+    x_kde = x
+    if x_kde.size > 10_000:
+        x_kde = np.random.choice(x_kde, 10_000, replace=False)
+
+    bw_use = _normalise_bandwidth(bw)
+    if bw_use == "roughness":
+        try:
+            bw_use = _normalise_bandwidth(find_bw_for_roughness(x_kde))
+        except Exception:
+            bw_use = "scott"
+
+    try:
+        kde = gaussian_kde(x_kde, bw_method=bw_use)
+    except ValueError:
+        bw_use = "scott"
+        kde = gaussian_kde(x_kde, bw_method=bw_use)
+
+    if _mostly_small_discrete(x_kde):
+        kde.set_bandwidth(kde.factor * 4.0)
+
+    if x_kde.size <= 1:
+        return 0.0
+
+    return float(kde.factor * float(np.std(x_kde, ddof=1)))
+
+
 def _postprocess_valleys(
     peaks: list[float],
     valleys: list[float],
@@ -532,8 +578,11 @@ def process_sample(
 
     quality = float(stain_quality(counts, peaks, valleys))
 
+    bw_scalar = _effective_bandwidth(counts, params["bandwidth_effective"])
+
     details = {
-        "bw": params["bandwidth_effective"],
+        "bw": bw_scalar,
+        "bw_label": params["bandwidth_effective"],
         "prom": params["prominence_effective"],
         "n_peaks": params["n_peaks_effective"],
         "max_peaks": params["max_peaks"],

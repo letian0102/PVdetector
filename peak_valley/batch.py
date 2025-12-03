@@ -491,9 +491,7 @@ def _effective_bandwidth(counts: np.ndarray, bw: str | float) -> float:
     if x_kde.size <= 1:
         return 0.0
 
-    # ``gaussian_kde`` scales the sample covariance by ``factor**2`` for 1-D inputs,
-    # so the scalar bandwidth (standard deviation of the kernel) is ``factor * std``.
-    return float(kde.factor * float(np.std(x_kde, ddof=1)))
+    return float(math.sqrt(float(kde.covariance.squeeze())))
 
 
 def _postprocess_valleys(
@@ -562,7 +560,7 @@ def process_sample(
 
     drop_frac = params["valley_drop"] / 100.0
 
-    peaks, valleys, xs, ys = kde_peaks_valleys(
+    peaks, valleys, xs, ys, bw_scalar = kde_peaks_valleys(
         counts,
         params["n_peaks_effective"],
         params["prominence_effective"],
@@ -574,13 +572,12 @@ def process_sample(
         curvature_thresh=curvature,
         turning_peak=params["turning_points"],
         first_valley=params["first_valley"],
+        return_bandwidth=True,
     )
 
     valleys = _postprocess_valleys(peaks, valleys, xs, ys, drop_frac)
 
     quality = float(stain_quality(counts, peaks, valleys))
-
-    bw_scalar = _effective_bandwidth(counts, params["bandwidth_effective"])
 
     details = {
         "bw": bw_scalar,

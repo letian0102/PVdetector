@@ -8,7 +8,7 @@ from scipy.stats import gaussian_kde
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from peak_valley.batch import _effective_bandwidth
-from peak_valley.kde_detector import _mostly_small_discrete
+from peak_valley.kde_detector import _mostly_small_discrete, kde_peaks_valleys
 
 
 def _expected_bandwidth(x, bw):
@@ -37,3 +37,10 @@ def test_effective_bandwidth_scalar_matches_gaussian_kde():
     expected = _expected_bandwidth(x, 0.5)
     actual = _effective_bandwidth(x, 0.5)
     assert math.isclose(actual, expected, rel_tol=1e-12, abs_tol=0.0)
+
+
+def test_kde_peaks_valleys_reports_actual_bandwidth():
+    x = np.linspace(-3, 3, 50)
+    expected = _expected_bandwidth(x, "scott")
+    *_unused, reported = kde_peaks_valleys(x, bw="scott", return_bandwidth=True)
+    assert math.isclose(reported, expected, rel_tol=1e-12, abs_tol=0.0)

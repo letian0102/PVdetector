@@ -664,7 +664,11 @@ def kde_peaks_valleys(
         kde = gaussian_kde(x, bw_method=bw_use)
     if _mostly_small_discrete(x):
         kde.set_bandwidth(kde.factor * 4.0)
-    bandwidth = float(math.sqrt(float(kde.covariance.squeeze()))) if x.size else 0.0
+    if x.size:
+        sample_std = float(np.sqrt(float(np.var(kde.dataset, ddof=1))))
+        bandwidth = float(kde.factor * sample_std)
+    else:
+        bandwidth = 0.0
     h   = bandwidth
     xs  = np.linspace(x.min() - h, x.max() + h,
                       min(grid_size, max(4000, 4 * x.size)))

@@ -15,7 +15,8 @@ def _expected_bandwidth(x, bw):
     kde = gaussian_kde(x, bw_method=bw)
     if _mostly_small_discrete(x):
         kde.set_bandwidth(kde.factor * 4.0)
-    return math.sqrt(float(kde.covariance.squeeze()))
+    sample_std = float(np.sqrt(float(np.var(kde.dataset, ddof=1))))
+    return float(kde.factor * sample_std)
 
 
 def test_effective_bandwidth_scott_matches_gaussian_kde():

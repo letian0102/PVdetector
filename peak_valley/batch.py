@@ -491,7 +491,8 @@ def _effective_bandwidth(counts: np.ndarray, bw: str | float) -> float:
     if x_kde.size <= 1:
         return 0.0
 
-    return float(math.sqrt(float(kde.covariance.squeeze())))
+    sample_std = float(np.sqrt(float(np.var(kde.dataset, ddof=1))))
+    return float(kde.factor * sample_std)
 
 
 def _postprocess_valleys(

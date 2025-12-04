@@ -48,7 +48,7 @@ def test_arcsinh_applied():
     _sync_generated_counts(["CD3"], ["s1"], expr_df, meta_df)
     stem, bio = st.session_state.generated_csvs[0]
     arr = read_bio(bio)
-    expected = (1 / 0.2) * np.arcsinh(np.array([10.0, 20.0]))
+    expected = np.arcsinh(1.0 + 0.2 * np.array([10.0, 20.0]))
     assert np.allclose(arr, expected)
     assert getattr(bio, "arcsinh")
 

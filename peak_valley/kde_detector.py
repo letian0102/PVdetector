@@ -261,37 +261,6 @@ def _resolve_peak_valley_conflicts(
 
     return peaks_idx, valleys
 
-def _mostly_small_discrete(x: np.ndarray, threshold: float = 0.9) -> bool:
-    """Heuristic to catch almost-discrete samples near zero (0..3).
-
-    Parameters
-    ----------
-    x : np.ndarray
-        Input data (1‑D array).
-    threshold : float, optional
-        Fraction of points within ``0‥3`` required to trigger.
-
-    Returns
-    -------
-    bool
-        ``True`` if the majority of values are integers 0–3.
-    """
-    x = np.asarray(x, float)
-    if x.size == 0:
-        return False
-
-    good = x[np.isfinite(x)]
-    if good.size == 0:
-        return False
-
-    mask = (good >= 0) & (good <= 3)
-    if mask.sum() / good.size < threshold:
-        return False
-
-    uniq = np.unique(np.round(good[mask]))
-    return uniq.size <= 4
-
-
 def _fft_gaussian_kde(
     x: np.ndarray,
     xs: np.ndarray,
@@ -639,7 +608,15 @@ def kde_peaks_valleys(
     # ---------- KDE grid ----------
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
-    bw_use = _normalise_bandwidth(bw)
+
+    sample_std = float(np.std(x, ddof=1))
+    if not np.isfinite(sample_std):
+        sample_std = 0.0
+
+    requested_bw = _normalise_bandwidth(bw)
+    user_fixed_bw = isinstance(requested_bw, (int, float))
+    bw_use = requested_bw
+
     if bw_use == "roughness":
         try:
             bw_use = _normalise_bandwidth(find_bw_for_roughness(x))
@@ -651,6 +628,12 @@ def kde_peaks_valleys(
                 stacklevel=2,
             )
             bw_use = "scott"
+
+    if isinstance(bw_use, (int, float)):
+        bw_use = float(bw_use)
+        if sample_std > 0.0:
+            bw_use /= sample_std
+
     try:
         kde = gaussian_kde(x, bw_method=bw_use)
     except ValueError:
@@ -661,11 +644,18 @@ def kde_peaks_valleys(
         )
         bw_use = "scott"
         kde = gaussian_kde(x, bw_method=bw_use)
-    if _mostly_small_discrete(x):
-        kde.set_bandwidth(kde.factor * 4.0)
-    h   = kde.factor * x.std(ddof=1)
-    xs  = np.linspace(x.min() - h, x.max() + h,
-                      min(grid_size, max(4000, 4 * x.size)))
+
+    h = kde.factor * sample_std
+
+    x_min = x.min() - h
+    if x_min < 0 and np.all(x >= 0):
+        x_min = 0.0
+
+    xs = np.linspace(
+        x_min,
+        x.max() + h,
+        min(grid_size, max(4000, 4 * x.size)),
+    )
     ys  = _evaluate_kde(x, xs, kde)
 
     # ---------- primary peaks ----------

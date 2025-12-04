@@ -314,9 +314,11 @@ def _prepare_boundary_kde_data(
     if boundary_correction and boundary_lower is not None and np.isfinite(boundary_lower):
         boundary_lower = float(boundary_lower)
 
-        # Avoid reflecting when the distribution sits well away from the boundary.
-        # Only turn on correction if the lower tail actually hugs the boundary and
-        # a meaningful fraction of points live there.
+        # Avoid reflecting when the distribution sits well away from the boundary,
+        # but be less strict about how many points hug the edge.  Even a small
+        # spike at the boundary (common for zero-inflated ADT counts) should
+        # trigger reflection so that the KDE keeps the first peak intact instead
+        # of truncating it.
         low_q, high_q = np.percentile(finite, [5, 95])
         span = float(high_q - low_q)
         if not np.isfinite(span) or span <= 0:
@@ -326,12 +328,11 @@ def _prepare_boundary_kde_data(
 
         tol = max(1e-6, 0.02 * span)
         lower_tail = float(np.percentile(finite, 2))
-        frac_near = float(np.mean(finite <= boundary_lower + tol))
+        min_val = float(np.min(finite))
 
         if (
-            lower_tail >= boundary_lower - 1e-9
-            and (lower_tail - boundary_lower) <= tol
-            and frac_near >= 0.05
+            min_val >= boundary_lower - 1e-9
+            and lower_tail <= boundary_lower + tol
         ):
             use_boundary = True
 
@@ -750,16 +751,25 @@ def kde_peaks_valleys(
         span = float(np.max(x) - np.min(x)) if x.size else 1.0
         h = max(1e-3, 0.1 * span)
 
-    # Keep the evaluation grid anchored at the lower boundary whenever
-    # reflection is enabled so we never emit negative x-values for downstream
-    # ridge plots.  When no boundary handling is needed, fall back to the
-    # data-driven lower limit.
+    # When reflection is enabled we keep the grid anchored to the lower
+    # boundary but still include a small buffer below it so the whole leading
+    # edge of the first peak is visible instead of being shaved off at ``0``.
+    # The buffer scales with the bandwidth to expose the mirrored mass without
+    # overextending the domain for near-zero distributions.  Crucially, the
+    # mirrored samples must also influence the grid limits; otherwise the KDE
+    # evaluation can stop before the reflected side of the zero peak, clipping
+    # the plotted density.  Use the same padding for both original and mirrored
+    # points so the full KDE support is covered.
+    data_for_range = kde_data if used_boundary else x
+    data_span_min = float(np.min(data_for_range) - h)
+    data_span_max = float(np.max(data_for_range) + h)
+
     if used_boundary and boundary_lower is not None:
-        candidate_min = float(np.min(x) - h)
-        grid_min = max(candidate_min, float(boundary_lower))
+        buffer = max(0.5 * h, 1e-6)
+        grid_min = min(float(boundary_lower) - buffer, data_span_min)
     else:
-        grid_min = float(np.min(x) - h)
-    grid_max = float(np.max(x) + h)
+        grid_min = data_span_min
+    grid_max = data_span_max
     if grid_max <= grid_min:
         grid_max = grid_min + max(h, 1e-3)
 

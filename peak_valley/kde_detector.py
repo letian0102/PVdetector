@@ -639,7 +639,15 @@ def kde_peaks_valleys(
     # ---------- KDE grid ----------
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
-    bw_use = _normalise_bandwidth(bw)
+
+    sample_std = float(np.std(x, ddof=1))
+    if not np.isfinite(sample_std):
+        sample_std = 0.0
+
+    requested_bw = _normalise_bandwidth(bw)
+    user_fixed_bw = isinstance(requested_bw, (int, float))
+    bw_use = requested_bw
+
     if bw_use == "roughness":
         try:
             bw_use = _normalise_bandwidth(find_bw_for_roughness(x))
@@ -651,6 +659,12 @@ def kde_peaks_valleys(
                 stacklevel=2,
             )
             bw_use = "scott"
+
+    if isinstance(bw_use, (int, float)):
+        bw_use = float(bw_use)
+        if sample_std > 0.0:
+            bw_use /= sample_std
+
     try:
         kde = gaussian_kde(x, bw_method=bw_use)
     except ValueError:
@@ -661,9 +675,11 @@ def kde_peaks_valleys(
         )
         bw_use = "scott"
         kde = gaussian_kde(x, bw_method=bw_use)
-    if _mostly_small_discrete(x):
+
+    if _mostly_small_discrete(x) and not user_fixed_bw:
         kde.set_bandwidth(kde.factor * 4.0)
-    h   = kde.factor * x.std(ddof=1)
+
+    h   = kde.factor * sample_std
     xs  = np.linspace(x.min() - h, x.max() + h,
                       min(grid_size, max(4000, 4 * x.size)))
     ys  = _evaluate_kde(x, xs, kde)

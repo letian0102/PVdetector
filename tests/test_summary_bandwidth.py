@@ -36,3 +36,22 @@ def test_summary_reports_numeric_bandwidth_for_presets():
     assert isinstance(bw_value, float)
     assert np.isfinite(bw_value)
     assert bw_value == result.params["bw"]
+
+
+def test_fixed_bandwidth_is_preserved():
+    counts = np.concatenate([
+        np.random.default_rng(2).normal(-0.5, 0.05, 200),
+        np.random.default_rng(3).normal(1.5, 0.05, 200),
+    ])
+    options = BatchOptions(bandwidth=0.2, apply_arcsinh=False)
+    sample = SampleInput(
+        stem="demo_bw",
+        counts=counts,
+        metadata={},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+
+    result = process_sample(sample, options, overrides={}, gpt_client=None)
+
+    assert np.isclose(result.params["bw"], 0.2)
+    assert result.params.get("bw_label") == 0.2

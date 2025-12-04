@@ -207,13 +207,13 @@ def has_small_double_peak(
 
 def find_bw_for_roughness(
     values: Iterable[float],
-    target: float = 7.5,
+    target: float = 9.0,
     lower: float = 0.01,
     upper: float = 0.3,
     tol_bw: float = 1e-3,
     max_iter: int = 50,
     min_y_frac_peak: float = 0.05,
-    valley_prom_frac: float = 0.08,
+    valley_prom_frac: float = 0.05,
     grid_size: int = 512,
 ) -> float:
     """Binary-search the smallest bandwidth that passes roughness checks."""

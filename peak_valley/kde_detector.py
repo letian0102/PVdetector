@@ -25,7 +25,7 @@ def _merge_close_peaks(
     xs: np.ndarray,
     ys: np.ndarray,
     p_idx: np.ndarray,
-    min_x_sep: float = 0.4,
+    min_x_sep: float = 0.3,
     min_valley_drop: float = 0.15,
 ) -> np.ndarray:
     """
@@ -624,8 +624,8 @@ def kde_peaks_valleys(
     bw             : str  | float = "scott",
     min_width      : int  | None  = None,
     grid_size      : int          = 20_000,
-    drop_frac      : float        = 0.10,
-    min_x_sep      : float        = 1.0,   # absolute, same units as `data`
+    drop_frac      : float        = 0.12,
+    min_x_sep      : float        = 0.6,   # absolute, same units as `data`
     min_valley_drop: float        = 0.15,
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,

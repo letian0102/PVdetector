@@ -185,6 +185,7 @@ def build_warp_function(
     # sort by source x
     order = np.argsort(ls)
     ls, lt = ls[order], lt[order]
+    lt = np.maximum.accumulate(lt)
 
     # —— single-landmark → constant shift ————————————————
     if ls.size == 1:
@@ -284,8 +285,9 @@ def align_distributions(
         lm[nan_by_col] = np.take(col_median, np.where(nan_by_col)[1])
 
     # ---------- choose the common target positions -----------------------
-    tgt = (np.nanmean(lm, axis=0)
-           if target_landmark is None else np.asarray(target_landmark, float))
+    tgt_raw = (np.nanmean(lm, axis=0)
+               if target_landmark is None else np.asarray(target_landmark, float))
+    tgt = np.maximum.accumulate(np.asarray(tgt_raw, float))
     if tgt.shape[0] != lm.shape[1]:
         raise ValueError(
             "target_landmark length does not match landmark columns"
@@ -310,6 +312,7 @@ def align_distributions(
             f = build_warp_function(l_src[valid], tgt[valid])
 
             new_c = f(c)
+            new_c = np.clip(new_c, 0.0, None)
             # keep NaNs intact (e.g. missing cells in whole-dataset mode)
             new_c[np.isnan(c)] = np.nan
 

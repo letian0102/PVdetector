@@ -144,6 +144,8 @@ Each processed sample appears under **Processed datasets** with three tabs:
 - Choose a landmark set and specify target positions (automatic or manual).
 - After detection, click **Align landmarks & normalize counts** to apply piece-wise linear warping across samples.
 - A comparison tab shows raw versus aligned ridge plots when alignment results exist.
+- Before-alignment ridge plots span from a small margin before zero to a small margin above each sample's maximum value, so no data
+  are clipped while still showing a hint of space at either end of the axis.
 
 ### Downloads
 Under **Summary ∣ downloads**, obtain:

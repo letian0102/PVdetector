@@ -605,6 +605,9 @@ def kde_peaks_valleys(
     if x.size == 0:
         return [], [], np.array([]), np.array([]), None
 
+    data_min = float(x.min())
+    data_max = float(x.max())
+
     # ---------- KDE grid ----------
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
@@ -647,13 +650,16 @@ def kde_peaks_valleys(
 
     h = kde.factor * sample_std
 
-    x_min = x.min() - h
-    if x_min < 0 and np.all(x >= 0):
-        x_min = 0.0
+    base_low = min(0.0, data_min)
+    span_for_pad = data_max - base_low
+    pad = 0.02 * span_for_pad if span_for_pad > 0 else 0.05
+
+    x_min = base_low - pad
+    x_max = data_max + pad
 
     xs = np.linspace(
         x_min,
-        x.max() + h,
+        x_max,
         min(grid_size, max(4000, 4 * x.size)),
     )
     ys  = _evaluate_kde(x, xs, kde)

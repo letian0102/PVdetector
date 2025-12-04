@@ -15,8 +15,8 @@ def arcsinh_transform(
     b: float = 1 / 5,
     c: float = 0.0,
 ) -> pd.Series:
-    """Same arcsinh transform you used in the notebook."""
-    return (1 / b) * np.arcsinh(a * x + c)
+    """Apply ``asinh(a + b * x) + c`` to the provided values."""
+    return np.arcsinh(a + b * x) + c
 
 
 # ------------------------------------------------------------------

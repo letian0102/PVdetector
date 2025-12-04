@@ -333,7 +333,24 @@ def align_distributions(
                 warped_density[i] = None
             else:
                 xs, ys = dens
-                warped_density[i] = (f(xs), ys.copy())
+
+                # Constrain the density grid to the observed range before warping.
+                # If the raw counts are all non-negative the lower bound becomes 0,
+                # otherwise we use the smallest observed value (ignoring NaNs).
+                finite_counts = c[np.isfinite(c)]
+                lower_bound: float | None
+                if finite_counts.size:
+                    lower_bound = float(finite_counts.min())
+                    if lower_bound >= 0.0:
+                        lower_bound = 0.0
+                else:
+                    lower_bound = None
+
+                xs_clipped = np.asarray(xs, float)
+                if lower_bound is not None:
+                    xs_clipped = np.clip(xs_clipped, lower_bound, None)
+
+                warped_density[i] = (f(xs_clipped), ys.copy())
 
     if warped_density is None:
         return warped_counts, warped_landmark, warp_funs

@@ -30,7 +30,7 @@ def test_align_distributions_returns_density_warp():
 
     assert len(warped_density) == len(counts)
     xs_warp, ys_warp = warped_density[0]
-    np.testing.assert_allclose(xs_warp, warp_funs[0](xs))
+    np.testing.assert_allclose(xs_warp, warp_funs[0](np.clip(xs, 0.0, None)))
     np.testing.assert_allclose(ys_warp, ys)
     assert warped_density[1] is None
 

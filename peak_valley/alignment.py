@@ -308,11 +308,19 @@ def align_distributions(
         l_src = lm[i]
         valid = ~np.isnan(l_src)
 
+        finite_counts = c[np.isfinite(c)]
+        lower_bound: float | None = None
+        if finite_counts.size:
+            min_val = float(finite_counts.min())
+            if min_val >= 0.0:
+                lower_bound = 0.0
+
         if valid.any():
             f = build_warp_function(l_src[valid], tgt[valid])
 
             new_c = f(c)
-            new_c = np.clip(new_c, 0.0, None)
+            if lower_bound is not None:
+                new_c = np.clip(new_c, lower_bound, None)
             # keep NaNs intact (e.g. missing cells in whole-dataset mode)
             new_c[np.isnan(c)] = np.nan
 
@@ -335,22 +343,15 @@ def align_distributions(
                 xs, ys = dens
 
                 # Constrain the density grid to the observed range before warping.
-                # If the raw counts are all non-negative the lower bound becomes 0,
-                # otherwise we use the smallest observed value (ignoring NaNs).
-                finite_counts = c[np.isfinite(c)]
-                lower_bound: float | None
-                if finite_counts.size:
-                    lower_bound = float(finite_counts.min())
-                    if lower_bound >= 0.0:
-                        lower_bound = 0.0
-                else:
-                    lower_bound = None
-
                 xs_clipped = np.asarray(xs, float)
                 if lower_bound is not None:
                     xs_clipped = np.clip(xs_clipped, lower_bound, None)
 
-                warped_density[i] = (f(xs_clipped), ys.copy())
+                warped_xs = f(xs_clipped)
+                if lower_bound is not None:
+                    warped_xs = np.clip(warped_xs, lower_bound, None)
+
+                warped_density[i] = (warped_xs, ys.copy())
 
     if warped_density is None:
         return warped_counts, warped_landmark, warp_funs

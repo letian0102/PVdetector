@@ -30,13 +30,12 @@ def test_align_distributions_returns_density_warp():
         density_grids=density_grids,
     )
 
-    expected_counts = np.array([0.0, 0.1, 0.2])
+    expected_counts = np.array([0.1, 0.2, 0.3])
     np.testing.assert_allclose(warped_counts[0], expected_counts)
     np.testing.assert_allclose(warped_landmarks[0], expected_counts)
 
     xs_warp, ys_warp = warped_density[0]
     expected_xs = warp_funs[0](np.clip(xs, 0.0, None))
-    expected_xs = expected_xs + max(0.0, -expected_xs.min())
     np.testing.assert_allclose(xs_warp, expected_xs)
     np.testing.assert_allclose(ys_warp, ys)
 

@@ -296,57 +296,44 @@ def align_distributions(
     # ---------- build & apply warps --------------------------------------
     warped_counts   : List[np.ndarray] = []
     warped_landmark = np.empty_like(lm)
-    warp_funs       : List[callable]   = []      # <<< keep 1-to-1 length
+    base_warp_funs  : List[callable]   = []      # <<< keep 1-to-1 length
     warped_density: Optional[List[Optional[Tuple[np.ndarray, np.ndarray]]]]
     if density_grids is None:
         warped_density = None
     else:
         warped_density = [None] * n_samples
 
+    lower_bound: float | None = None
+    all_mins: List[float] = []
+    for c in counts:
+        finite_c = np.asarray(c, float)[np.isfinite(c)]
+        if finite_c.size:
+            all_mins.append(float(finite_c.min()))
+    if all_mins and min(all_mins) >= 0.0:
+        lower_bound = 0.0
+
+    global_min = np.inf if lower_bound is not None else None
+
     for i in range(n_samples):
         c = np.asarray(counts[i], float)
         l_src = lm[i]
         valid = ~np.isnan(l_src)
 
-        finite_counts = c[np.isfinite(c)]
-        lower_bound: float | None = None
-        if finite_counts.size:
-            min_val = float(finite_counts.min())
-            if min_val >= 0.0:
-                lower_bound = 0.0
-
         if valid.any():
             base_f = build_warp_function(l_src[valid], tgt[valid])
-
             new_c = base_f(c)
-            shift = 0.0
-            if lower_bound is not None:
-                finite_new = new_c[np.isfinite(new_c)]
-                if finite_new.size:
-                    min_new = float(finite_new.min())
-                    if min_new < lower_bound:
-                        shift = lower_bound - min_new
-                if shift:
-                    new_c = new_c + shift
-            # keep NaNs intact (e.g. missing cells in whole-dataset mode)
             new_c[np.isnan(c)] = np.nan
-
-            # apply the same shift to landmarks and density warps
-            if shift:
-                f = lambda x, f=base_f, s=shift: np.asarray(f(x), float) + s
-            else:
-                f = base_f
 
             warped_counts.append(new_c)
             wl = np.full_like(l_src, np.nan)
-            wl[valid] = f(l_src[valid])
+            wl[valid] = base_f(l_src[valid])
         else:
-            f = _identity_warp
             warped_counts.append(c.copy())
             wl = l_src.copy()
+            base_f = _identity_warp
 
         warped_landmark[i] = wl
-        warp_funs.append(f)
+        base_warp_funs.append(base_f)
 
         if warped_density is not None:
             dens = density_list[i]
@@ -360,15 +347,35 @@ def align_distributions(
                 if lower_bound is not None:
                     xs_clipped = np.clip(xs_clipped, lower_bound, None)
 
-                warped_xs = f(xs_clipped)
-                if lower_bound is not None:
-                    finite_warped = warped_xs[np.isfinite(warped_xs)]
-                    if finite_warped.size:
-                        min_warped = float(finite_warped.min())
-                        if min_warped < lower_bound:
-                            warped_xs = warped_xs + (lower_bound - min_warped)
+                warped_xs = base_f(xs_clipped)
 
                 warped_density[i] = (warped_xs, ys.copy())
+
+        if lower_bound is not None:
+            candidates = [warped_counts[-1], wl]
+            if warped_density is not None and warped_density[i] is not None:
+                candidates.append(warped_density[i][0])
+            for arr in candidates:
+                finite_vals = np.asarray(arr, float)[np.isfinite(arr)]
+                if finite_vals.size:
+                    min_val = float(finite_vals.min())
+                    global_min = min(global_min, min_val)
+
+    shift = 0.0
+    if lower_bound is not None and global_min is not None and global_min != np.inf:
+        shift = max(0.0, lower_bound - global_min)
+
+    warp_funs: List[callable] = []
+    if shift:
+        for i, base_f in enumerate(base_warp_funs):
+            warped_counts[i] = warped_counts[i] + shift
+            warped_landmark[i] = warped_landmark[i] + shift
+            if warped_density is not None and warped_density[i] is not None:
+                xs_w, ys_w = warped_density[i]
+                warped_density[i] = (xs_w + shift, ys_w)
+            warp_funs.append(lambda x, f=base_f, s=shift: np.asarray(f(x), float) + s)
+    else:
+        warp_funs = base_warp_funs
 
     if warped_density is None:
         return warped_counts, warped_landmark, warp_funs

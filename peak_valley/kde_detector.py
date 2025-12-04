@@ -645,9 +645,17 @@ def kde_peaks_valleys(
         bw_use = "scott"
         kde = gaussian_kde(x, bw_method=bw_use)
 
-    h   = kde.factor * sample_std
-    xs  = np.linspace(x.min() - h, x.max() + h,
-                      min(grid_size, max(4000, 4 * x.size)))
+    h = kde.factor * sample_std
+
+    x_min = x.min() - h
+    if x_min < 0 and np.all(x >= 0):
+        x_min = 0.0
+
+    xs = np.linspace(
+        x_min,
+        x.max() + h,
+        min(grid_size, max(4000, 4 * x.size)),
+    )
     ys  = _evaluate_kde(x, xs, kde)
 
     # ---------- primary peaks ----------

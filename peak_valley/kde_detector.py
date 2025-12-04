@@ -751,13 +751,15 @@ def kde_peaks_valleys(
         span = float(np.max(x) - np.min(x)) if x.size else 1.0
         h = max(1e-3, 0.1 * span)
 
-    # Keep the evaluation grid anchored at the lower boundary whenever
-    # reflection is enabled so we never emit negative x-values for downstream
-    # ridge plots.  When no boundary handling is needed, fall back to the
-    # data-driven lower limit.
+    # When reflection is enabled we keep the grid anchored to the lower
+    # boundary but still include a small buffer below it so the whole leading
+    # edge of the first peak is visible instead of being shaved off at ``0``.
+    # The buffer scales with the bandwidth to expose the mirrored mass without
+    # overextending the domain for near-zero distributions.
     if used_boundary and boundary_lower is not None:
-        candidate_min = float(np.min(x) - h)
-        grid_min = max(candidate_min, float(boundary_lower))
+        base_min = float(np.min(x) - h)
+        buffer = max(0.5 * h, 1e-6)
+        grid_min = min(float(boundary_lower) - buffer, base_min)
     else:
         grid_min = float(np.min(x) - h)
     grid_max = float(np.max(x) + h)

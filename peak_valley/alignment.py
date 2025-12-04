@@ -316,13 +316,26 @@ def align_distributions(
                 lower_bound = 0.0
 
         if valid.any():
-            f = build_warp_function(l_src[valid], tgt[valid])
+            base_f = build_warp_function(l_src[valid], tgt[valid])
 
-            new_c = f(c)
+            new_c = base_f(c)
+            shift = 0.0
             if lower_bound is not None:
-                new_c = np.clip(new_c, lower_bound, None)
+                finite_new = new_c[np.isfinite(new_c)]
+                if finite_new.size:
+                    min_new = float(finite_new.min())
+                    if min_new < lower_bound:
+                        shift = lower_bound - min_new
+                if shift:
+                    new_c = new_c + shift
             # keep NaNs intact (e.g. missing cells in whole-dataset mode)
             new_c[np.isnan(c)] = np.nan
+
+            # apply the same shift to landmarks and density warps
+            if shift:
+                f = lambda x, f=base_f, s=shift: np.asarray(f(x), float) + s
+            else:
+                f = base_f
 
             warped_counts.append(new_c)
             wl = np.full_like(l_src, np.nan)
@@ -349,7 +362,11 @@ def align_distributions(
 
                 warped_xs = f(xs_clipped)
                 if lower_bound is not None:
-                    warped_xs = np.clip(warped_xs, lower_bound, None)
+                    finite_warped = warped_xs[np.isfinite(warped_xs)]
+                    if finite_warped.size:
+                        min_warped = float(finite_warped.min())
+                        if min_warped < lower_bound:
+                            warped_xs = warped_xs + (lower_bound - min_warped)
 
                 warped_density[i] = (warped_xs, ys.copy())
 

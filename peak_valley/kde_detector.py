@@ -261,37 +261,6 @@ def _resolve_peak_valley_conflicts(
 
     return peaks_idx, valleys
 
-def _mostly_small_discrete(x: np.ndarray, threshold: float = 0.9) -> bool:
-    """Heuristic to catch almost-discrete samples near zero (0..3).
-
-    Parameters
-    ----------
-    x : np.ndarray
-        Input data (1‑D array).
-    threshold : float, optional
-        Fraction of points within ``0‥3`` required to trigger.
-
-    Returns
-    -------
-    bool
-        ``True`` if the majority of values are integers 0–3.
-    """
-    x = np.asarray(x, float)
-    if x.size == 0:
-        return False
-
-    good = x[np.isfinite(x)]
-    if good.size == 0:
-        return False
-
-    mask = (good >= 0) & (good <= 3)
-    if mask.sum() / good.size < threshold:
-        return False
-
-    uniq = np.unique(np.round(good[mask]))
-    return uniq.size <= 4
-
-
 def _fft_gaussian_kde(
     x: np.ndarray,
     xs: np.ndarray,
@@ -675,9 +644,6 @@ def kde_peaks_valleys(
         )
         bw_use = "scott"
         kde = gaussian_kde(x, bw_method=bw_use)
-
-    if _mostly_small_discrete(x) and not user_fixed_bw:
-        kde.set_bandwidth(kde.factor * 4.0)
 
     h   = kde.factor * sample_std
     xs  = np.linspace(x.min() - h, x.max() + h,

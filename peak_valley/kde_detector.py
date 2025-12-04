@@ -314,9 +314,11 @@ def _prepare_boundary_kde_data(
     if boundary_correction and boundary_lower is not None and np.isfinite(boundary_lower):
         boundary_lower = float(boundary_lower)
 
-        # Avoid reflecting when the distribution sits well away from the boundary.
-        # Only turn on correction if the lower tail actually hugs the boundary and
-        # a meaningful fraction of points live there.
+        # Avoid reflecting when the distribution sits well away from the boundary,
+        # but be less strict about how many points hug the edge.  Even a small
+        # spike at the boundary (common for zero-inflated ADT counts) should
+        # trigger reflection so that the KDE keeps the first peak intact instead
+        # of truncating it.
         low_q, high_q = np.percentile(finite, [5, 95])
         span = float(high_q - low_q)
         if not np.isfinite(span) or span <= 0:
@@ -326,12 +328,11 @@ def _prepare_boundary_kde_data(
 
         tol = max(1e-6, 0.02 * span)
         lower_tail = float(np.percentile(finite, 2))
-        frac_near = float(np.mean(finite <= boundary_lower + tol))
+        min_val = float(np.min(finite))
 
         if (
-            lower_tail >= boundary_lower - 1e-9
-            and (lower_tail - boundary_lower) <= tol
-            and frac_near >= 0.05
+            min_val >= boundary_lower - 1e-9
+            and lower_tail <= boundary_lower + tol
         ):
             use_boundary = True
 

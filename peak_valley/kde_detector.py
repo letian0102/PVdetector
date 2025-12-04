@@ -663,9 +663,20 @@ def kde_peaks_valleys(
         kde = gaussian_kde(x, bw_method=bw_use)
     if _mostly_small_discrete(x):
         kde.set_bandwidth(kde.factor * 4.0)
-    h   = kde.factor * x.std(ddof=1)
-    xs  = np.linspace(x.min() - h, x.max() + h,
-                      min(grid_size, max(4000, 4 * x.size)))
+    h = kde.factor * x.std(ddof=1)
+
+    lo = x.min() - h
+    hi = x.max() + h
+
+    # When the sample lives on the non-negative reals (typical for
+    # intensity/count data), avoid extending the grid into negative
+    # territory where no mass exists.  This keeps ridge plots from
+    # showing spurious density below zero when the input is strictly
+    # non-negative.
+    if x.min() >= 0 and lo < 0:
+        lo = 0.0
+
+    xs = np.linspace(lo, hi, min(grid_size, max(4000, 4 * x.size)))
     ys  = _evaluate_kde(x, xs, kde)
 
     # ---------- primary peaks ----------

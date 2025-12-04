@@ -755,14 +755,21 @@ def kde_peaks_valleys(
     # boundary but still include a small buffer below it so the whole leading
     # edge of the first peak is visible instead of being shaved off at ``0``.
     # The buffer scales with the bandwidth to expose the mirrored mass without
-    # overextending the domain for near-zero distributions.
+    # overextending the domain for near-zero distributions.  Crucially, the
+    # mirrored samples must also influence the grid limits; otherwise the KDE
+    # evaluation can stop before the reflected side of the zero peak, clipping
+    # the plotted density.  Use the same padding for both original and mirrored
+    # points so the full KDE support is covered.
+    data_for_range = kde_data if used_boundary else x
+    data_span_min = float(np.min(data_for_range) - h)
+    data_span_max = float(np.max(data_for_range) + h)
+
     if used_boundary and boundary_lower is not None:
-        base_min = float(np.min(x) - h)
         buffer = max(0.5 * h, 1e-6)
-        grid_min = min(float(boundary_lower) - buffer, base_min)
+        grid_min = min(float(boundary_lower) - buffer, data_span_min)
     else:
-        grid_min = float(np.min(x) - h)
-    grid_max = float(np.max(x) + h)
+        grid_min = data_span_min
+    grid_max = data_span_max
     if grid_max <= grid_min:
         grid_max = grid_min + max(h, 1e-3)
 

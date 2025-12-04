@@ -292,6 +292,75 @@ def _mostly_small_discrete(x: np.ndarray, threshold: float = 0.9) -> bool:
     return uniq.size <= 4
 
 
+def _prepare_boundary_kde_data(
+    x: np.ndarray,
+    *,
+    boundary_correction: bool,
+    boundary_lower: float | None,
+) -> tuple[np.ndarray, np.ndarray | None, bool]:
+    """Return data/weights for boundary-aware KDE training.
+
+    Reflection is enabled when ``boundary_correction`` is ``True`` and all
+    finite samples lie at or above ``boundary_lower``.  We mirror the data about
+    the boundary with equal mass on the original and reflected points to reduce
+    edge bias without changing the total probability mass.
+    """
+
+    finite = x[np.isfinite(x)]
+    if finite.size == 0:
+        return finite, None, False
+
+    use_boundary = False
+    if boundary_correction and boundary_lower is not None and np.isfinite(boundary_lower):
+        boundary_lower = float(boundary_lower)
+
+        # Avoid reflecting when the distribution sits well away from the boundary.
+        # Only turn on correction if the lower tail actually hugs the boundary and
+        # a meaningful fraction of points live there.
+        low_q, high_q = np.percentile(finite, [5, 95])
+        span = float(high_q - low_q)
+        if not np.isfinite(span) or span <= 0:
+            span = float(np.std(finite, ddof=1))
+        if not np.isfinite(span) or span <= 0:
+            span = float(np.max(finite) - np.min(finite))
+
+        tol = max(1e-6, 0.02 * span)
+        lower_tail = float(np.percentile(finite, 2))
+        frac_near = float(np.mean(finite <= boundary_lower + tol))
+
+        if (
+            lower_tail >= boundary_lower - 1e-9
+            and (lower_tail - boundary_lower) <= tol
+            and frac_near >= 0.05
+        ):
+            use_boundary = True
+
+    if not use_boundary:
+        return finite, None, False
+
+    mirrored = (2.0 * float(boundary_lower)) - finite
+    weight = 0.5 / finite.size
+    weights = np.full(finite.size * 2, weight)
+    data = np.concatenate([finite, mirrored])
+    return data, weights, True
+
+
+def _stable_sample(values: np.ndarray) -> np.ndarray:
+    """Ensure enough spread for KDE when data collapse to a point."""
+
+    vals = values[np.isfinite(values)]
+    if vals.size == 0:
+        return vals
+
+    if vals.size == 1 or np.allclose(vals, vals[0]):
+        base = float(vals[0])
+        span = max(1e-6, 0.001 * max(1.0, abs(base)))
+        offsets = np.linspace(-0.5, 0.5, num=max(2, vals.size)) * span
+        vals = base + offsets
+
+    return vals
+
+
 def _fft_gaussian_kde(
     x: np.ndarray,
     xs: np.ndarray,
@@ -347,13 +416,13 @@ def _fft_gaussian_kde(
 
 
 def _evaluate_kde(
-    x: np.ndarray,
+    sample: np.ndarray,
     xs: np.ndarray,
     kde: gaussian_kde,
 ) -> np.ndarray:
     """Evaluate KDE, switching to FFT when the grid is large."""
 
-    n = x.size
+    n = sample.size
     if n == 0:
         return np.zeros_like(xs)
 
@@ -361,13 +430,13 @@ def _evaluate_kde(
     brute_cost = n * xs.size
 
     # ``kde.factor`` already incorporates any ``set_bandwidth`` calls.
-    sample_std = float(np.std(x, ddof=1)) if n > 1 else 0.0
+    sample_std = float(np.std(sample, ddof=1)) if n > 1 else 0.0
     bandwidth = kde.factor * sample_std
 
     if brute_cost <= 5_000_000 or bandwidth <= 0:
         return kde(xs)
 
-    return _fft_gaussian_kde(x, xs, bandwidth)
+    return _fft_gaussian_kde(sample, xs, bandwidth)
 
 
 def _first_valley_slope(
@@ -630,6 +699,8 @@ def kde_peaks_valleys(
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,
     first_valley   : str = "slope",
+    boundary_correction: bool = True,
+    boundary_lower: float | None = 0.0,
 ) -> tuple[list[float], list[float], np.ndarray, np.ndarray, float | None]:
     x = np.asarray(data, float)
     x = x[np.isfinite(x)]
@@ -639,10 +710,18 @@ def kde_peaks_valleys(
     # ---------- KDE grid ----------
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
+
+    kde_data, kde_weights, used_boundary = _prepare_boundary_kde_data(
+        x,
+        boundary_correction=boundary_correction,
+        boundary_lower=boundary_lower,
+    )
     bw_use = _normalise_bandwidth(bw)
     if bw_use == "roughness":
         try:
-            bw_use = _normalise_bandwidth(find_bw_for_roughness(x))
+            bw_use = _normalise_bandwidth(
+                find_bw_for_roughness(x, boundary_lower=boundary_lower)
+            )
         except Exception as exc:
             warnings.warn(
                 "Roughness bandwidth search failed; defaulting to 'scott'"
@@ -651,8 +730,10 @@ def kde_peaks_valleys(
                 stacklevel=2,
             )
             bw_use = "scott"
+
+    kde_data = _stable_sample(kde_data)
     try:
-        kde = gaussian_kde(x, bw_method=bw_use)
+        kde = gaussian_kde(kde_data, bw_method=bw_use, weights=kde_weights)
     except ValueError:
         warnings.warn(
             "Invalid KDE bandwidth provided; falling back to 'scott'",
@@ -660,13 +741,34 @@ def kde_peaks_valleys(
             stacklevel=2,
         )
         bw_use = "scott"
-        kde = gaussian_kde(x, bw_method=bw_use)
+        kde = gaussian_kde(kde_data, bw_method=bw_use, weights=kde_weights)
     if _mostly_small_discrete(x):
         kde.set_bandwidth(kde.factor * 4.0)
-    h   = kde.factor * x.std(ddof=1)
-    xs  = np.linspace(x.min() - h, x.max() + h,
-                      min(grid_size, max(4000, 4 * x.size)))
-    ys  = _evaluate_kde(x, xs, kde)
+    sample_for_bandwidth = kde_data if kde_data.size else x
+    h = kde.factor * sample_for_bandwidth.std(ddof=1)
+    if not np.isfinite(h) or h <= 0:
+        span = float(np.max(x) - np.min(x)) if x.size else 1.0
+        h = max(1e-3, 0.1 * span)
+
+    # Keep the evaluation grid anchored at the lower boundary whenever
+    # reflection is enabled so we never emit negative x-values for downstream
+    # ridge plots.  When no boundary handling is needed, fall back to the
+    # data-driven lower limit.
+    if used_boundary and boundary_lower is not None:
+        candidate_min = float(np.min(x) - h)
+        grid_min = max(candidate_min, float(boundary_lower))
+    else:
+        grid_min = float(np.min(x) - h)
+    grid_max = float(np.max(x) + h)
+    if grid_max <= grid_min:
+        grid_max = grid_min + max(h, 1e-3)
+
+    xs = np.linspace(
+        grid_min,
+        grid_max,
+        min(grid_size, max(4000, 4 * x.size)),
+    )
+    ys = _evaluate_kde(kde_data, xs, kde)
 
     # ---------- primary peaks ----------
 

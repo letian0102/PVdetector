@@ -514,7 +514,7 @@ def process_sample(
 
     drop_frac = params["valley_drop"] / 100.0
 
-    peaks, valleys, xs, ys, bw_used = kde_peaks_valleys(
+    kde_result = kde_peaks_valleys(
         counts,
         params["n_peaks_effective"],
         params["prominence_effective"],
@@ -527,6 +527,16 @@ def process_sample(
         turning_peak=params["turning_points"],
         first_valley=params["first_valley"],
     )
+
+    if len(kde_result) == 5:
+        peaks, valleys, xs, ys, bw_used = kde_result
+    elif len(kde_result) == 4:
+        peaks, valleys, xs, ys = kde_result
+        bw_used = None
+    else:
+        raise ValueError(
+            "kde_peaks_valleys must return 4 or 5 values (peaks, valleys, xs, ys[, bw])"
+        )
 
     valleys = _postprocess_valleys(peaks, valleys, xs, ys, drop_frac)
 
@@ -1565,17 +1575,16 @@ def _ridge_plot_png(
     if not curves:
         return None
 
-    trimmed_bounds: list[tuple[float, float]] = []
+    finite_bounds: list[tuple[float, float]] = []
     for _, xs, _, _, _, _ in curves:
         finite_xs = xs[np.isfinite(xs)]
         if finite_xs.size == 0:
             continue
-        low, high = np.nanquantile(finite_xs, [0.01, 0.99])
-        trimmed_bounds.append((float(low), float(high)))
+        finite_bounds.append((float(np.nanmin(finite_xs)), float(np.nanmax(finite_xs))))
 
-    if trimmed_bounds:
-        x_min = min(low for low, _ in trimmed_bounds)
-        x_max = max(high for _, high in trimmed_bounds)
+    if finite_bounds:
+        x_min = min(low for low, _ in finite_bounds)
+        x_max = max(high for _, high in finite_bounds)
     else:
         x_min = min(float(xs.min()) for _, xs, _, _, _, _ in curves)
         x_max = max(float(xs.max()) for _, xs, _, _, _, _ in curves)

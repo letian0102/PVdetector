@@ -88,39 +88,67 @@ def _stable_values(values: np.ndarray) -> np.ndarray:
 
 
 def _compute_density(
-    values: np.ndarray, bandwidth: float | str, grid_size: int
+    values: np.ndarray,
+    bandwidth: float | str,
+    grid_size: int,
+    *,
+    boundary_lower: float | None = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Evaluate a 1-D Gaussian KDE on an evenly spaced grid with fallbacks."""
+    """Evaluate a 1-D Gaussian KDE on an evenly spaced grid with fallbacks.
+
+    A simple reflection trick is applied when ``boundary_lower`` is set and the
+    data do not cross that bound.  This mitigates the classic edge wiggles that
+    appear when a KDE is centred on a hard boundary (e.g., a distribution
+    defined only for ``x >= 0``).
+    """
 
     vals = _stable_values(values)
     bw_norm = _normalise_bw(bandwidth)
 
-    def _build_kde(v: np.ndarray, bw_use: float | str):
+    def _build_kde(v: np.ndarray, bw_use: float | str, weights: np.ndarray | None = None):
         if isinstance(bw_use, str):
-            return gaussian_kde(v, bw_method=bw_use)
-        kde_obj = gaussian_kde(v)
+            return gaussian_kde(v, bw_method=bw_use, weights=weights)
+        kde_obj = gaussian_kde(v, weights=weights)
         bw_float = float(bw_use)
         sample_std = float(np.std(v, ddof=1))
         if np.isfinite(bw_float) and bw_float > 0 and sample_std > 0:
             kde_obj.set_bandwidth(bw_method=bw_float / sample_std)
         return kde_obj
 
+    apply_boundary = False
+    kde_vals = vals
+    kde_weights: np.ndarray | None = None
+
+    if boundary_lower is not None and np.isfinite(boundary_lower):
+        min_val = float(np.min(vals))
+        if min_val >= boundary_lower - 1e-9:
+            apply_boundary = True
+            reflected = (2.0 * float(boundary_lower)) - vals
+            weight = 0.5 / vals.size
+            kde_weights = np.full(vals.size * 2, weight)
+            kde_vals = np.concatenate([vals, reflected])
+
     try:
-        kde = _build_kde(vals, bw_norm)
+        kde = _build_kde(kde_vals, bw_norm, kde_weights)
     except Exception:
-        jitter = _stable_values(vals + np.linspace(-1e-6, 1e-6, vals.size))
+        jitter = _stable_values(kde_vals + np.linspace(-1e-6, 1e-6, kde_vals.size))
         fallback_bw = "scott" if isinstance(bw_norm, str) else bw_norm
         try:
-            kde = _build_kde(jitter, fallback_bw)
+            kde = _build_kde(jitter, fallback_bw, kde_weights)
         except Exception:
-            kde = _build_kde(jitter, "scott")
+            kde = _build_kde(jitter, "scott", kde_weights)
 
-    v_min, v_max = float(np.min(vals)), float(np.max(vals))
+    v_min = float(boundary_lower) if apply_boundary else float(np.min(vals))
+    v_max = float(np.max(vals))
     span = v_max - v_min
     if not np.isfinite(span) or span <= 0:
         pad = max(1e-6, 0.001 * max(abs(v_min), abs(v_max), 1.0))
         v_min -= pad
         v_max += pad
+    else:
+        bandwidth_abs = kde.factor * float(np.std(kde_vals, ddof=1)) if kde_vals.size > 1 else 0.0
+        if np.isfinite(bandwidth_abs) and bandwidth_abs > 0:
+            v_max += 2.5 * bandwidth_abs
 
     xs = np.linspace(v_min, v_max, grid_size)
     ys = kde(xs)
@@ -215,6 +243,7 @@ def find_bw_for_roughness(
     min_y_frac_peak: float = 0.05,
     valley_prom_frac: float = 0.1,
     grid_size: int = 512,
+    boundary_lower: float | None = 0.0,
 ) -> float:
     """Binary-search the smallest bandwidth that passes roughness checks."""
 
@@ -224,7 +253,9 @@ def find_bw_for_roughness(
         raise ValueError("Bandwidth search requires at least one finite value")
 
     def good_bw(bw: float) -> bool:
-        xs, ys = _compute_density(data, bw, grid_size)
+        xs, ys = _compute_density(
+            data, bw, grid_size, boundary_lower=boundary_lower
+        )
         dm = density_metric(xs, ys)
         if dm.roughness > target:
             return False
@@ -232,7 +263,9 @@ def find_bw_for_roughness(
             return False
         return True
 
-    xs_low, ys_low = _compute_density(data, lower, grid_size)
+    xs_low, ys_low = _compute_density(
+        data, lower, grid_size, boundary_lower=boundary_lower
+    )
     r_low = density_metric(xs_low, ys_low)
     if r_low.roughness <= target and not has_small_double_peak(
         xs_low, ys_low, min_y_frac=min_y_frac_peak, valley_prom_frac=valley_prom_frac

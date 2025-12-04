@@ -15,8 +15,15 @@ def arcsinh_transform(
     b: float = 1 / 5,
     c: float = 0.0,
 ) -> pd.Series:
-    """Same arcsinh transform you used in the notebook."""
-    return (1 / b) * np.arcsinh(a * x + c)
+    """Apply ``asinh(a + b * x) + c`` to ``x``.
+
+    The parameters mirror the R implementation outlined in the user-facing
+    documentation: ``a`` is a shift applied inside the ``asinh`` call, ``b``
+    scales the input before transformation, and ``c`` shifts the result
+    afterward.
+    """
+
+    return np.arcsinh(a + b * x) + c
 
 
 # ------------------------------------------------------------------

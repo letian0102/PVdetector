@@ -184,6 +184,29 @@ def _recover_left_peak(
         if _passes(elbow_idx, rel_floor=0.11, drop_floor=0.02):
             return elbow_idx
 
+    total_mass = float(np.trapz(ys, xs)) if xs.size and ys.size else 0.0
+    left_mass = float(np.trapz(search_ys, xs[:primary_idx])) if total_mass else 0.0
+    if total_mass > 0 and left_mass / total_mass >= 0.06:
+        # On profiles with substantial left-hand probability mass, run a
+        # coarse smoothing pass to expose broad bumps that fine-scale
+        # prominence checks miss.  This guards against monotonic rises that
+        # conceal a shallow negative peak within long-tailed noise.
+        window = int(round(0.08 * search_ys.size))
+        window = max(3, min(window, search_ys.size if search_ys.size > 1 else 1))
+        if window % 2 == 0:
+            window = min(window + 1, search_ys.size)
+        smooth = np.convolve(search_ys, np.ones(window) / float(window), mode="same")
+        smoothed_prom = max(0.08 * dominant_height, prominence * 0.1, 0.5 * noise_floor)
+        cand_idx, _ = find_peaks(smooth, prominence=smoothed_prom, distance=distance)
+        if cand_idx.size:
+            strongest = int(cand_idx[np.argmax(smooth[cand_idx])])
+            if _passes(strongest, rel_floor=0.10, drop_floor=0.018):
+                return strongest
+
+        smooth_idx = int(np.argmax(smooth)) if smooth.size else tallest_left
+        if _passes(smooth_idx, rel_floor=0.095, drop_floor=0.016):
+            return smooth_idx
+
     return None
 
 

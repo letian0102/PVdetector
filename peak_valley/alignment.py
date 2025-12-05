@@ -81,6 +81,34 @@ def fill_landmark_matrix(
     for i, pk in enumerate(peaks):
         if pk and len(pk) > 1:           # needs a distinct positive peak
             pos[i] = pk[-1]              # last element, true positive peak
+
+    # ----- decide whether single-peak detections are neg/pos -------------
+    # Some samples only yielded one detected peak. Compare that peak to the
+    # cohort’s median negative/positive locations so we can align it to the
+    # closest landmark instead of always treating it as the negative peak.
+    neg_ref_candidates = [pk[0] for pk in peaks if pk]
+    pos_ref_candidates = [pk[-1] for pk in peaks if len(pk) > 1]
+    if pos_ref_candidates:                                 # need a pos ref
+        neg_ref = np.nanmedian(neg_ref_candidates) if neg_ref_candidates else np.nan
+        pos_ref = np.nanmedian(pos_ref_candidates)
+        midpoint = (neg_ref + pos_ref) / 2.0 if np.isfinite(neg_ref) else pos_ref
+
+        for i, pk in enumerate(peaks):
+            if len(pk) != 1:               # only re-evaluate single-peak samples
+                continue
+            pk_val = pk[0]
+            if not np.isfinite(pk_val):
+                continue
+
+            # Prefer the landmark whose reference is closer; when distances are
+            # comparable fall back to the midpoint heuristic.
+            dist_neg = abs(pk_val - neg_ref) if np.isfinite(neg_ref) else np.inf
+            dist_pos = abs(pk_val - pos_ref)
+            prefer_pos = dist_pos < dist_neg or pk_val >= midpoint
+
+            if prefer_pos:
+                pos[i] = pk_val
+                neg[i] = np.nan
     neg_thr = neg_thr if neg_thr is not None else np.arcsinh(10 / 5 + 1)
 
     if align_type == "valley":

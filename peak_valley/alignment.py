@@ -58,6 +58,7 @@ def fill_landmark_matrix(
 
     has_val_orig = max_vl > 0
     has_pos_orig = any(length > 1 for length in pk_lengths)
+    has_single_peak = any(length == 1 for length in pk_lengths)
 
     pk_mat = np.full((n, max_pk if max_pk > 0 else 1), np.nan)
     vl_mat = np.full((n, max_vl if max_vl > 0 else 1), np.nan)
@@ -81,6 +82,48 @@ def fill_landmark_matrix(
     for i, pk in enumerate(peaks):
         if pk and len(pk) > 1:           # needs a distinct positive peak
             pos[i] = pk[-1]              # last element, true positive peak
+
+    # Detect single-peak samples whose lone peak is better interpreted as
+    # the positive mode.  We prefer using the cohort's valley to disambiguate
+    # left/right placement and fall back to proximity to the cohort medians.
+    if align_type == "negPeak_valley_posPeak" and has_single_peak:
+        val_candidates = [vl[0] for vl in valleys if vl]
+        val_median = np.nanmedian(val_candidates) if val_candidates else np.nan
+        neg_median = np.nanmedian(neg) if np.any(~np.isnan(neg)) else np.nan
+        pos_candidates = [pk[-1] for pk in peaks if len(pk) > 1]
+        pos_median = (
+            np.nanmedian(pos_candidates) if len(pos_candidates) > 0 else np.nan
+        )
+
+        for i, pk in enumerate(peaks):
+            if len(pk) != 1:
+                continue
+
+            pk_value = pk[0]
+            ref_valley = (
+                val_median
+                if not np.isnan(val_median)
+                else (val[i] if not np.isnan(val[i]) else np.nan)
+            )
+
+            is_positive = False
+            if not np.isnan(ref_valley):
+                is_positive = pk_value >= ref_valley
+
+            dist_neg = abs(pk_value - neg_median) if not np.isnan(neg_median) else np.inf
+            dist_pos = abs(pk_value - pos_median) if not np.isnan(pos_median) else np.inf
+
+            if not is_positive:
+                if dist_pos < dist_neg:
+                    is_positive = True
+                elif np.isinf(dist_neg) and not np.isinf(dist_pos):
+                    is_positive = True
+
+            if is_positive:
+                pos[i] = pk_value
+                neg[i] = np.nan
+
+    has_pos = has_pos_orig or np.any(~np.isnan(pos))
     neg_thr = neg_thr if neg_thr is not None else np.arcsinh(10 / 5 + 1)
 
     if align_type == "valley":
@@ -112,7 +155,7 @@ def fill_landmark_matrix(
         # --- return early for 1- or 2-anchor regimes --------------------
         if align_type == "negPeak":
             return out[:, :1]
-        if align_type == "negPeak_valley" or (has_val_orig and not has_pos_orig):
+        if align_type == "negPeak_valley" or (has_val_orig and not has_pos):
             return out
 
         # ---- need a surrogate positive peak ----------------------------

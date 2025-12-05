@@ -599,6 +599,9 @@ def kde_peaks_valleys(
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,
     first_valley   : str = "slope",
+    roughness_target: float = 9.0,
+    roughness_min_peak_frac: float = 0.05,
+    roughness_valley_prom_frac: float = 0.05,
 ) -> tuple[list[float], list[float], np.ndarray, np.ndarray, float | None]:
     x = np.asarray(data, float)
     x = x[np.isfinite(x)]
@@ -622,7 +625,15 @@ def kde_peaks_valleys(
 
     if bw_use == "roughness":
         try:
-            bw_use = _normalise_bandwidth(find_bw_for_roughness(x))
+            bw_use = _normalise_bandwidth(
+                find_bw_for_roughness(
+                    x,
+                    target=roughness_target,
+                    min_y_frac_peak=roughness_min_peak_frac,
+                    valley_prom_frac=roughness_valley_prom_frac,
+                    grid_size=min(grid_size, 4_096),
+                )
+            )
         except Exception as exc:
             warnings.warn(
                 "Roughness bandwidth search failed; defaulting to 'scott'"

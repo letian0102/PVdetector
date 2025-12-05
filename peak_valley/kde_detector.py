@@ -112,14 +112,14 @@ def _recover_left_peak(
         return None
 
     dominant_height = float(ys[primary_idx])
-    relaxed_prom = max(0.15 * dominant_height, prominence * 0.3)
+    relaxed_prom = max(0.12 * dominant_height, prominence * 0.25)
 
-    baseline = float(np.percentile(search_ys, 65))
+    baseline = float(np.percentile(search_ys, 60))
     jitter = float(np.percentile(np.abs(search_ys - baseline), 80))
     jitter = jitter if np.isfinite(jitter) else 0.0
-    noise_floor = baseline + 0.35 * jitter
+    noise_floor = baseline + 0.25 * jitter
 
-    def _passes(idx: int, *, rel_floor: float = 0.20, drop_floor: float = 0.035) -> bool:
+    def _passes(idx: int, *, rel_floor: float = 0.16, drop_floor: float = 0.03) -> bool:
         if idx <= 0 or idx >= search_ys.size - 1:
             return False
 
@@ -161,14 +161,28 @@ def _recover_left_peak(
 
     ordered = sorted(turning, key=lambda idx: search_ys[idx], reverse=True)
     for idx in ordered:
-        if _passes(idx, rel_floor=0.15, drop_floor=0.03):
+        if _passes(idx, rel_floor=0.13, drop_floor=0.027):
             return int(idx)
 
     # Last resort: accept the tallest left-hand bump that clears the noise
     # floor, even if it barely separates from the dominant shoulder.
     tallest_left = int(np.argmax(search_ys))
-    if _passes(tallest_left, rel_floor=0.13, drop_floor=0.025):
+    if _passes(tallest_left, rel_floor=0.12, drop_floor=0.022):
         return tallest_left
+
+    # As a final heuristic, de-trend the left segment to expose shallow elbows
+    # that are concealed by a long monotonic rise toward the dominant peak. A
+    # peak in the residual profile indicates the rise slowed briefly, often
+    # corresponding to a faint negative mode.
+    ramp = np.linspace(search_ys[0], search_ys[-1], search_ys.size)
+    residual = search_ys - ramp
+    residual -= float(np.percentile(residual, 25))
+    elbow_idx = int(np.argmax(residual))
+    elbow_strength = float(residual[elbow_idx]) if residual.size else -math.inf
+    elbow_floor = max(0.5 * jitter, 0.02 * dominant_height)
+    if elbow_strength > elbow_floor and elbow_idx < search_ys.size - 1:
+        if _passes(elbow_idx, rel_floor=0.11, drop_floor=0.02):
+            return elbow_idx
 
     return None
 

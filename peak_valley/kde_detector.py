@@ -79,6 +79,57 @@ def _peak_height(xs: np.ndarray, ys: np.ndarray, peak_x: float) -> float:
     return float(ys[idx])
 
 
+def _recover_left_peak(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    primary_idx: int,
+    *,
+    min_x_sep: float | None,
+    prominence: float,
+) -> int | None:
+    """Recover a subtle negative peak left of the dominant mode.
+
+    When most samples exhibit two peaks we still occasionally detect only the
+    dominant (often positive) one.  This helper performs a second, more
+    forgiving scan to the **left** of the dominant mode using a softer
+    prominence threshold.  If a meaningful peak is found, its index is
+    returned for inclusion in the final peak list.
+    """
+
+    if primary_idx <= 1:
+        return None
+
+    grid_dx = float(xs[1] - xs[0]) if xs.size > 1 else 0.0
+    if not np.isfinite(grid_dx) or grid_dx <= 0:
+        return None
+
+    distance = None
+    if min_x_sep is not None:
+        distance = max(1, int(math.ceil(min_x_sep / grid_dx)))
+
+    search_ys = ys[:primary_idx]
+    if search_ys.size < 3:
+        return None
+
+    dominant_height = float(ys[primary_idx])
+    relaxed_prom = max(0.25 * dominant_height, prominence * 0.5)
+
+    cand_idx, _ = find_peaks(search_ys, prominence=relaxed_prom, distance=distance)
+    if cand_idx.size == 0:
+        return None
+
+    strongest = int(cand_idx[np.argmax(search_ys[cand_idx])])
+    if min_x_sep is not None:
+        if xs[primary_idx] - xs[strongest] < 0.8 * float(min_x_sep):
+            return None
+
+    rel_height = search_ys[strongest] / dominant_height if dominant_height > 0 else 0.0
+    if rel_height < 0.35:
+        return None
+
+    return strongest
+
+
 def _enforce_min_separation(
     peaks_x: list[float],
     xs: np.ndarray,
@@ -655,6 +706,8 @@ def kde_peaks_valleys(
     pad = 0.02 * span_for_pad if span_for_pad > 0 else 0.05
 
     x_min = base_low - pad
+    if data_min >= 0 and x_min < 0:
+        x_min = 0.0
     x_max = data_max + pad
 
     xs = np.linspace(
@@ -748,6 +801,21 @@ def kde_peaks_valleys(
 
     # ---------- *re-derive* indices for every peak we now have ----------
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+
+    # ---------- attempt to recover a missing negative peak ---------------
+    if len(peaks_idx) == 1 and (n_peaks is None or n_peaks > 1):
+        recovered = _recover_left_peak(
+            xs,
+            ys,
+            peaks_idx[0],
+            min_x_sep=min_x_sep,
+            prominence=prominence,
+        )
+        if recovered is not None:
+            peaks_idx = sorted({*peaks_idx, int(recovered)})
+            peaks_x = [float(xs[idx]) for idx in peaks_idx]
+            peaks_x = _enforce_min_separation(peaks_x, xs, ys, min_x_sep)
+            peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
 
     # ---------- valleys ----------
     valleys_x: list[float] = []

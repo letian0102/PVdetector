@@ -103,6 +103,9 @@ class BatchOptions:
     turning_points: bool = False
     min_separation: float = 0.5
     grid_size: int = 20_000
+    roughness_target: float = 9.0
+    roughness_min_peak_frac: float = 0.05
+    roughness_valley_prom_frac: float = 0.05
     valley_drop: float = 10.0  # percent of peak height
     first_valley: str = "slope"  # or "drop"
 
@@ -295,6 +298,27 @@ def _resolve_parameters(
     grid_use = grid_val if grid_val is not None else options.grid_size
     params["grid_size"] = max(4000, int(grid_use))
 
+    rough_target = _coerce_float(overrides.get("roughness_target"))
+    params["roughness_target"] = (
+        float(rough_target)
+        if rough_target is not None
+        else float(options.roughness_target)
+    )
+
+    rough_peak = _coerce_float(overrides.get("roughness_min_peak_frac"))
+    params["roughness_min_peak_frac"] = (
+        float(rough_peak)
+        if rough_peak is not None
+        else float(options.roughness_min_peak_frac)
+    )
+
+    rough_valley = _coerce_float(overrides.get("roughness_valley_prom_frac"))
+    params["roughness_valley_prom_frac"] = (
+        float(rough_valley)
+        if rough_valley is not None
+        else float(options.roughness_valley_prom_frac)
+    )
+
     drop_override = _coerce_float(overrides.get("valley_drop"))
     params["valley_drop"] = (
         float(drop_override) if drop_override is not None else float(options.valley_drop)
@@ -382,7 +406,13 @@ def _resolve_parameters(
         bw_label = params["bandwidth_effective"].strip().lower()
         if bw_label == "roughness":
             try:
-                params["bandwidth_effective"] = find_bw_for_roughness(counts)
+                params["bandwidth_effective"] = find_bw_for_roughness(
+                    counts,
+                    target=params["roughness_target"],
+                    min_y_frac_peak=params["roughness_min_peak_frac"],
+                    valley_prom_frac=params["roughness_valley_prom_frac"],
+                    grid_size=params["grid_size"],
+                )
                 debug["bandwidth_method"] = "roughness"
             except Exception as exc:
                 debug["roughness_error"] = str(exc)
@@ -526,6 +556,9 @@ def process_sample(
         curvature_thresh=curvature,
         turning_peak=params["turning_points"],
         first_valley=params["first_valley"],
+        roughness_target=params["roughness_target"],
+        roughness_min_peak_frac=params["roughness_min_peak_frac"],
+        roughness_valley_prom_frac=params["roughness_valley_prom_frac"],
     )
 
     valleys = _postprocess_valleys(peaks, valleys, xs, ys, drop_frac)
@@ -543,6 +576,9 @@ def process_sample(
         "turning_points": params["turning_points"],
         "min_separation": params["min_separation"],
         "grid_size": params["grid_size"],
+        "roughness_target": params["roughness_target"],
+        "roughness_min_peak_frac": params["roughness_min_peak_frac"],
+        "roughness_valley_prom_frac": params["roughness_valley_prom_frac"],
         "valley_drop": params["valley_drop"],
         "first_valley": params["first_valley"],
     }

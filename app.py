@@ -270,6 +270,12 @@ def _summarize_overrides(overrides: dict[str, object]) -> list[str]:
             summary.append(f"bandwidth {float(bw_val):.2f}")
         else:
             summary.append(f"bandwidth {bw_val}")
+    if "roughness_target" in overrides:
+        summary.append(f"rough target {float(overrides['roughness_target']):.1f}")
+    if "roughness_min_peak_frac" in overrides:
+        summary.append(f"rough peak {float(overrides['roughness_min_peak_frac']):.2f}")
+    if "roughness_valley_prom_frac" in overrides:
+        summary.append(f"rough valley {float(overrides['roughness_valley_prom_frac']):.2f}")
     if "prom" in overrides:
         summary.append(f"prominence {float(overrides['prom']):.2f}")
     if "min_width" in overrides:
@@ -769,6 +775,80 @@ def _render_override_controls(
             help="Number of grid points for KDE; higher is slower but finer.",
         )
         overrides["max_grid"] = int(grid_val)
+
+    col_rtar, col_rpeak, col_rval = st.columns(3)
+
+    rough_target_prev = _coerce_float(prev.get("roughness_target"))
+    rough_target_toggle = col_rtar.checkbox(
+        "Custom roughness target",
+        value=(rough_target_prev is not None),
+        key=f"{key_prefix}_rough_target_toggle",
+        help="Override the smoothness limit used by the roughness bandwidth search.",
+    )
+    if rough_target_toggle:
+        default_rough_target = (
+            rough_target_prev
+            if rough_target_prev is not None
+            else float(run_defaults.get("roughness_target", 9.0))
+        )
+        rough_target_val = col_rtar.slider(
+            "Roughness target",
+            min_value=1.0,
+            max_value=20.0,
+            value=float(default_rough_target),
+            step=0.5,
+            key=f"{key_prefix}_rough_target_val",
+            help="Maximum allowed roughness when choosing the KDE bandwidth.",
+        )
+        overrides["roughness_target"] = float(rough_target_val)
+
+    rough_peak_prev = _coerce_float(prev.get("roughness_min_peak_frac"))
+    rough_peak_toggle = col_rpeak.checkbox(
+        "Custom peak cutoff",
+        value=(rough_peak_prev is not None),
+        key=f"{key_prefix}_rough_peak_toggle",
+        help="Override the minimum peak height used in the roughness double-peak guard.",
+    )
+    if rough_peak_toggle:
+        default_peak = (
+            rough_peak_prev
+            if rough_peak_prev is not None
+            else float(run_defaults.get("roughness_min_peak_frac", 0.05))
+        )
+        rough_peak_val = col_rpeak.slider(
+            "Peak cutoff",
+            min_value=0.01,
+            max_value=0.20,
+            value=float(default_peak),
+            step=0.01,
+            key=f"{key_prefix}_rough_peak_val",
+            help="Relative peak height threshold for double-peak detection during bandwidth search.",
+        )
+        overrides["roughness_min_peak_frac"] = float(rough_peak_val)
+
+    rough_valley_prev = _coerce_float(prev.get("roughness_valley_prom_frac"))
+    rough_valley_toggle = col_rval.checkbox(
+        "Custom valley depth",
+        value=(rough_valley_prev is not None),
+        key=f"{key_prefix}_rough_valley_toggle",
+        help="Override how deep the valley between early peaks must be to count as a split.",
+    )
+    if rough_valley_toggle:
+        default_valley = (
+            rough_valley_prev
+            if rough_valley_prev is not None
+            else float(run_defaults.get("roughness_valley_prom_frac", 0.05))
+        )
+        rough_valley_val = col_rval.slider(
+            "Valley depth",
+            min_value=0.01,
+            max_value=0.20,
+            value=float(default_valley),
+            step=0.01,
+            key=f"{key_prefix}_rough_valley_val",
+            help="Required valley depth (relative to peak) for the roughness double-peak guard.",
+        )
+        overrides["roughness_valley_prom_frac"] = float(rough_valley_val)
 
     col_drop, col_first, _ = st.columns(3)
 
@@ -4268,6 +4348,51 @@ with st.sidebar:
     else:
         bw_val = None  # GPT later
 
+    roughness_active = (bw_mode == "Roughness heuristic") or (
+        bw_mode == "Manual" and bw_opt == "roughness"
+    )
+
+    col_rt, col_rp, col_rv = st.columns(3)
+    rough_target = col_rt.slider(
+        "Roughness target",
+        1.0,
+        20.0,
+        9.0,
+        0.5,
+        key="roughness_target",
+        disabled=not roughness_active,
+        help=(
+            "Maximum allowed roughness for the KDE bandwidth search."
+            " Lower values enforce smoother curves (larger bandwidth)."
+        ),
+    )
+    rough_peak_frac = col_rp.slider(
+        "Roughness peak cutoff",
+        0.01,
+        0.20,
+        0.05,
+        0.01,
+        key="roughness_peak_cutoff",
+        disabled=not roughness_active,
+        help=(
+            "Minimum relative peak height considered when screening for"
+            " shallow double peaks during the roughness search."
+        ),
+    )
+    rough_valley_frac = col_rv.slider(
+        "Roughness valley depth",
+        0.01,
+        0.20,
+        0.05,
+        0.01,
+        key="roughness_valley_depth",
+        disabled=not roughness_active,
+        help=(
+            "Required valley depth (as a fraction of the main peak) for"
+            " the double-peak guardrail in the roughness search."
+        ),
+    )
+
     # Prominence
     prom_mode = st.selectbox(
         "Prominence", ["Manual", "GPT automatic"], key="prom_sel",
@@ -4319,6 +4444,9 @@ with st.sidebar:
         "turning_points": tp,
         "min_separation": min_sep,
         "max_grid": grid_sz,
+        "roughness_target": rough_target,
+        "roughness_min_peak_frac": rough_peak_frac,
+        "roughness_valley_prom_frac": rough_valley_frac,
         "valley_drop": val_drop,
         "first_valley": val_mode,
     }
@@ -4629,6 +4757,9 @@ def _start_batch_run(
         turning_points=bool(tp),
         min_separation=float(min_sep),
         grid_size=int(grid_sz),
+        roughness_target=float(rough_target),
+        roughness_min_peak_frac=float(rough_peak_frac),
+        roughness_valley_prom_frac=float(rough_valley_frac),
         valley_drop=float(val_drop),
         first_valley="drop" if val_mode == "Valley drop" else "slope",
         apply_consistency=bool(st.session_state.get("apply_consistency", False)),

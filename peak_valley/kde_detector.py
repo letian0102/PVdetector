@@ -657,6 +657,10 @@ def kde_peaks_valleys(
     x_min = base_low - pad
     x_max = data_max + pad
 
+    # Keep non-negative datasets from drifting below zero during padding.
+    if data_min >= 0.0 and x_min < 0.0:
+        x_min = 0.0
+
     xs = np.linspace(
         x_min,
         x_max,

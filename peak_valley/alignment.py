@@ -31,7 +31,62 @@ __all__ = ["fill_landmark_matrix",
            "align_distributions"]
 
 
-# ------------------------------------------------------------------  
+def _classify_single_peak(
+    peak_value: float,
+    valley_value: float,
+    cohort_neg: float,
+    cohort_pos: float,
+    cohort_valley: float,
+) -> str:
+    """
+    Decide whether a single detected peak is the negative or positive one.
+
+    The decision combines cohort prototypes (median landmark positions) with the
+    sample’s own valley, when available.  The goal is to keep one-peak samples
+    aligned with the appropriate landmark of the more common two-peak cases.
+    Returns "positive", "negative", or "unknown".
+    """
+
+    if np.isnan(peak_value):
+        return "unknown"
+
+    has_neg = not np.isnan(cohort_neg)
+    has_pos = not np.isnan(cohort_pos)
+
+    # Prefer a simple distance comparison when both prototypes exist.
+    if has_neg and has_pos:
+        neg_dist = abs(peak_value - cohort_neg)
+        pos_dist = abs(peak_value - cohort_pos)
+
+        # Use the cohort midpoint as a tie-breaker to avoid jitter when the
+        # distances are similar.
+        midpoint = (cohort_neg + cohort_pos) / 2.0
+        boundary = midpoint
+        if not np.isnan(cohort_valley):
+            # If the cohort valley is right-shifted relative to the midpoint,
+            # it becomes a better separator between negative / positive peaks.
+            boundary = max(boundary, cohort_valley)
+        if not np.isnan(valley_value):
+            boundary = max(boundary, valley_value)
+
+        if pos_dist < neg_dist:
+            return "positive"
+        if neg_dist < pos_dist:
+            return "negative"
+
+        return "positive" if peak_value >= boundary else "negative"
+
+    # If only one prototype exists, fall back to that.
+    if has_pos and not has_neg:
+        return "positive" if peak_value >= cohort_pos else "negative"
+    if has_neg and not has_pos:
+        return "negative"
+
+    # Without any prototypes we cannot decide.
+    return "unknown"
+
+
+# ------------------------------------------------------------------
 def fill_landmark_matrix(
     peaks   : List[Sequence[float]],
     valleys : List[Sequence[float]],
@@ -95,6 +150,30 @@ def fill_landmark_matrix(
     if max_pk <= 1:
         out = np.vstack([neg, val]).T          # (N, 2)  so far
 
+        # Use cohort prototypes (computed from multi-peak samples) to decide
+        # whether a single detected peak is negative or positive.  When the
+        # peak is classified as positive we move it to the positive column so
+        # that downstream alignment warps it against the cohort’s second peak.
+        classified_pos = np.full(n, np.nan)
+        if align_type == "negPeak_valley_posPeak":
+            cohort_neg = np.nanmedian(neg) if np.any(~np.isnan(neg)) else np.nan
+            cohort_pos = np.nanmedian(pos) if np.any(~np.isnan(pos)) else np.nan
+            cohort_val = np.nanmedian(val) if np.any(~np.isnan(val)) else np.nan
+
+            for i in range(n):
+                if pk_lengths[i] != 1:
+                    continue
+                decision = _classify_single_peak(
+                    peak_value=out[i, 0],
+                    valley_value=out[i, 1],
+                    cohort_neg=cohort_neg,
+                    cohort_pos=cohort_pos,
+                    cohort_valley=cohort_val,
+                )
+                if decision == "positive":
+                    classified_pos[i] = out[i, 0]
+                    out[i, 0] = np.nan
+
         # fill NAs (neg & val) exactly as in the R code ------------------
         nan_neg = np.isnan(out[:, 0])
         if np.any(~nan_neg):
@@ -116,7 +195,8 @@ def fill_landmark_matrix(
             return out
 
         # ---- need a surrogate positive peak ----------------------------
-        diff_candidates = pos - val
+        pos_from_classification = np.where(np.isnan(pos), classified_pos, pos)
+        diff_candidates = pos_from_classification - val
         valid_diff = ~np.isnan(diff_candidates)
         if np.any(valid_diff):
             diff_med = np.nanmedian(diff_candidates[valid_diff])
@@ -126,9 +206,9 @@ def fill_landmark_matrix(
             diff_med = max(neg_thr, 1.0)
 
         pos_imputed = np.where(
-            np.isnan(pos),
+            np.isnan(pos_from_classification),
             out[:, 1] + diff_med,
-            pos,
+            pos_from_classification,
         )
         out = np.column_stack([out, pos_imputed])
         return out

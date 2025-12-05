@@ -339,6 +339,74 @@ def _evaluate_kde(
     return _fft_gaussian_kde(x, xs, bandwidth)
 
 
+def _bimodal_sign_split(x: np.ndarray) -> bool:
+    """Heuristic to spot left/right lobes that straddle zero.
+
+    When the inter-quantile span crosses zero we expect one negative and one
+    positive mode.  This lets us trigger a sharper second pass when the first
+    KDE pass collapses the doublet into a single broad hill.
+    """
+
+    if x.size < 12:
+        return False
+
+    q_lo, q_hi = np.percentile(x, [35, 65])
+    return bool(q_lo < 0.0 < q_hi)
+
+
+def _recover_missing_modes(
+    x: np.ndarray,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    *,
+    sample_std: float,
+    base_bandwidth: float,
+    prominence: float,
+    min_width: int | None,
+    min_x_sep: float | None,
+    min_valley_drop: float,
+    distance: int | None,
+    target_peaks: int,
+) -> tuple[list[int], np.ndarray] | None:
+    """Sharper KDE retry to restore collapsed peaks.
+
+    A slightly smaller bandwidth combined with a gentler prominence threshold
+    often reveals shoulders that the primary pass merges away.  The retry
+    reuses the same evaluation grid so downstream valley logic stays anchored
+    to the original KDE grid.
+    """
+
+    if not np.isfinite(base_bandwidth) or base_bandwidth <= 0:
+        return None
+    if not np.isfinite(sample_std) or sample_std <= 0:
+        return None
+
+    retry_bw = 0.65 * float(base_bandwidth)
+    if retry_bw <= 0 or abs(retry_bw - base_bandwidth) / base_bandwidth < 0.05:
+        return None
+
+    kde_retry = gaussian_kde(x, bw_method=retry_bw / sample_std)
+    ys_retry = _evaluate_kde(x, xs, kde_retry)
+
+    prom_retry = max(0.25 * prominence, prominence * 0.6)
+    kw = {"prominence": prom_retry}
+    if min_width:
+        kw["width"] = min_width
+    retry_locs, _ = find_peaks(ys_retry, **kw, distance=distance)
+    retry_locs = _merge_close_peaks(
+        xs,
+        ys_retry,
+        retry_locs,
+        min_x_sep=min_x_sep,
+        min_valley_drop=min_valley_drop,
+    )
+
+    if retry_locs.size < target_peaks:
+        return None
+
+    return retry_locs.tolist(), ys_retry
+
+
 def _first_valley_slope(
     xs: np.ndarray,
     ys: np.ndarray,
@@ -716,6 +784,31 @@ def kde_peaks_valleys(
     peaks_x = _enforce_min_separation(xs[peaks_idx].tolist(), xs, ys, min_x_sep)
 
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+
+    # ---------- sharpened retry for missing lobes ----------
+    expected = n_peaks if n_peaks is not None else (2 if _bimodal_sign_split(x) else None)
+    if expected and len(peaks_idx) < expected:
+        retry = _recover_missing_modes(
+            x,
+            xs,
+            ys,
+            sample_std=sample_std,
+            base_bandwidth=float(h) if np.isfinite(h) else float("nan"),
+            prominence=prominence,
+            min_width=min_width,
+            min_x_sep=min_x_sep,
+            min_valley_drop=min_valley_drop,
+            distance=distance,
+            target_peaks=int(expected),
+        )
+
+        if retry is not None:
+            retry_idx, _ = retry
+            peaks_idx = sorted(set(peaks_idx + retry_idx))
+            peaks_x = _enforce_min_separation(
+                [float(xs[i]) for i in peaks_idx], xs, ys, min_x_sep
+            )
+            peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
 
     # ---------- GMM fallback (unchanged) ----------
     if n_peaks is not None and len(peaks_x) < n_peaks:

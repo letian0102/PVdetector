@@ -246,6 +246,15 @@ def build_warp_function(
     # slopes for each interval  (≥ 2 landmarks from here on)
     slopes = np.diff(lt) / np.diff(ls)
 
+    # Guard against zero/negative edge slopes which would flatten the
+    # extrapolated tails (observed as right-side truncation for
+    # single-peak alignments).  Use the last positive internal slope as
+    # a fallback or a tiny epsilon if none exist.
+    pos_slopes = slopes[slopes > 0]
+    fallback_slope = float(pos_slopes[-1]) if pos_slopes.size else max(np.finfo(float).eps, 1e-6)
+    left_slope = float(slopes[0]) if slopes[0] > 0 else fallback_slope
+    right_slope = float(slopes[-1]) if slopes[-1] > 0 else fallback_slope
+
     def f(x):
         x = np.asarray(x, float)
         y = np.empty_like(x)
@@ -256,10 +265,10 @@ def build_warp_function(
         mid_mask   = ~(left_mask | right_mask)
 
         # ---- left - constant slope == slopes[0] --------------------------
-        y[left_mask] = lt[0] + slopes[0] * (x[left_mask] - ls[0])
+        y[left_mask] = lt[0] + left_slope * (x[left_mask] - ls[0])
 
         # ---- right -------------------------------------------------------
-        y[right_mask] = lt[-1] + slopes[-1] * (x[right_mask] - ls[-1])
+        y[right_mask] = lt[-1] + right_slope * (x[right_mask] - ls[-1])
 
         # ---- interior: vectorised piece-wise linear ---------------------
         if mid_mask.any():

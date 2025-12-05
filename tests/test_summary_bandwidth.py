@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from scipy.stats import gaussian_kde
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -36,3 +37,37 @@ def test_summary_reports_numeric_bandwidth_for_presets():
     assert isinstance(bw_value, float)
     assert np.isfinite(bw_value)
     assert bw_value == result.params["bw"]
+
+
+def test_fixed_bandwidth_is_preserved():
+    counts = np.concatenate([
+        np.random.default_rng(2).normal(-0.5, 0.05, 200),
+        np.random.default_rng(3).normal(1.5, 0.05, 200),
+    ])
+    options = BatchOptions(bandwidth=0.2, apply_arcsinh=False)
+    sample = SampleInput(
+        stem="demo_bw",
+        counts=counts,
+        metadata={},
+        arcsinh_signature=options.arcsinh_signature(),
+    )
+
+    result = process_sample(sample, options, overrides={}, gpt_client=None)
+
+    assert np.isclose(result.params["bw"], 0.2)
+    assert result.params.get("bw_label") == 0.2
+
+
+def test_discrete_counts_are_not_inflated():
+    counts = np.repeat(np.arange(4), 50).astype(float)
+    options = BatchOptions(apply_arcsinh=False, bandwidth="scott")
+    sample = SampleInput(
+        stem="discrete", counts=counts, metadata={}, arcsinh_signature=options.arcsinh_signature()
+    )
+
+    result = process_sample(sample, options, overrides={}, gpt_client=None)
+
+    reference_kde = gaussian_kde(counts, bw_method="scott")
+    expected_bw = reference_kde.factor * np.std(counts, ddof=1)
+
+    assert np.isclose(result.params["bw"], expected_bw, rtol=1e-12)

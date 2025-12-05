@@ -434,7 +434,7 @@ def test_alignment_normalizes_landmarks(monkeypatch):
         gauss_left = np.exp(-0.5 * ((xs + 3.0) / 0.4) ** 2)
         gauss_right = np.exp(-0.5 * ((xs - 3.0) / 0.4) ** 2)
         ys = gauss_left + gauss_right
-        return np.array([-3.0, 3.0]), np.array([0.0]), xs, ys
+        return np.array([-3.0, 3.0]), np.array([0.0]), xs, ys, 0.4
 
     monkeypatch.setattr(batch_mod, "kde_peaks_valleys", fake_kde)
 

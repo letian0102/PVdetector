@@ -1565,17 +1565,16 @@ def _ridge_plot_png(
     if not curves:
         return None
 
-    trimmed_bounds: list[tuple[float, float]] = []
+    bounds: list[tuple[float, float]] = []
     for _, xs, _, _, _, _ in curves:
         finite_xs = xs[np.isfinite(xs)]
         if finite_xs.size == 0:
             continue
-        low, high = np.nanquantile(finite_xs, [0.01, 0.99])
-        trimmed_bounds.append((float(low), float(high)))
+        bounds.append((float(finite_xs.min()), float(finite_xs.max())))
 
-    if trimmed_bounds:
-        x_min = min(low for low, _ in trimmed_bounds)
-        x_max = max(high for _, high in trimmed_bounds)
+    if bounds:
+        x_min = min(low for low, _ in bounds)
+        x_max = max(high for _, high in bounds)
     else:
         x_min = min(float(xs.min()) for _, xs, _, _, _, _ in curves)
         x_max = max(float(xs.max()) for _, xs, _, _, _, _ in curves)
@@ -1585,8 +1584,9 @@ def _ridge_plot_png(
 
     if x_max == x_min:
         pad = 0.05 * (abs(x_min) if x_min != 0 else 1.0)
+        x_lower, x_upper = x_min - pad, x_max + pad
     else:
-        pad = 0.05 * (x_max - x_min)
+        x_lower, x_upper = x_min, x_max
 
     offsets: list[float] = []
     current_offset = 0.0
@@ -1642,7 +1642,7 @@ def _ridge_plot_png(
     spacing = float(np.median(np.diff(offsets))) if len(offsets) > 1 else float(total_height)
     y_margin = 0.35 * spacing if spacing > 0 else 0.0
     ax.set_ylim(-y_margin, total_height + y_margin)
-    ax.set_xlim(x_min - pad, x_max + pad)
+    ax.set_xlim(x_lower, x_upper)
     ax.margins(x=0, y=0)
     fig.tight_layout()
 

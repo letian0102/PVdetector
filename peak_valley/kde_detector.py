@@ -112,17 +112,26 @@ def _recover_left_peak(
         return None
 
     dominant_height = float(ys[primary_idx])
-    relaxed_prom = max(0.20 * dominant_height, prominence * 0.4)
+    relaxed_prom = max(0.15 * dominant_height, prominence * 0.3)
 
-    def _passes(idx: int, *, rel_floor: float = 0.25, drop_floor: float = 0.05) -> bool:
+    baseline = float(np.percentile(search_ys, 65))
+    jitter = float(np.percentile(np.abs(search_ys - baseline), 80))
+    jitter = jitter if np.isfinite(jitter) else 0.0
+    noise_floor = baseline + 0.35 * jitter
+
+    def _passes(idx: int, *, rel_floor: float = 0.20, drop_floor: float = 0.035) -> bool:
         if idx <= 0 or idx >= search_ys.size - 1:
             return False
 
         if min_x_sep is not None:
-            if xs[primary_idx] - xs[idx] < 0.65 * float(min_x_sep):
+            if xs[primary_idx] - xs[idx] < 0.5 * float(min_x_sep):
                 return False
 
-        rel_height = search_ys[idx] / dominant_height if dominant_height > 0 else 0.0
+        height = float(search_ys[idx])
+        if height < noise_floor:
+            return False
+
+        rel_height = height / dominant_height if dominant_height > 0 else 0.0
         if rel_height < rel_floor:
             return False
 
@@ -131,7 +140,7 @@ def _recover_left_peak(
         if primary_idx > idx + 1:
             valley_span = search_ys[idx:primary_idx]
             post_min = float(np.min(valley_span))
-            if search_ys[idx] - post_min < drop_floor * dominant_height:
+            if height - post_min < drop_floor * dominant_height:
                 return False
 
         return True
@@ -152,8 +161,14 @@ def _recover_left_peak(
 
     ordered = sorted(turning, key=lambda idx: search_ys[idx], reverse=True)
     for idx in ordered:
-        if _passes(idx, rel_floor=0.18, drop_floor=0.04):
+        if _passes(idx, rel_floor=0.15, drop_floor=0.03):
             return int(idx)
+
+    # Last resort: accept the tallest left-hand bump that clears the noise
+    # floor, even if it barely separates from the dominant shoulder.
+    tallest_left = int(np.argmax(search_ys))
+    if _passes(tallest_left, rel_floor=0.13, drop_floor=0.025):
+        return tallest_left
 
     return None
 
@@ -678,11 +693,16 @@ def kde_peaks_valleys(
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,
     first_valley   : str = "slope",
+    diagnostics    : dict[str, object] | None = None,
 ) -> tuple[list[float], list[float], np.ndarray, np.ndarray, float | None]:
     x = np.asarray(data, float)
     x = x[np.isfinite(x)]
     if x.size == 0:
         return [], [], np.array([]), np.array([]), None
+
+    diag: dict[str, object] | None = diagnostics if diagnostics is not None else None
+    if diag is not None:
+        diag.clear()
 
     data_min = float(x.min())
     data_max = float(x.max())
@@ -830,8 +850,16 @@ def kde_peaks_valleys(
     # ---------- *re-derive* indices for every peak we now have ----------
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
 
+    if diag is not None:
+        need_left = len(peaks_idx) == 1 and (n_peaks is None or n_peaks > 1)
+        diag["left_peak_needed"] = need_left
+        diag["left_peak_attempted"] = False
+        diag["left_peak_recovered"] = False
+
     # ---------- attempt to recover a missing negative peak ---------------
     if len(peaks_idx) == 1 and (n_peaks is None or n_peaks > 1):
+        if diag is not None:
+            diag["left_peak_attempted"] = True
         recovered = _recover_left_peak(
             xs,
             ys,
@@ -841,6 +869,8 @@ def kde_peaks_valleys(
         )
         if recovered is not None:
             peaks_idx = sorted({*peaks_idx, int(recovered)})
+            if diag is not None:
+                diag["left_peak_recovered"] = True
             peaks_x = [float(xs[idx]) for idx in peaks_idx]
             peaks_x = _enforce_min_separation(peaks_x, xs, ys, min_x_sep)
             peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]

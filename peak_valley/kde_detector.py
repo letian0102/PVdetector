@@ -112,22 +112,50 @@ def _recover_left_peak(
         return None
 
     dominant_height = float(ys[primary_idx])
-    relaxed_prom = max(0.25 * dominant_height, prominence * 0.5)
+    relaxed_prom = max(0.20 * dominant_height, prominence * 0.4)
+
+    def _passes(idx: int, *, rel_floor: float = 0.25, drop_floor: float = 0.05) -> bool:
+        if idx <= 0 or idx >= search_ys.size - 1:
+            return False
+
+        if min_x_sep is not None:
+            if xs[primary_idx] - xs[idx] < 0.65 * float(min_x_sep):
+                return False
+
+        rel_height = search_ys[idx] / dominant_height if dominant_height > 0 else 0.0
+        if rel_height < rel_floor:
+            return False
+
+        # Require a modest dip between the candidate and the dominant peak so we
+        # do not accept a shallow shoulder as a distinct mode.
+        if primary_idx > idx + 1:
+            valley_span = search_ys[idx:primary_idx]
+            post_min = float(np.min(valley_span))
+            if search_ys[idx] - post_min < drop_floor * dominant_height:
+                return False
+
+        return True
 
     cand_idx, _ = find_peaks(search_ys, prominence=relaxed_prom, distance=distance)
-    if cand_idx.size == 0:
+    if cand_idx.size:
+        strongest = int(cand_idx[np.argmax(search_ys[cand_idx])])
+        if _passes(strongest):
+            return strongest
+
+    # Fallback: if standard detection fails, look for the last up→down turn to
+    # the left of the dominant mode.  This catches subtle left modes that do
+    # not clear the relaxed prominence threshold but still form a distinct bump.
+    dy = np.gradient(search_ys)
+    turning = np.where((dy[:-1] > 0) & (dy[1:] <= 0))[0] + 1
+    if turning.size == 0:
         return None
 
-    strongest = int(cand_idx[np.argmax(search_ys[cand_idx])])
-    if min_x_sep is not None:
-        if xs[primary_idx] - xs[strongest] < 0.8 * float(min_x_sep):
-            return None
+    ordered = sorted(turning, key=lambda idx: search_ys[idx], reverse=True)
+    for idx in ordered:
+        if _passes(idx, rel_floor=0.18, drop_floor=0.04):
+            return int(idx)
 
-    rel_height = search_ys[strongest] / dominant_height if dominant_height > 0 else 0.0
-    if rel_height < 0.35:
-        return None
-
-    return strongest
+    return None
 
 
 def _enforce_min_separation(

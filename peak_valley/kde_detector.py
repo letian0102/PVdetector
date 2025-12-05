@@ -112,14 +112,14 @@ def _recover_left_peak(
         return None
 
     dominant_height = float(ys[primary_idx])
-    relaxed_prom = max(0.12 * dominant_height, prominence * 0.25)
+    relaxed_prom = max(0.1 * dominant_height, prominence * 0.2)
 
     baseline = float(np.percentile(search_ys, 60))
     jitter = float(np.percentile(np.abs(search_ys - baseline), 80))
     jitter = jitter if np.isfinite(jitter) else 0.0
     noise_floor = baseline + 0.25 * jitter
 
-    def _passes(idx: int, *, rel_floor: float = 0.16, drop_floor: float = 0.03) -> bool:
+    def _passes(idx: int, *, rel_floor: float = 0.15, drop_floor: float = 0.03) -> bool:
         if idx <= 0 or idx >= search_ys.size - 1:
             return False
 
@@ -161,13 +161,13 @@ def _recover_left_peak(
 
     ordered = sorted(turning, key=lambda idx: search_ys[idx], reverse=True)
     for idx in ordered:
-        if _passes(idx, rel_floor=0.13, drop_floor=0.027):
+        if _passes(idx, rel_floor=0.12, drop_floor=0.025):
             return int(idx)
 
     # Last resort: accept the tallest left-hand bump that clears the noise
     # floor, even if it barely separates from the dominant shoulder.
     tallest_left = int(np.argmax(search_ys))
-    if _passes(tallest_left, rel_floor=0.12, drop_floor=0.022):
+    if _passes(tallest_left, rel_floor=0.1, drop_floor=0.02):
         return tallest_left
 
     # As a final heuristic, de-trend the left segment to expose shallow elbows
@@ -179,9 +179,9 @@ def _recover_left_peak(
     residual -= float(np.percentile(residual, 25))
     elbow_idx = int(np.argmax(residual))
     elbow_strength = float(residual[elbow_idx]) if residual.size else -math.inf
-    elbow_floor = max(0.5 * jitter, 0.02 * dominant_height)
+    elbow_floor = max(0.45 * jitter, 0.017 * dominant_height)
     if elbow_strength > elbow_floor and elbow_idx < search_ys.size - 1:
-        if _passes(elbow_idx, rel_floor=0.11, drop_floor=0.02):
+        if _passes(elbow_idx, rel_floor=0.095, drop_floor=0.018):
             return elbow_idx
 
     total_mass = float(np.trapz(ys, xs)) if xs.size and ys.size else 0.0
@@ -200,12 +200,25 @@ def _recover_left_peak(
         cand_idx, _ = find_peaks(smooth, prominence=smoothed_prom, distance=distance)
         if cand_idx.size:
             strongest = int(cand_idx[np.argmax(smooth[cand_idx])])
-            if _passes(strongest, rel_floor=0.10, drop_floor=0.018):
+            if _passes(strongest, rel_floor=0.09, drop_floor=0.017):
                 return strongest
 
         smooth_idx = int(np.argmax(smooth)) if smooth.size else tallest_left
-        if _passes(smooth_idx, rel_floor=0.095, drop_floor=0.016):
+        if _passes(smooth_idx, rel_floor=0.085, drop_floor=0.015):
             return smooth_idx
+
+        # When the coarse smoothing hides a faint elbow, re-run a sharper pass
+        # with a tiny window to expose local curvature changes before the
+        # dominant peak.  A second-derivative bump highlights the last concave
+        # region on the left shoulder, which often corresponds to the missing
+        # negative peak in "positive-only" detections.
+        tight_win = max(3, min(int(round(0.025 * search_ys.size)) | 1, search_ys.size))
+        if tight_win < search_ys.size:
+            tight = np.convolve(search_ys, np.ones(tight_win) / float(tight_win), mode="same")
+            curv = np.gradient(np.gradient(tight))
+            curv_idx = int(np.argmax(curv)) if curv.size else smooth_idx
+            if _passes(curv_idx, rel_floor=0.08, drop_floor=0.014):
+                return curv_idx
 
     return None
 

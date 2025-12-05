@@ -155,7 +155,7 @@ def fill_landmark_matrix(
         # --- return early for 1- or 2-anchor regimes --------------------
         if align_type == "negPeak":
             return out[:, :1]
-        if align_type == "negPeak_valley" or (has_val_orig and not has_pos):
+        if align_type == "negPeak_valley":
             return out
 
         # ---- need a surrogate positive peak ----------------------------

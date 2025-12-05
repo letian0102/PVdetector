@@ -75,8 +75,25 @@ class ConsoleProgress:
             self._last_plain = None
 
     def result(self, result) -> None:
-        # CLI mode does not stream per-sample payloads.
-        return
+        try:
+            params = getattr(result, "params", {}) or {}
+            needed = params.get("left_peak_needed")
+            attempted = params.get("left_peak_attempted")
+            if needed and attempted:
+                recovered = params.get("left_peak_recovered")
+                status = (
+                    "recovered"
+                    if recovered
+                    else "still missing after recovery"
+                )
+                print(
+                    f"[info] {result.stem}: only positive peak detected; negative peak {status}",
+                    file=self._stream,
+                    flush=True,
+                )
+                self._last_plain = None
+        except Exception:
+            return
 
     def _format(
         self,

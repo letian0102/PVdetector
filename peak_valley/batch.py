@@ -514,6 +514,8 @@ def process_sample(
 
     drop_frac = params["valley_drop"] / 100.0
 
+    diag: dict[str, object] = {}
+
     peaks, valleys, xs, ys, bw_used = kde_peaks_valleys(
         counts,
         params["n_peaks_effective"],
@@ -526,6 +528,7 @@ def process_sample(
         curvature_thresh=curvature,
         turning_peak=params["turning_points"],
         first_valley=params["first_valley"],
+        diagnostics=diag,
     )
 
     valleys = _postprocess_valleys(peaks, valleys, xs, ys, drop_frac)
@@ -546,6 +549,11 @@ def process_sample(
         "valley_drop": params["valley_drop"],
         "first_valley": params["first_valley"],
     }
+
+    if diag:
+        details["left_peak_needed"] = bool(diag.get("left_peak_needed"))
+        details["left_peak_attempted"] = bool(diag.get("left_peak_attempted"))
+        details["left_peak_recovered"] = bool(diag.get("left_peak_recovered"))
     if debug:
         details["debug"] = debug
 

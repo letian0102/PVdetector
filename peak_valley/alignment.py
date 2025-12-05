@@ -31,7 +31,129 @@ __all__ = ["fill_landmark_matrix",
            "align_distributions"]
 
 
-# ------------------------------------------------------------------  
+# ------------------------------------------------------------------
+def _median_or_nan(values: list[float]) -> float:
+    valid = np.asarray(values, float)
+    valid = valid[np.isfinite(valid)]
+    if valid.size == 0:
+        return float("nan")
+    return float(np.median(valid))
+
+
+def _reference_peak_stats(peaks: List[Sequence[float]]) -> tuple[float, float, float]:
+    """Return cohort medians for negative/positive peaks and their gap."""
+
+    negs = [pk[0] for pk in peaks if pk]
+    poss = [pk[-1] for pk in peaks if pk and len(pk) > 1]
+
+    neg_med = _median_or_nan(negs)
+    pos_med = _median_or_nan(poss)
+    gap = pos_med - neg_med if np.isfinite(neg_med) and np.isfinite(pos_med) else float("nan")
+    return neg_med, pos_med, gap
+
+
+def _find_histogram_peaks(bin_centers: np.ndarray, hist: np.ndarray) -> np.ndarray:
+    """Lightweight peak finder for 1-D histograms (no SciPy dependency)."""
+
+    if hist.size < 3:
+        return np.array([], dtype=int)
+
+    left = hist[:-2]
+    mid = hist[1:-1]
+    right = hist[2:]
+    mask = (mid >= left) & (mid >= right)
+    return np.where(mask)[0] + 1
+
+
+def _infer_negative_peak_from_counts(
+    counts: Sequence[float],
+    detected_positive: float,
+    typical_gap: float,
+) -> tuple[Optional[float], Optional[float]]:
+    """Infer a missing negative peak and optional valley using histogram heuristics."""
+
+    data = np.asarray(counts, float)
+    data = data[np.isfinite(data)]
+    if data.size < 10:
+        return None, None
+
+    left_data = data[data < detected_positive]
+    if left_data.size < 5:
+        return None, None
+
+    hist, edges = np.histogram(left_data, bins=128)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+
+    candidates = _find_histogram_peaks(centers, hist)
+    candidates = candidates[centers[candidates] < detected_positive]
+
+    neg_peak: Optional[float] = None
+    if candidates.size:
+        tallest = candidates[int(np.argmax(hist[candidates]))]
+        neg_peak = float(centers[tallest])
+    elif np.isfinite(typical_gap) and typical_gap > 0:
+        neg_peak = float(detected_positive - typical_gap)
+
+    valley: Optional[float] = None
+    if neg_peak is not None:
+        between = (centers > neg_peak) & (centers < detected_positive)
+        if np.any(between):
+            seg_centers = centers[between]
+            seg_hist = hist[between]
+            valley = float(seg_centers[int(np.argmin(seg_hist))])
+
+    return neg_peak, valley
+
+
+def _augment_single_peak_samples(
+    peaks: List[Sequence[float]],
+    valleys: List[Sequence[float]],
+    counts: List[np.ndarray],
+) -> tuple[List[Sequence[float]], List[Sequence[float]]]:
+    """
+    Detect single-peak samples whose lone peak matches the cohort's positive
+    peak and try to recover the missing negative peak from the raw counts.
+    """
+
+    peaks_adj = [list(pk) if pk else [] for pk in peaks]
+    valleys_adj = [list(vl) if vl else [] for vl in valleys]
+
+    neg_med, pos_med, gap_med = _reference_peak_stats(peaks_adj)
+    if not (np.isfinite(neg_med) and np.isfinite(pos_med)):
+        return peaks_adj, valleys_adj
+
+    margin = 0.1 * gap_med if np.isfinite(gap_med) and gap_med > 0 else 0.1
+
+    for i, pk in enumerate(peaks_adj):
+        if len(pk) != 1:
+            continue
+
+        current = float(pk[0])
+        if not np.isfinite(current):
+            continue
+
+        dist_neg = abs(current - neg_med)
+        dist_pos = abs(current - pos_med)
+        if dist_pos >= dist_neg - margin:
+            continue
+
+        neg_guess, valley_guess = _infer_negative_peak_from_counts(
+            counts[i], current, gap_med
+        )
+
+        if neg_guess is None or neg_guess >= current:
+            continue
+
+        pk.insert(0, neg_guess)
+        peaks_adj[i] = pk
+
+        if valley_guess is not None:
+            valleys_adj[i] = [valley_guess]
+
+    return peaks_adj, valleys_adj
+
+
+# ------------------------------------------------------------------
 def fill_landmark_matrix(
     peaks   : List[Sequence[float]],
     valleys : List[Sequence[float]],
@@ -244,15 +366,17 @@ def align_distributions(
     density_grids  : Optional[Sequence[Optional[DensityGrid]]] = None,
 ) -> Union[AlignmentReturn, AlignmentReturnWithDensity]:
     """
-    • *counts* – list of raw (arcsinh-transformed) count vectors  
+    • *counts* – list of raw (arcsinh-transformed) count vectors
     • returns (normalised_counts, warped_landmarks_matrix)
     • optionally returns aligned density grids when *density_grids* provided
     """
+    peaks_use, valleys_use = _augment_single_peak_samples(peaks, valleys, counts)
+
     # ---------- fill / merge landmark matrix -----------------------------
     # 1. build / accept the landmark matrix  -----------------------------
     if landmark_matrix is None:
         lm = fill_landmark_matrix(
-            peaks, valleys, align_type=align_type
+            peaks_use, valleys_use, align_type=align_type
         )
     else:
         lm = np.asarray(landmark_matrix, float)

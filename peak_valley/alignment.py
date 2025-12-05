@@ -230,6 +230,11 @@ def build_warp_function(
     ls, lt = ls[order], lt[order]
     lt = np.maximum.accumulate(lt)
 
+    min_step = max(np.finfo(float).eps, 1e-6)
+    for idx in range(1, ls.size):
+        if ls[idx] <= ls[idx - 1]:
+            ls[idx] = ls[idx - 1] + min_step
+
     # —— single-landmark → constant shift ————————————————
     if ls.size == 1:
         delta = float(lt[0] - ls[0])    
@@ -330,7 +335,28 @@ def align_distributions(
     # ---------- choose the common target positions -----------------------
     tgt_raw = (np.nanmean(lm, axis=0)
                if target_landmark is None else np.asarray(target_landmark, float))
-    tgt = np.maximum.accumulate(np.asarray(tgt_raw, float))
+    tgt = np.asarray(tgt_raw, float)
+
+    if tgt.size > 1:
+        diffs = lm[:, 1:] - lm[:, :-1]
+        min_gaps: list[float] = []
+        for col in range(diffs.shape[1]):
+            col_diff = np.asarray(diffs[:, col], float)
+            finite_pos = col_diff[np.isfinite(col_diff) & (col_diff > 0.0)]
+            if finite_pos.size:
+                gap = float(np.nanmedian(finite_pos))
+            else:
+                fallback = col_diff[np.isfinite(col_diff)]
+                gap = float(np.nanmedian(np.abs(fallback))) if fallback.size else 1.0
+                if not np.isfinite(gap) or gap <= 0:
+                    gap = 1.0
+            min_gaps.append(gap)
+
+        for idx in range(1, tgt.size):
+            if tgt[idx] <= tgt[idx - 1]:
+                tgt[idx] = tgt[idx - 1] + min_gaps[idx - 1]
+
+    tgt = np.maximum.accumulate(tgt)
     if tgt.shape[0] != lm.shape[1]:
         raise ValueError(
             "target_landmark length does not match landmark columns"

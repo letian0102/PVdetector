@@ -285,8 +285,11 @@ def align_distributions(
         lm[nan_by_col] = np.take(col_median, np.where(nan_by_col)[1])
 
     # ---------- choose the common target positions -----------------------
-    tgt_raw = (np.nanmean(lm, axis=0)
-               if target_landmark is None else np.asarray(target_landmark, float))
+    tgt_raw = (
+        np.nanmedian(lm, axis=0)
+        if target_landmark is None
+        else np.asarray(target_landmark, float)
+    )
     tgt = np.maximum.accumulate(np.asarray(tgt_raw, float))
     if tgt.shape[0] != lm.shape[1]:
         raise ValueError(

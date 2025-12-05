@@ -156,9 +156,28 @@ def fill_landmark_matrix(
         # that downstream alignment warps it against the cohort’s second peak.
         classified_pos = np.full(n, np.nan)
         if align_type == "negPeak_valley_posPeak":
-            cohort_neg = np.nanmedian(neg) if np.any(~np.isnan(neg)) else np.nan
-            cohort_pos = np.nanmedian(pos) if np.any(~np.isnan(pos)) else np.nan
-            cohort_val = np.nanmedian(val) if np.any(~np.isnan(val)) else np.nan
+            multi_peak_mask = np.array(pk_lengths) > 1
+
+            if np.any(multi_peak_mask):
+                cohort_neg = (
+                    np.nanmedian(neg[multi_peak_mask])
+                    if np.any(~np.isnan(neg[multi_peak_mask]))
+                    else np.nan
+                )
+                cohort_pos = (
+                    np.nanmedian(pos[multi_peak_mask])
+                    if np.any(~np.isnan(pos[multi_peak_mask]))
+                    else np.nan
+                )
+                cohort_val = (
+                    np.nanmedian(val[multi_peak_mask])
+                    if np.any(~np.isnan(val[multi_peak_mask]))
+                    else np.nan
+                )
+            else:
+                cohort_neg = np.nanmedian(neg) if np.any(~np.isnan(neg)) else np.nan
+                cohort_pos = np.nanmedian(pos) if np.any(~np.isnan(pos)) else np.nan
+                cohort_val = np.nanmedian(val) if np.any(~np.isnan(val)) else np.nan
 
             for i in range(n):
                 if pk_lengths[i] != 1:

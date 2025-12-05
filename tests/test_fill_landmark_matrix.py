@@ -49,3 +49,45 @@ def test_fill_landmark_matrix_respects_alignment_mode():
     assert mat_neg_val.shape == (2, 2)
     assert np.allclose(mat_neg_val[:, 0], [0.1, 0.2])
     assert np.allclose(mat_neg_val[:, 1], [0.4, 0.45])
+
+
+def test_single_peak_samples_align_to_positive_mode_when_right_shifted():
+    peaks = [
+        [0.1, 1.0],   # canonical negative/positive pair
+        [0.11, 0.98],
+        [0.93],       # single peak near the positive mode
+    ]
+    valleys = [
+        [0.5],
+        [0.52],
+        [0.51],
+    ]
+
+    mat = fill_landmark_matrix(peaks, valleys)
+
+    # The single-peak sample should contribute its observed peak to the
+    # positive column so it can align with other positive peaks.
+    assert mat[2, 2] == pytest.approx(0.93)
+    # A negative anchor is imputed from the cohort, not copied from the
+    # right-shifted single peak.
+    assert mat[2, 0] != pytest.approx(0.93)
+
+
+def test_single_peak_samples_stay_on_negative_mode_when_left_shifted():
+    peaks = [
+        [0.12, 0.95],
+        [0.14, 1.02],
+        [0.15],
+    ]
+    valleys = [
+        [0.48],
+        [0.5],
+        [0.47],
+    ]
+
+    mat = fill_landmark_matrix(peaks, valleys)
+
+    # The lone peak is left of the cohort valley so it should remain a
+    # negative-mode anchor.
+    assert mat[2, 0] == pytest.approx(0.15)
+    assert mat[2, 2] != pytest.approx(0.15)

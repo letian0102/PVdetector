@@ -657,6 +657,9 @@ def kde_peaks_valleys(
     x_min = base_low - pad
     x_max = data_max + pad
 
+    if data_min >= 0.0 and x_min < 0.0:
+        x_min = 0.0
+
     xs = np.linspace(
         x_min,
         x_max,
@@ -666,42 +669,72 @@ def kde_peaks_valleys(
 
     # ---------- primary peaks ----------
 
-    grid_dx  = xs[1] - xs[0]
-    distance = None                       # (NEW)  hard x-spacing
-    if min_x_sep is not None:
-        # ``scipy.signal.find_peaks`` requires ``distance`` >= 1.  For very
-        # small ``min_x_sep`` relative to the grid spacing the integer
-        # division above could yield ``0`` which would raise a ``ValueError``.
-        # Clamp the value so that ``find_peaks`` always receives a valid
-        # minimum distance.
-        distance = max(1, int(math.ceil(min_x_sep / grid_dx)))
-    kw = {"prominence": prominence}
-    if min_width:
-        kw["width"] = min_width
-    locs, _ = find_peaks(ys, **kw, distance=distance)
+    grid_dx = xs[1] - xs[0]
 
-    if turning_peak and curvature_thresh and curvature_thresh > 0:
-        dy  = np.gradient(ys, xs)                 # 1st derivative
-        d2y = np.gradient(dy,  xs)                # 2nd derivative
-        slope_tol = 0.05 * np.max(np.abs(dy))     # “almost flat”
+    def _find_candidate_peaks(prominence_val: float, separation: float | None):
+        distance = None
+        if separation is not None and np.isfinite(separation):
+            # ``scipy.signal.find_peaks`` requires ``distance`` >= 1.  For very
+            # small ``separation`` relative to the grid spacing the integer
+            # division above could yield ``0`` which would raise a
+            # ``ValueError``.  Clamp the value so that ``find_peaks`` always
+            # receives a valid minimum distance.
+            distance = max(1, int(math.ceil(separation / grid_dx)))
 
-        turning = np.where(
-            (np.abs(dy) < slope_tol) &           # near-flat slope
-            (d2y < -curvature_thresh)            # concave-down
-        )[0]
+        spacing = 0.0
+        if separation is not None and np.isfinite(separation):
+            spacing = float(separation)
 
-        # keep only the strongest point inside every min_x_sep window
-        if turning.size:
-            strongest = [turning[0]]
-            for idx in turning[1:]:
-                if xs[idx] - xs[strongest[-1]] >= min_x_sep:
-                    strongest.append(idx)
-                elif ys[idx] > ys[strongest[-1]]:     # higher shoulder wins
-                    strongest[-1] = idx
-            locs = np.unique(np.concatenate([locs, strongest]))
+        kw = {"prominence": prominence_val}
+        if min_width:
+            kw["width"] = min_width
+        locs_arr, _ = find_peaks(ys, **kw, distance=distance)
 
-    locs = _merge_close_peaks(xs, ys, locs,
-            min_x_sep=min_x_sep, min_valley_drop=min_valley_drop)
+        if turning_peak and curvature_thresh and curvature_thresh > 0:
+            dy = np.gradient(ys, xs)  # 1st derivative
+            d2y = np.gradient(dy, xs)  # 2nd derivative
+            slope_tol = 0.05 * np.max(np.abs(dy))  # “almost flat”
+
+            turning = np.where(
+                (np.abs(dy) < slope_tol) &  # near-flat slope
+                (d2y < -curvature_thresh)  # concave-down
+            )[0]
+
+            if turning.size:
+                # keep only the strongest point inside every separation window
+                strongest = [turning[0]]
+                for idx in turning[1:]:
+                    if xs[idx] - xs[strongest[-1]] >= spacing:
+                        strongest.append(idx)
+                    elif ys[idx] > ys[strongest[-1]]:  # higher shoulder wins
+                        strongest[-1] = idx
+                locs_arr = np.unique(np.concatenate([locs_arr, strongest]))
+
+        return _merge_close_peaks(
+            xs,
+            ys,
+            locs_arr,
+            min_x_sep=separation,
+            min_valley_drop=min_valley_drop,
+        )
+
+    locs = _find_candidate_peaks(prominence, min_x_sep)
+    min_x_sep_effective = min_x_sep
+
+    if n_peaks is None and locs.size <= 1:
+        relaxed_prominence = prominence * 0.5
+        if relaxed_prominence <= 0:
+            relaxed_prominence = prominence
+
+        relaxed_min_sep = min_x_sep
+        if min_x_sep is not None and np.isfinite(min_x_sep):
+            relaxed_min_sep = 0.75 * float(min_x_sep)
+
+        relaxed_locs = _find_candidate_peaks(relaxed_prominence, relaxed_min_sep)
+
+        if relaxed_locs.size > locs.size:
+            locs = relaxed_locs
+            min_x_sep_effective = relaxed_min_sep
 
     if locs.size == 0 and n_peaks is None:
         return [], [], xs, ys, float(h)
@@ -713,7 +746,9 @@ def kde_peaks_valleys(
     else:
         peaks_idx = np.sort(locs)
     
-    peaks_x = _enforce_min_separation(xs[peaks_idx].tolist(), xs, ys, min_x_sep)
+    peaks_x = _enforce_min_separation(
+        xs[peaks_idx].tolist(), xs, ys, min_x_sep_effective
+    )
 
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
 
@@ -738,7 +773,7 @@ def kde_peaks_valleys(
             peaks_x = [px for _, px in heights[: n_peaks]]
 
     # Enforce separation a final time after any fallback adjustments.
-    peaks_x = _enforce_min_separation(peaks_x, xs, ys, min_x_sep)
+    peaks_x = _enforce_min_separation(peaks_x, xs, ys, min_x_sep_effective)
 
     if n_peaks is not None and peaks_x and len(peaks_x) < n_peaks:
         # Fall back to a single dominant peak whenever we cannot honour the
@@ -757,7 +792,7 @@ def kde_peaks_valleys(
             val = _valley_between(xs, ys, p0, p1, drop_frac)
         else:
             val = _first_valley_slope(
-                xs, ys, p0, p1, min_sep=min_x_sep, drop_frac=drop_frac
+                xs, ys, p0, p1, min_sep=min_x_sep_effective, drop_frac=drop_frac
             )
             if val is None:
                 val = _valley_between(xs, ys, p0, p1, drop_frac)
@@ -774,7 +809,7 @@ def kde_peaks_valleys(
             val = _first_valley_drop(xs, ys, p0, drop_frac)
         else:
             val = _first_valley_slope(
-                xs, ys, p0, None, min_sep=min_x_sep, drop_frac=drop_frac
+                xs, ys, p0, None, min_sep=min_x_sep_effective, drop_frac=drop_frac
             )
         if val is not None:
             valleys_x.append(val)
@@ -784,7 +819,7 @@ def kde_peaks_valleys(
         xs,
         ys,
         peaks_idx,
-        min_x_sep=min_x_sep,
+        min_x_sep=min_x_sep_effective,
         drop_frac=drop_frac,
         first_valley=first_valley,
     )
@@ -798,7 +833,7 @@ def kde_peaks_valleys(
             xs,
             ys,
             [idx0],
-            min_x_sep=min_x_sep,
+            min_x_sep=min_x_sep_effective,
             drop_frac=drop_frac,
             first_valley=first_valley,
         )[1][0]]

@@ -1,6 +1,6 @@
 import numpy as np
 
-from peak_valley.batch import BatchOptions
+from peak_valley.batch import BatchOptions, SampleInput, run_batch
 from peak_valley.kde_detector import (
     _resolve_peak_valley_conflicts,
     kde_peaks_valleys,
@@ -67,6 +67,84 @@ def test_requested_peaks_respect_min_separation():
 
     # Only one well-separated peak should remain despite the higher request.
     assert len(peaks) == 1
+
+
+def test_batch_respects_min_separation_when_peaks_requested():
+    rng = np.random.default_rng(11)
+    data = np.concatenate(
+        [
+            rng.normal(0.0, 0.04, 600),
+            rng.normal(0.25, 0.04, 500),
+        ]
+    )
+
+    options = BatchOptions()
+    options.n_peaks = 2
+    options.n_peaks_auto = False
+    options.max_peaks = 2
+    options.bandwidth = 0.05
+    options.prominence = 0.01
+    options.min_separation = 0.5
+    options.grid_size = 4_000
+
+    result = run_batch(
+        [
+            SampleInput(
+                stem="sample",
+                counts=data,
+                metadata={},
+                order=0,
+                arcsinh_signature=options.arcsinh_signature(),
+            )
+        ],
+        options,
+    ).samples[0]
+
+    assert len(result.peaks) == 1
+    assert result.params["min_separation"] == options.min_separation
+
+
+def test_min_separation_scales_with_sample_spread():
+    rng = np.random.default_rng(2024)
+
+    # Two peaks only 0.6 apart, but the overall distribution spans a much
+    # larger range so the adaptive scaling should force them to merge.
+    dense_cluster = np.concatenate(
+        [
+            rng.normal(0.0, 0.05, 4_000),
+            rng.normal(0.6, 0.05, 4_000),
+        ]
+    )
+    distant_cluster = rng.normal(50.0, 0.5, 4_000)
+    data = np.concatenate([dense_cluster, distant_cluster])
+
+    options = BatchOptions()
+    options.n_peaks = 3
+    options.n_peaks_auto = False
+    options.max_peaks = 3
+    options.bandwidth = 0.1
+    options.prominence = 0.01
+    options.min_separation = 0.5
+    options.grid_size = 4_000
+
+    result = run_batch(
+        [
+            SampleInput(
+                stem="wide-range",
+                counts=data,
+                metadata={},
+                order=0,
+                arcsinh_signature=options.arcsinh_signature(),
+            )
+        ],
+        options,
+    ).samples[0]
+
+    assert len(result.peaks) == 1
+    assert result.params["min_separation"] > options.min_separation
+    assert result.params["debug"]["min_separation_scaled_from_spread"] == result.params[
+        "min_separation"
+    ]
 
 
 def test_valleys_clear_gap_to_nearest_peak():

@@ -584,14 +584,21 @@ def run_batch(
                 f"Sample '{sample.stem}' exceeded the {timeout:.3f}-second processing timeout"
             )
 
-        previous_handler = signal.getsignal(signal.SIGALRM)
-        signal.signal(signal.SIGALRM, _raise_timeout)
-        signal.setitimer(signal.ITIMER_REAL, timeout)
+        try:
+            sigalrm = signal.SIGALRM
+            setitimer = signal.setitimer
+        except AttributeError:
+            # Windows does not support SIGALRM or setitimer; run without a timeout.
+            return process_sample(sample, options, overrides, gpt_client)
+
+        previous_handler = signal.getsignal(sigalrm)
+        signal.signal(sigalrm, _raise_timeout)
+        setitimer(signal.ITIMER_REAL, timeout)
         try:
             return process_sample(sample, options, overrides, gpt_client)
         finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, previous_handler)
+            setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(sigalrm, previous_handler)
 
     worker_count = options.workers if options.sample_timeout <= 0 else 1
 

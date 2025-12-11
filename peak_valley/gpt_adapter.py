@@ -16,7 +16,12 @@ from sklearn.mixture import GaussianMixture
 from .kde_detector import quick_peak_estimate
 from .signature import shape_signature
 
-__all__ = ["ask_gpt_peak_count", "ask_gpt_prominence", "ask_gpt_bandwidth"]
+__all__ = [
+    "ask_gpt_peak_count",
+    "ask_gpt_prominence",
+    "ask_gpt_bandwidth",
+    "ask_gpt_parameter_plan",
+]
 
 HISTOGRAM_PROMPT_CHAR_BUDGET = 4800
 MIN_ADAPTIVE_SAMPLES = 512
@@ -24,6 +29,7 @@ MAX_HISTOGRAM_BINS = 160
 MIN_HISTOGRAM_BINS = 80
 BASELINE_BINS = 64
 SUMMARY_BINS = 48
+MAX_BANDWIDTH_SCALE = 1.5
 
 # keep a simple run-time cache; survives a single Streamlit run
 _cache: dict[tuple, float | int | str] = {}  # (tag, sig[, extra]) → value
@@ -1996,6 +2002,164 @@ def ask_gpt_bandwidth(
 
     _cache[key] = val
     return val
+
+
+def _sanitize_plan_field(value: Any, *, fallback: Any) -> Any:
+    """Return a cleaned parameter suggestion with sensible bounds."""
+
+    if isinstance(fallback, bool):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "yes", "y", "1"}:
+                return True
+            if lowered in {"false", "no", "n", "0"}:
+                return False
+    if isinstance(value, (int, float)):
+        if isinstance(fallback, int):
+            return int(value)
+        return float(value)
+    if isinstance(fallback, (int, float)):
+        try:
+            coerced = float(value)
+        except Exception:
+            return fallback
+        if isinstance(fallback, int):
+            return int(coerced)
+        return coerced
+    if isinstance(fallback, str):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return fallback
+
+
+def ask_gpt_parameter_plan(
+    client: OpenAI,
+    model_name: str,
+    counts_full: np.ndarray,
+    *,
+    max_peaks: int,
+    defaults: Optional[dict[str, Any]] = None,
+    features: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Ask GPT for a holistic detection plan (bandwidth, peaks, separation).
+
+    The function shares a compact feature payload and asks the model to return
+    a JSON object with suggested detection settings.  Results are memoised by
+    the distribution signature so repeated requests for the same data are
+    cheap.  Suggestions are clamped into reasonable ranges and fall back to
+    ``defaults`` whenever parsing fails.
+    """
+
+    defaults = defaults or {}
+
+    base_defaults = {
+        "bandwidth": defaults.get("bandwidth", "scott"),
+        "min_separation": float(defaults.get("min_separation", 0.5)),
+        "prominence": float(defaults.get("prominence", 0.05)),
+        "peak_cap": int(defaults.get("peak_cap", max(1, max_peaks))),
+        "apply_turning_points": bool(defaults.get("apply_turning_points", False)),
+        "notes": defaults.get("notes", ""),
+    }
+
+    if client is None:
+        return base_defaults
+
+    values = _prepare_values(counts_full)
+    if not values.size:
+        return base_defaults
+
+    sig = shape_signature(values)
+    key = ("plan", sig, int(max_peaks))
+    cached = _cache.get(key)
+    if isinstance(cached, dict):
+        return dict(cached)
+
+    if features is None:
+        feature_payload = _build_feature_payload(values)
+    else:
+        feature_payload = dict(features)
+
+    prompt = textwrap.dedent(
+        """
+        You help tune a peak/valley detector for single-cell marker densities.
+        Given the distribution summary, propose values for:
+        - bandwidth: choose "scott", "silverman", "roughness", or a scale
+          factor between 0.10 and 1.50.
+        - min_separation: minimum spacing between peaks (0.0 to 10.0).
+        - prominence: valley drop threshold between 0.01 and 0.30.
+        - peak_cap: limit on peaks to search for (1..{max_peaks}).
+        - apply_turning_points: whether to treat concave-down turning points as peaks.
+        Return JSON with those keys plus a short "notes" string explaining the
+        choice.  Prefer conservative values when unsure.
+        """
+    ).strip()
+
+    try:
+        rsp = client.chat.completions.create(
+            model=model_name,
+            seed=2025,
+            response_format={"type": "json_object"},
+            timeout=45,
+            messages=[
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(feature_payload),
+                },
+            ],
+        )
+        data = json.loads(rsp.choices[0].message.content)
+    except AuthenticationError:
+        raise
+    except Exception:
+        return base_defaults
+
+    suggestion = dict(base_defaults)
+    suggestion["bandwidth"] = _sanitize_plan_field(
+        data.get("bandwidth"), fallback=base_defaults["bandwidth"]
+    )
+    suggestion["min_separation"] = float(
+        np.clip(
+            _sanitize_plan_field(data.get("min_separation"), fallback=base_defaults["min_separation"]),
+            0.0,
+            10.0,
+        )
+    )
+    suggestion["prominence"] = float(
+        np.clip(
+            _sanitize_plan_field(data.get("prominence"), fallback=base_defaults["prominence"]),
+            0.01,
+            0.30,
+        )
+    )
+    suggestion["peak_cap"] = int(
+        np.clip(
+            _sanitize_plan_field(data.get("peak_cap"), fallback=base_defaults["peak_cap"]),
+            1,
+            max_peaks,
+        )
+    )
+    suggestion["apply_turning_points"] = bool(
+        _sanitize_plan_field(
+            data.get("apply_turning_points"),
+            fallback=base_defaults["apply_turning_points"],
+        )
+    )
+    suggestion["notes"] = _sanitize_plan_field(data.get("notes"), fallback="")
+
+    # normalise bandwidth scale factors to a safe range
+    bw_val = suggestion["bandwidth"]
+    if isinstance(bw_val, (int, float)):
+        suggestion["bandwidth"] = float(np.clip(float(bw_val), 0.10, MAX_BANDWIDTH_SCALE))
+    elif isinstance(bw_val, str):
+        label = bw_val.strip().lower()
+        if label not in {"scott", "silverman", "roughness"}:
+            suggestion["bandwidth"] = base_defaults["bandwidth"]
+
+    _cache[key] = suggestion
+    return suggestion
 
 def ask_gpt_prominence(
     client:     OpenAI,

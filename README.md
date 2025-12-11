@@ -130,6 +130,13 @@ finalises partial results if an analysis is interrupted.
 - **Bandwidth** and **Prominence** – choose manual presets/scales or allow GPT to suggest values.
 - Additional controls include minimum peak width, curvature threshold, concave turning points, minimum separation, KDE grid size, valley drop, first-valley method selection, and marker-consistency enforcement.
 
+#### GPT parameter planner (new)
+- Load a CSV upload or dataset first so the app can sample representative counts.
+- Open the **GPT helper** section near the bottom of the sidebar, pick a model (or enter a custom name), and supply an OpenAI API key.
+- Click **Ask GPT for optimal detection settings**. The app sends a histogram summary to the model and stores the proposed bandwidth, peak cap, minimum separation, and prominence in session state.
+- The returned suggestion appears as a checklist; tick the parameters you want to apply and leave others unchanged.
+- When you run detection with any GPT-driven options enabled, the app automatically reuses your provided API key. The planner caches per-distribution suggestions within the session to avoid repeated calls on similar data.
+
 ### Running the detector
 - Click **Run detector** to process selected files. A progress bar tracks the queue, and a Pause/Resume button provides mid-run control.
 - Use **Clear results** to reset all session data.

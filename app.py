@@ -41,6 +41,7 @@ from peak_valley.cli_import import (
 )
 from peak_valley.gpt_adapter import (
     ask_gpt_peak_count, ask_gpt_prominence, ask_gpt_bandwidth,
+    ask_gpt_parameter_plan,
 )
 from peak_valley.batch import (
     BatchOptions,
@@ -100,6 +101,7 @@ for key, default in {
     "cached_uploads": [],
     "generated_csvs": [],
     "generated_meta": {},
+    "gpt_plan_suggestion": None,
     "sel_markers": [], "sel_samples": [], "sel_batches": [],
     "expr_df": None, "meta_df": None,
     "expr_name": None, "meta_name": None,
@@ -4498,6 +4500,44 @@ with st.sidebar:
             )
 
 
+    def _preview_counts_for_gpt() -> np.ndarray | None:
+        """Return a small representative sample of counts for GPT planning."""
+
+        if mode == "Counts CSV files":
+            for bio in use_uploads + use_generated:
+                try:
+                    bio.seek(0)
+                    counts, _ = read_counts(bio, header_row, skip_rows)
+                except Exception:
+                    continue
+
+                if apply_arc and not getattr(bio, "arcsinh", False):
+                    counts = arcsinh_transform(
+                        counts,
+                        a=float(st.session_state.get("arcsinh_a", 1.0)),
+                        b=float(st.session_state.get("arcsinh_b", 1 / 5)),
+                        c=float(st.session_state.get("arcsinh_c", 0.0)),
+                    )
+
+                values = np.asarray(counts, float).ravel()
+                if values.size == 0:
+                    continue
+                if values.size > 5000:
+                    values = np.random.choice(values, 5000, replace=False)
+                return values
+
+        expr_df = st.session_state.expr_df or st.session_state.combined_expr_df
+        if expr_df is not None and not expr_df.empty:
+            numeric = expr_df.select_dtypes(include=[np.number])
+            if not numeric.empty:
+                values = numeric.to_numpy().ravel()
+                if values.size > 5000:
+                    values = np.random.choice(values, 5000, replace=False)
+                return values
+
+        return None
+
+
     st.markdown("---\n### GPT helper")
     pick = st.selectbox(
         "Model",
@@ -4514,6 +4554,63 @@ with st.sidebar:
         "OpenAI API key", type="password",
         help="Key for accessing the OpenAI API."
     )
+
+    plan_cols = st.columns([1, 2])
+    ask_plan = plan_cols[0].button(
+        "Ask GPT for optimal detection settings",
+        help=(
+            "Query the LLM once to suggest bandwidth, peak cap, min separation, "
+            "and prominence for the selected data."
+        ),
+        disabled=not (use_uploads or use_generated or st.session_state.expr_df is not None),
+    )
+
+    if ask_plan:
+        counts_preview = _preview_counts_for_gpt()
+        if counts_preview is None:
+            plan_cols[1].warning("Upload a CSV or load a dataset before asking GPT for defaults.")
+        elif not api_key:
+            plan_cols[1].error("Provide an OpenAI API key to request GPT defaults.")
+        else:
+            try:
+                plan_client = OpenAI(api_key=api_key)
+            except AuthenticationError:
+                plan_cols[1].error("Invalid OpenAI API key; update it to ask GPT for defaults.")
+            except Exception as exc:
+                plan_cols[1].error(f"Failed to initialise OpenAI client: {exc}")
+            else:
+                defaults_payload = {
+                    "bandwidth": bw_val if bw_mode == "Manual" else bw_val or "scott",
+                    "min_separation": min_sep,
+                    "prominence": prom_val if prom_val is not None else 0.05,
+                    "peak_cap": n_fixed or max_peaks,
+                    "apply_turning_points": tp,
+                }
+                try:
+                    st.session_state.gpt_plan_suggestion = ask_gpt_parameter_plan(
+                        plan_client,
+                        gpt_model,
+                        counts_preview,
+                        max_peaks=int(max_peaks),
+                        defaults=defaults_payload,
+                    )
+                    plan_cols[1].success("GPT suggested a parameter plan. See below.")
+                except AuthenticationError:
+                    plan_cols[1].error("Invalid OpenAI API key; update it to ask GPT for defaults.")
+                except Exception as exc:
+                    plan_cols[1].error(f"GPT request failed: {exc}")
+
+    suggestion = st.session_state.get("gpt_plan_suggestion") or {}
+    if suggestion:
+        st.caption(
+            "GPT defaults: "
+            f"bandwidth **{suggestion.get('bandwidth')}**, "
+            f"min separation **{suggestion.get('min_separation')}**, "
+            f"prominence **{suggestion.get('prominence')}**, "
+            f"peak cap **{suggestion.get('peak_cap')}**, "
+            f"turning points **{suggestion.get('apply_turning_points')}**. "
+            f"Notes: {suggestion.get('notes', '')}"
+        )
 
     workers = st.slider(
         "Workers",

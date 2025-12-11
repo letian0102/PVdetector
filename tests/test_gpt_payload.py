@@ -13,6 +13,7 @@ from peak_valley.gpt_adapter import (
     SUMMARY_BINS,
     BASELINE_BINS,
     _build_feature_payload,
+    ask_gpt_parameter_plan,
     ask_gpt_peak_count,
 )
 
@@ -208,3 +209,80 @@ def test_peak_caps_allow_three_with_clear_triplet():
     consensus = heuristics.get("multiscale_consensus")
     assert isinstance(consensus, dict)
     assert consensus.get("recommended") == 3
+
+
+def test_parameter_plan_clamps_and_fills_defaults():
+    counts = _dummy_counts()
+    features = _build_feature_payload(counts)
+
+    captured_payload = None
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            nonlocal captured_payload
+            user = next(msg for msg in kwargs["messages"] if msg["role"] == "user")
+            captured_payload = json.loads(user["content"])
+            response = {
+                "bandwidth": 2.0,  # beyond cap
+                "min_separation": -1,
+                "prominence": 0.9,
+                "peak_cap": 9,
+                "apply_turning_points": "yes",
+                "notes": "stress test",
+            }
+            message = SimpleNamespace(content=json.dumps(response))
+            choice = SimpleNamespace(message=message)
+            return SimpleNamespace(choices=[choice])
+
+    defaults = {
+        "bandwidth": "scott",
+        "min_separation": 0.5,
+        "prominence": 0.05,
+        "peak_cap": 4,
+        "apply_turning_points": False,
+    }
+
+    client = DummyClient()
+    plan = ask_gpt_parameter_plan(
+        client,
+        model_name="dummy",
+        counts_full=counts,
+        max_peaks=6,
+        defaults=defaults,
+        features=features,
+    )
+
+    assert plan["bandwidth"] == 1.5
+    assert plan["min_separation"] == 0.0
+    assert plan["prominence"] == 0.3
+    assert plan["peak_cap"] == 6
+    assert plan["apply_turning_points"] is True
+    assert plan["notes"] == "stress test"
+    assert captured_payload is not None
+
+
+def test_parameter_plan_returns_defaults_without_client():
+    defaults = {
+        "bandwidth": "roughness",
+        "min_separation": 0.75,
+        "prominence": 0.07,
+        "peak_cap": 5,
+        "apply_turning_points": True,
+    }
+
+    plan = ask_gpt_parameter_plan(
+        client=None,  # type: ignore[arg-type]
+        model_name="none",
+        counts_full=_dummy_counts(),
+        max_peaks=5,
+        defaults=defaults,
+    )
+
+    assert plan["bandwidth"] == "roughness"
+    assert plan["min_separation"] == 0.75
+    assert plan["prominence"] == 0.07
+    assert plan["peak_cap"] == 5
+    assert plan["apply_turning_points"] is True

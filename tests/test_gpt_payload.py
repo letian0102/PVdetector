@@ -227,7 +227,7 @@ def test_parameter_plan_clamps_and_fills_defaults():
             captured_payload = json.loads(user["content"])
             response = {
                 "bandwidth": 2.0,  # beyond cap
-                "min_separation": -1,
+                "min_separation": 5.0,  # beyond dynamic clamp
                 "prominence": 0.9,
                 "peak_cap": 9,
                 "apply_turning_points": "yes",
@@ -256,7 +256,7 @@ def test_parameter_plan_clamps_and_fills_defaults():
     )
 
     assert plan["bandwidth"] == 1.5
-    assert plan["min_separation"] == 0.0
+    assert plan["min_separation"] == 2.5
     assert plan["prominence"] == 0.3
     assert plan["peak_cap"] == 6
     assert plan["apply_turning_points"] is True

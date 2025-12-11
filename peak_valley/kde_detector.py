@@ -68,6 +68,38 @@ def _merge_close_peaks(
     return np.asarray(keep, dtype=int)
 
 
+def _stable_sample(x: np.ndarray) -> tuple[np.ndarray, float]:
+    """Return a jittered copy of ``x`` with a finite standard deviation.
+
+    Gaussian KDE fails – or becomes extremely slow – when all observations are
+    identical.  For single-valued inputs we inject a tiny, deterministic jitter
+    so that downstream bandwidth calculations remain positive and the FFT
+    shortcut in :func:`_evaluate_kde` is available.  The helper mirrors the
+    stability safeguards used by the roughness bandwidth search.
+    """
+
+    vals = np.asarray(x, float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return vals, 0.0
+
+    sample_std = float(np.std(vals, ddof=1)) if vals.size > 1 else 0.0
+    if np.isfinite(sample_std) and sample_std > 0:
+        return vals, sample_std
+
+    if np.allclose(vals, vals[0]):
+        base = float(vals[0])
+        span = max(1e-6, 0.001 * max(abs(base), 1.0))
+        offsets = np.linspace(-0.5, 0.5, num=max(2, min(vals.size, 256)))
+        vals = base + offsets * span
+
+    sample_std = float(np.std(vals, ddof=1)) if vals.size > 1 else 0.0
+    if not np.isfinite(sample_std):
+        sample_std = 0.0
+
+    return vals, sample_std
+
+
 def _peak_height(xs: np.ndarray, ys: np.ndarray, peak_x: float) -> float:
     """Return KDE height at the closest grid point to ``peak_x``."""
 
@@ -196,6 +228,14 @@ def _resolve_peak_valley_conflicts(
                 vals.append(_pair_valley(l_idx, r_idx, False))
             return vals
         return [_single_peak_valley(current[0])]
+
+    if len(peaks_idx) == 1 and min_gap is not None:
+        peak_idx = peaks_idx[0]
+        valley = _single_peak_valley(peak_idx)
+        base = float(xs[peak_idx])
+        if abs(valley - base) < min_gap:
+            valley = base + min_gap
+        return peaks_idx, [float(valley)]
 
     valleys = _recompute_valleys(peaks_idx)
 
@@ -333,7 +373,12 @@ def _evaluate_kde(
     sample_std = float(np.std(x, ddof=1)) if n > 1 else 0.0
     bandwidth = kde.factor * sample_std
 
-    if brute_cost <= 5_000_000 or bandwidth <= 0:
+    if bandwidth <= 0:
+        grid_dx = float(xs[1] - xs[0]) if xs.size > 1 else 0.0
+        # Keep a minimum smoothing width so that FFT evaluation stays stable
+        bandwidth = max(grid_dx, 1e-6 * max(1.0, abs(float(np.mean(x)))))
+
+    if brute_cost <= 5_000_000:
         return kde(xs)
 
     return _fft_gaussian_kde(x, xs, bandwidth)
@@ -601,7 +646,7 @@ def kde_peaks_valleys(
     first_valley   : str = "slope",
 ) -> tuple[list[float], list[float], np.ndarray, np.ndarray, float | None]:
     x = np.asarray(data, float)
-    x = x[np.isfinite(x)]
+    x, sample_std = _stable_sample(x)
     if x.size == 0:
         return [], [], np.array([]), np.array([]), None
 
@@ -612,7 +657,7 @@ def kde_peaks_valleys(
     if x.size > 10_000:
         x = np.random.choice(x, 10_000, replace=False)
 
-    sample_std = float(np.std(x, ddof=1))
+    sample_std = float(np.std(x, ddof=1)) if x.size > 1 else 0.0
     if not np.isfinite(sample_std):
         sample_std = 0.0
 
@@ -639,7 +684,7 @@ def kde_peaks_valleys(
 
     try:
         kde = gaussian_kde(x, bw_method=bw_use)
-    except ValueError:
+    except (ValueError, np.linalg.LinAlgError):
         warnings.warn(
             "Invalid KDE bandwidth provided; falling back to 'scott'",
             RuntimeWarning,

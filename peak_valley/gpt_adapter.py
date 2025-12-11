@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import numbers
 import re
 import textwrap
 from collections import deque
@@ -1568,6 +1569,100 @@ def _default_priors(marker_name: Optional[str]) -> dict[str, Any]:
     return priors
 
 
+def _min_separation_window(
+    values: np.ndarray,
+    feature_payload: Optional[dict[str, Any]],
+    base_default: float,
+    *,
+    max_peaks: int,
+) -> tuple[float, float, float]:
+    """Derive a data-driven floor/ceiling for min separation suggestions.
+
+    We avoid fixed bounds by leaning on the observed histogram resolution and
+    the spacing between candidate peaks in the feature payload. The resulting
+    window keeps GPT suggestions near the smallest separations the data appear
+    to support instead of allowing arbitrarily large values.
+    """
+
+    feature_payload = feature_payload or {}
+    values = _prepare_values(values)
+    finite_values = values[np.isfinite(values)]
+    if not finite_values.size:
+        return base_default, base_default, base_default
+
+    lower_bound = np.finfo(float).eps
+
+    hist_section = feature_payload.get("histogram") or {}
+    bin_width = hist_section.get("bin_width")
+    if isinstance(bin_width, numbers.Real) and not isinstance(bin_width, bool):
+        if math.isfinite(bin_width) and bin_width > 0:
+            lower_bound = max(lower_bound, float(bin_width))
+
+    if lower_bound == np.finfo(float).eps:
+        lo, hi = _robust_limits(finite_values)
+        bins, _ = _adaptive_bin_count(finite_values, lo, hi)
+        if bins > 0 and hi > lo:
+            lower_bound = max(lower_bound, (hi - lo) / bins)
+
+    peaks: list[float] = []
+    candidates = feature_payload.get("candidates") or {}
+    for peak in candidates.get("peaks") or []:
+        x = peak.get("x")
+        if isinstance(x, numbers.Real) and not isinstance(x, bool):
+            x = float(x)
+            if math.isfinite(x):
+                peaks.append(x)
+
+    adjacent_gaps: list[float] = []
+    if len(peaks) >= 2:
+        ordered = sorted(peaks)
+        adjacent_gaps = [r - l for l, r in zip(ordered, ordered[1:]) if r > l]
+
+    gap_candidates: list[float] = [g for g in adjacent_gaps if g > 0]
+
+    vote_summary = feature_payload.get("vote_summary") or {}
+    consensus = vote_summary.get("consensus") if isinstance(vote_summary, dict) else None
+    recommended_peaks = None
+    if isinstance(consensus, dict):
+        recommended_peaks = consensus.get("recommended") or consensus.get("majority")
+    if recommended_peaks is None and peaks:
+        recommended_peaks = len(peaks)
+    if recommended_peaks is None:
+        recommended_peaks = max_peaks if max_peaks > 0 else None
+
+    span = np.percentile(finite_values, 95) - np.percentile(finite_values, 5)
+    if math.isfinite(span) and span > 0:
+        if recommended_peaks:
+            span_per_peak = span / float(max(recommended_peaks, 1))
+            if span_per_peak > 0:
+                gap_candidates.append(span_per_peak)
+        else:
+            gap_candidates.append(span)
+
+    positive_candidates = [g for g in gap_candidates if math.isfinite(g) and g > 0]
+    if positive_candidates:
+        ceiling = float(min(positive_candidates))
+    else:
+        ceiling = base_default
+
+    if ceiling < lower_bound:
+        ceiling = lower_bound
+
+    default_guess = None
+    if adjacent_gaps:
+        try:
+            default_guess = float(np.percentile(adjacent_gaps, 25))
+        except Exception:
+            default_guess = None
+
+    if default_guess is None:
+        default_guess = base_default if base_default > 0 else ceiling
+
+    default_guess = float(np.clip(default_guess, lower_bound, ceiling))
+
+    return lower_bound, float(ceiling), default_guess
+
+
 def _build_feature_payload(
     counts_full: Optional[np.ndarray],
 ) -> dict[str, Any]:
@@ -2074,28 +2169,21 @@ def ask_gpt_parameter_plan(
     if not finite_values.size:
         return base_defaults
 
-    # Keep the GPT range realistic: roughly one-fifth the robust span, capped at
-    # 0.85 and no lower than the current default. This prevents overly large
-    # min separation suggestions on compact marker distributions and nudges the
-    # model toward values that separate neighbouring peaks instead of merging
-    # them away.
-    span = np.percentile(finite_values, 95) - np.percentile(finite_values, 5)
-    span = span if np.isfinite(span) and span > 0 else np.ptp(finite_values)
-    max_min_separation = max(
+    feature_payload = _build_feature_payload(values) if features is None else dict(features)
+
+    min_floor, max_min_separation, inferred_default = _min_separation_window(
+        values,
+        feature_payload,
         base_defaults["min_separation"],
-        min(0.85, float(span) * 0.20 if np.isfinite(span) else 0.0),
+        max_peaks=max_peaks,
     )
+    base_defaults["min_separation"] = inferred_default
 
     sig = shape_signature(values)
     key = ("plan", sig, int(max_peaks))
     cached = _cache.get(key)
     if isinstance(cached, dict):
         return dict(cached)
-
-    if features is None:
-        feature_payload = _build_feature_payload(values)
-    else:
-        feature_payload = dict(features)
 
     prompt = textwrap.dedent(
         """
@@ -2105,8 +2193,8 @@ def ask_gpt_parameter_plan(
           factor between 0.10 and 1.50.
         - min_separation: minimum spacing between *adjacent* peaks so we can
           tell the 2nd/3rd peaks apart. Choose a value that keeps neighbours
-          separate without erasing them (0.05 to {max_min_separation:.2f},
-          default {base_defaults["min_separation"]}).
+          separate without erasing them ({min_floor:.3g} to {max_min_separation:.3g},
+          default {base_defaults["min_separation"]:.3g}).
         - prominence: valley drop threshold between 0.01 and 0.30.
         - peak_cap: limit on peaks to search for (1..{max_peaks}).
         - apply_turning_points: whether to treat concave-down turning points as peaks.
@@ -2144,7 +2232,7 @@ def ask_gpt_parameter_plan(
             _sanitize_plan_field(
                 data.get("min_separation"), fallback=base_defaults["min_separation"]
             ),
-            0.05,
+            min_floor,
             max_min_separation,
         )
     )

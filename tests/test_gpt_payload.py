@@ -13,6 +13,7 @@ from peak_valley.gpt_adapter import (
     SUMMARY_BINS,
     BASELINE_BINS,
     _build_feature_payload,
+    _min_separation_window,
     ask_gpt_parameter_plan,
     ask_gpt_peak_count,
 )
@@ -255,8 +256,15 @@ def test_parameter_plan_clamps_and_fills_defaults():
         features=features,
     )
 
+    min_floor, max_min_sep, inferred_default = _min_separation_window(
+        counts, features, defaults["min_separation"], max_peaks=6
+    )
+
     assert plan["bandwidth"] == 1.5
-    assert plan["min_separation"] == 0.85
+    assert plan["min_separation"] == max_min_sep
+    assert plan["min_separation"] <= defaults["min_separation"]
+    assert min_floor <= plan["min_separation"] <= max_min_sep
+    assert inferred_default <= max_min_sep
     assert plan["prominence"] == 0.3
     assert plan["peak_cap"] == 6
     assert plan["apply_turning_points"] is True

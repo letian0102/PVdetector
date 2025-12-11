@@ -4294,6 +4294,18 @@ with st.sidebar:
         if bw_label not in bw_choices:
             bw_choices.append(bw_label)
 
+    rough_defaults = {
+        "target": float(st.session_state.get("roughness_target", 7.0)),
+        "lower": float(st.session_state.get("roughness_lower", 0.01)),
+        "upper": float(st.session_state.get("roughness_upper", 0.25)),
+        "tol_bw": float(st.session_state.get("roughness_tol", 1e-4)),
+        "max_iter": int(st.session_state.get("roughness_max_iter", 50)),
+        "min_y_frac_peak": float(st.session_state.get("roughness_min_peak", 0.001)),
+        "valley_prom_frac": float(st.session_state.get("roughness_valley_prom", 0.001)),
+        "grid_size": int(st.session_state.get("roughness_grid", 512)),
+    }
+    roughness_config = dict(rough_defaults)
+
     bw_mode = st.selectbox(
         "Bandwidth mode",
         ["Manual", "Roughness heuristic", "GPT automatic"],
@@ -4310,6 +4322,100 @@ with st.sidebar:
         bw_val = (float(bw_opt)
                   if bw_opt.replace(".", "", 1).isdigit() else bw_opt)
     elif bw_mode == "Roughness heuristic":
+        with st.expander("Roughness bandwidth parameters", expanded=False):
+            col_r1, col_r2 = st.columns(2)
+            target = col_r1.number_input(
+                "Roughness target",
+                min_value=0.0,
+                max_value=50.0,
+                value=float(rough_defaults["target"]),
+                step=0.1,
+                help="Maximum KDE roughness (second derivative) allowed before stopping the search.",
+            )
+            lower = col_r2.number_input(
+                "Lower bound",
+                min_value=0.0,
+                max_value=5.0,
+                value=float(rough_defaults["lower"]),
+                step=0.01,
+                help="Smallest bandwidth to try while searching for a smooth density curve.",
+            )
+
+            col_r3, col_r4 = st.columns(2)
+            upper = col_r3.number_input(
+                "Upper bound",
+                min_value=float(lower),
+                max_value=5.0,
+                value=float(max(rough_defaults["upper"], lower)),
+                step=0.01,
+                help="Largest bandwidth to try while searching for a smooth density curve.",
+            )
+            tol_bw = col_r4.number_input(
+                "Search tolerance",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(rough_defaults["tol_bw"]),
+                step=1e-4,
+                format="%.4f",
+                help="Stop the binary search once the bandwidth bracket is narrower than this.",
+            )
+
+            col_r5, col_r6 = st.columns(2)
+            max_iter = col_r5.number_input(
+                "Max iterations",
+                min_value=1,
+                max_value=500,
+                value=int(rough_defaults["max_iter"]),
+                help="Safety cap on how many binary-search steps to take.",
+            )
+            min_peak = col_r6.number_input(
+                "Early-peak floor",
+                min_value=0.0,
+                max_value=0.5,
+                value=float(rough_defaults["min_y_frac_peak"]),
+                step=0.0005,
+                format="%.4f",
+                help="Relative height cutoff for peaks near the origin when screening double peaks.",
+            )
+
+            col_r7, col_r8 = st.columns(2)
+            valley_prom = col_r7.number_input(
+                "Valley prominence",
+                min_value=0.0,
+                max_value=0.5,
+                value=float(rough_defaults["valley_prom_frac"]),
+                step=0.0005,
+                format="%.4f",
+                help="Minimum valley depth (fraction of max height) to treat two modes as a double peak.",
+            )
+            rough_grid = col_r8.number_input(
+                "Roughness grid size",
+                min_value=64,
+                max_value=8192,
+                value=int(rough_defaults["grid_size"]),
+                step=64,
+                help="Number of grid points used when evaluating KDE roughness.",
+            )
+
+        st.session_state["roughness_target"] = float(target)
+        st.session_state["roughness_lower"] = float(lower)
+        st.session_state["roughness_upper"] = float(upper)
+        st.session_state["roughness_tol"] = float(tol_bw)
+        st.session_state["roughness_max_iter"] = int(max_iter)
+        st.session_state["roughness_min_peak"] = float(min_peak)
+        st.session_state["roughness_valley_prom"] = float(valley_prom)
+        st.session_state["roughness_grid"] = int(rough_grid)
+
+        roughness_config = {
+            "target": float(target),
+            "lower": float(lower),
+            "upper": float(upper),
+            "tol_bw": float(tol_bw),
+            "max_iter": int(max_iter),
+            "min_y_frac_peak": float(min_peak),
+            "valley_prom_frac": float(valley_prom),
+            "grid_size": int(rough_grid),
+        }
         bw_val = "roughness"
     else:
         bw_val = None  # GPT later
@@ -4367,6 +4473,7 @@ with st.sidebar:
         "max_grid": grid_sz,
         "valley_drop": val_drop,
         "first_valley": val_mode,
+        "roughness": roughness_config,
     }
 
     st.checkbox(
@@ -4822,6 +4929,14 @@ def _start_batch_run(
         grid_size=int(grid_sz),
         valley_drop=float(val_drop),
         first_valley="drop" if val_mode == "Valley drop" else "slope",
+        roughness_target=float(roughness_config["target"]),
+        roughness_lower=float(roughness_config["lower"]),
+        roughness_upper=float(roughness_config["upper"]),
+        roughness_tol=float(roughness_config["tol_bw"]),
+        roughness_max_iter=int(roughness_config["max_iter"]),
+        roughness_min_peak=float(roughness_config["min_y_frac_peak"]),
+        roughness_valley_prom=float(roughness_config["valley_prom_frac"]),
+        roughness_grid=int(roughness_config["grid_size"]),
         apply_consistency=bool(st.session_state.get("apply_consistency", False)),
         consistency_tol=float(st.session_state.get("consistency_tol", 0.5)),
         align=False,

@@ -82,6 +82,14 @@ Key flags:
 | `--n-peaks` | Optional | Auto | `--n-peaks 2` | Fixed peak count or `auto`/`gpt` for automatic selection. |
 | `--max-peaks` | Optional | `2` | `--max-peaks 4` | Upper bound on peaks considered during automatic runs. |
 | `--bandwidth` | Optional | `scott` | `--bandwidth 0.6` | KDE bandwidth value, preset (`scott`, `silverman`), `roughness`, or `auto`/`gpt`. |
+| `--roughness-target` | Optional | `7.0` | `--roughness-target 5` | Maximum KDE roughness score allowed when searching for a bandwidth. |
+| `--roughness-lower` | Optional | `0.01` | `--roughness-lower 0.02` | Lower bound of the roughness bandwidth search interval. |
+| `--roughness-upper` | Optional | `0.25` | `--roughness-upper 0.5` | Upper bound of the roughness bandwidth search interval. |
+| `--roughness-tol` | Optional | `0.0001` | `--roughness-tol 0.001` | Bandwidth search stops once the bracket is within this tolerance. |
+| `--roughness-max-iter` | Optional | `50` | `--roughness-max-iter 80` | Maximum binary-search iterations for the roughness bandwidth finder. |
+| `--roughness-min-peak` | Optional | `0.001` | `--roughness-min-peak 0.01` | Relative height threshold for early peaks when screening double peaks. |
+| `--roughness-valley-prom` | Optional | `0.001` | `--roughness-valley-prom 0.01` | Minimum valley depth (fraction of max height) used to flag double peaks. |
+| `--roughness-grid` | Optional | `512` | `--roughness-grid 1024` | Grid size for KDE evaluation during the roughness bandwidth search. |
 | `--prominence` | Optional | `0.05` | `--prominence 0.08` | Minimum prominence (`auto`/`gpt` allowed). |
 | `--min-width` | Optional | `0` | `--min-width 30` | Minimum sample count per detected peak. |
 | `--curvature` | Optional | `0.0001` | `--curvature 0.0005` | Curvature threshold for peak detection. |

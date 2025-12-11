@@ -106,6 +106,16 @@ class BatchOptions:
     valley_drop: float = 10.0  # percent of peak height
     first_valley: str = "slope"  # or "drop"
 
+    # roughness bandwidth configuration
+    roughness_target: float = 7.0
+    roughness_lower: float = 0.01
+    roughness_upper: float = 0.25
+    roughness_tol: float = 1e-4
+    roughness_max_iter: int = 50
+    roughness_min_peak: float = 0.001
+    roughness_valley_prom: float = 0.001
+    roughness_grid: int = 512
+
     apply_consistency: bool = False
     consistency_tol: float = 0.5
 
@@ -251,6 +261,59 @@ def _merge_overrides(
     return merged
 
 
+def _roughness_params(
+    options: BatchOptions, overrides: Mapping[str, Any]
+) -> dict[str, float | int]:
+    base = {
+        "target": float(options.roughness_target),
+        "lower": float(options.roughness_lower),
+        "upper": float(options.roughness_upper),
+        "tol_bw": float(options.roughness_tol),
+        "max_iter": int(options.roughness_max_iter),
+        "min_y_frac_peak": float(options.roughness_min_peak),
+        "valley_prom_frac": float(options.roughness_valley_prom),
+        "grid_size": int(options.roughness_grid),
+    }
+
+    rough_over = overrides.get("roughness")
+    rough_map = rough_over if isinstance(rough_over, Mapping) else overrides
+
+    if isinstance(rough_map, Mapping):
+        tgt = _coerce_float(rough_map.get("target"))
+        if tgt is not None:
+            base["target"] = max(0.0, float(tgt))
+
+        lower = _coerce_float(rough_map.get("lower"))
+        if lower is not None:
+            base["lower"] = max(0.0, float(lower))
+
+        upper = _coerce_float(rough_map.get("upper"))
+        if upper is not None:
+            base["upper"] = max(base["lower"], float(upper))
+
+        tol = _coerce_float(rough_map.get("tol")) or _coerce_float(rough_map.get("tol_bw"))
+        if tol is not None:
+            base["tol_bw"] = max(0.0, float(tol))
+
+        max_iter = _coerce_int(rough_map.get("max_iter"))
+        if max_iter is not None:
+            base["max_iter"] = max(1, int(max_iter))
+
+        min_peak = _coerce_float(rough_map.get("min_y_frac_peak"))
+        if min_peak is not None:
+            base["min_y_frac_peak"] = max(0.0, float(min_peak))
+
+        valley_prom = _coerce_float(rough_map.get("valley_prom_frac"))
+        if valley_prom is not None:
+            base["valley_prom_frac"] = max(0.0, float(valley_prom))
+
+        grid = _coerce_int(rough_map.get("grid_size"))
+        if grid is not None:
+            base["grid_size"] = max(64, int(grid))
+
+    return base
+
+
 def _resolve_parameters(
     options: BatchOptions,
     overrides: Mapping[str, Any],
@@ -332,6 +395,7 @@ def _resolve_parameters(
     )
     params["bandwidth"] = bw_value
     params["bandwidth_auto"] = bw_auto
+    params["roughness_params"] = _roughness_params(options, overrides)
 
     # --- n_peaks ----------------------------------------------------------
     n_override = overrides.get("n_peaks")
@@ -382,7 +446,9 @@ def _resolve_parameters(
         bw_label = params["bandwidth_effective"].strip().lower()
         if bw_label == "roughness":
             try:
-                params["bandwidth_effective"] = find_bw_for_roughness(counts)
+                params["bandwidth_effective"] = find_bw_for_roughness(
+                    counts, **params.get("roughness_params", {})
+                )
                 debug["bandwidth_method"] = "roughness"
             except Exception as exc:
                 debug["roughness_error"] = str(exc)
@@ -526,6 +592,7 @@ def process_sample(
         curvature_thresh=curvature,
         turning_peak=params["turning_points"],
         first_valley=params["first_valley"],
+        roughness_params=params.get("roughness_params"),
     )
 
     valleys = _postprocess_valleys(peaks, valleys, xs, ys, drop_frac)
@@ -546,6 +613,11 @@ def process_sample(
         "valley_drop": params["valley_drop"],
         "first_valley": params["first_valley"],
     }
+    if params.get("roughness_params") and (
+        params.get("bandwidth") == "roughness"
+        or params.get("bandwidth_effective") == "roughness"
+    ):
+        details["roughness_params"] = params["roughness_params"]
     if debug:
         details["debug"] = debug
 

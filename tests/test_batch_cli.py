@@ -429,6 +429,7 @@ def test_alignment_normalizes_landmarks(monkeypatch):
         curvature_thresh,
         turning_peak,
         first_valley,
+        roughness_params=None,
     ):
         xs = np.linspace(-4.0, 4.0, 81)
         gauss_left = np.exp(-0.5 * ((xs + 3.0) / 0.4) ** 2)

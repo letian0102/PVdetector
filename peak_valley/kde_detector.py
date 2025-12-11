@@ -111,6 +111,150 @@ def _peak_height(xs: np.ndarray, ys: np.ndarray, peak_x: float) -> float:
     return float(ys[idx])
 
 
+def _recover_left_peak(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    primary_idx: int,
+    *,
+    min_x_sep: float | None,
+    prominence: float,
+) -> int | None:
+    """Recover a subtle negative peak left of the dominant mode.
+
+    When most samples exhibit two peaks we still occasionally detect only the
+    dominant (often positive) one.  This helper performs a second, more
+    forgiving scan to the **left** of the dominant mode using a softer
+    prominence threshold.  If a meaningful peak is found, its index is
+    returned for inclusion in the final peak list.
+    """
+
+    if primary_idx <= 1:
+        return None
+
+    grid_dx = float(xs[1] - xs[0]) if xs.size > 1 else 0.0
+    if not np.isfinite(grid_dx) or grid_dx <= 0:
+        return None
+
+    distance = None
+    if min_x_sep is not None:
+        distance = max(1, int(math.ceil(min_x_sep / grid_dx)))
+
+    search_ys = ys[:primary_idx]
+    if search_ys.size < 3:
+        return None
+
+    dominant_height = float(ys[primary_idx])
+    relaxed_prom = max(0.1 * dominant_height, prominence * 0.2)
+
+    baseline = float(np.percentile(search_ys, 60))
+    jitter = float(np.percentile(np.abs(search_ys - baseline), 80))
+    jitter = jitter if np.isfinite(jitter) else 0.0
+    noise_floor = baseline + 0.25 * jitter
+
+    def _passes(idx: int, *, rel_floor: float = 0.15, drop_floor: float = 0.03) -> bool:
+        if idx <= 0 or idx >= search_ys.size - 1:
+            return False
+
+        if min_x_sep is not None:
+            if xs[primary_idx] - xs[idx] < 0.5 * float(min_x_sep):
+                return False
+
+        height = float(search_ys[idx])
+        if height < noise_floor:
+            return False
+
+        rel_height = height / dominant_height if dominant_height > 0 else 0.0
+        if rel_height < rel_floor:
+            return False
+
+        # Require a modest dip between the candidate and the dominant peak so we
+        # do not accept a shallow shoulder as a distinct mode.
+        if primary_idx > idx + 1:
+            valley_span = search_ys[idx:primary_idx]
+            post_min = float(np.min(valley_span))
+            if height - post_min < drop_floor * dominant_height:
+                return False
+
+        return True
+
+    cand_idx, _ = find_peaks(search_ys, prominence=relaxed_prom, distance=distance)
+    if cand_idx.size:
+        strongest = int(cand_idx[np.argmax(search_ys[cand_idx])])
+        if _passes(strongest):
+            return strongest
+
+    # Fallback: if standard detection fails, look for the last up→down turn to
+    # the left of the dominant mode.  This catches subtle left modes that do
+    # not clear the relaxed prominence threshold but still form a distinct bump.
+    dy = np.gradient(search_ys)
+    turning = np.where((dy[:-1] > 0) & (dy[1:] <= 0))[0] + 1
+    if turning.size == 0:
+        return None
+
+    ordered = sorted(turning, key=lambda idx: search_ys[idx], reverse=True)
+    for idx in ordered:
+        if _passes(idx, rel_floor=0.12, drop_floor=0.025):
+            return int(idx)
+
+    # Last resort: accept the tallest left-hand bump that clears the noise
+    # floor, even if it barely separates from the dominant shoulder.
+    tallest_left = int(np.argmax(search_ys))
+    if _passes(tallest_left, rel_floor=0.1, drop_floor=0.02):
+        return tallest_left
+
+    # As a final heuristic, de-trend the left segment to expose shallow elbows
+    # that are concealed by a long monotonic rise toward the dominant peak. A
+    # peak in the residual profile indicates the rise slowed briefly, often
+    # corresponding to a faint negative mode.
+    ramp = np.linspace(search_ys[0], search_ys[-1], search_ys.size)
+    residual = search_ys - ramp
+    residual -= float(np.percentile(residual, 25))
+    elbow_idx = int(np.argmax(residual))
+    elbow_strength = float(residual[elbow_idx]) if residual.size else -math.inf
+    elbow_floor = max(0.45 * jitter, 0.017 * dominant_height)
+    if elbow_strength > elbow_floor and elbow_idx < search_ys.size - 1:
+        if _passes(elbow_idx, rel_floor=0.095, drop_floor=0.018):
+            return elbow_idx
+
+    total_mass = float(np.trapz(ys, xs)) if xs.size and ys.size else 0.0
+    left_mass = float(np.trapz(search_ys, xs[:primary_idx])) if total_mass else 0.0
+    if total_mass > 0 and left_mass / total_mass >= 0.06:
+        # On profiles with substantial left-hand probability mass, run a
+        # coarse smoothing pass to expose broad bumps that fine-scale
+        # prominence checks miss.  This guards against monotonic rises that
+        # conceal a shallow negative peak within long-tailed noise.
+        window = int(round(0.08 * search_ys.size))
+        window = max(3, min(window, search_ys.size if search_ys.size > 1 else 1))
+        if window % 2 == 0:
+            window = min(window + 1, search_ys.size)
+        smooth = np.convolve(search_ys, np.ones(window) / float(window), mode="same")
+        smoothed_prom = max(0.08 * dominant_height, prominence * 0.1, 0.5 * noise_floor)
+        cand_idx, _ = find_peaks(smooth, prominence=smoothed_prom, distance=distance)
+        if cand_idx.size:
+            strongest = int(cand_idx[np.argmax(smooth[cand_idx])])
+            if _passes(strongest, rel_floor=0.09, drop_floor=0.017):
+                return strongest
+
+        smooth_idx = int(np.argmax(smooth)) if smooth.size else tallest_left
+        if _passes(smooth_idx, rel_floor=0.085, drop_floor=0.015):
+            return smooth_idx
+
+        # When the coarse smoothing hides a faint elbow, re-run a sharper pass
+        # with a tiny window to expose local curvature changes before the
+        # dominant peak.  A second-derivative bump highlights the last concave
+        # region on the left shoulder, which often corresponds to the missing
+        # negative peak in "positive-only" detections.
+        tight_win = max(3, min(int(round(0.025 * search_ys.size)) | 1, search_ys.size))
+        if tight_win < search_ys.size:
+            tight = np.convolve(search_ys, np.ones(tight_win) / float(tight_win), mode="same")
+            curv = np.gradient(np.gradient(tight))
+            curv_idx = int(np.argmax(curv)) if curv.size else smooth_idx
+            if _passes(curv_idx, rel_floor=0.08, drop_floor=0.014):
+                return curv_idx
+
+    return None
+
+
 def _enforce_min_separation(
     peaks_x: list[float],
     xs: np.ndarray,
@@ -644,11 +788,16 @@ def kde_peaks_valleys(
     curvature_thresh: float | None = None,
     turning_peak   : bool = False,
     first_valley   : str = "slope",
+    diagnostics    : dict[str, object] | None = None,
 ) -> tuple[list[float], list[float], np.ndarray, np.ndarray, float | None]:
     x = np.asarray(data, float)
     x, sample_std = _stable_sample(x)
     if x.size == 0:
         return [], [], np.array([]), np.array([]), None
+
+    diag: dict[str, object] | None = diagnostics if diagnostics is not None else None
+    if diag is not None:
+        diag.clear()
 
     data_min = float(x.min())
     data_max = float(x.max())
@@ -700,6 +849,8 @@ def kde_peaks_valleys(
     pad = 0.02 * span_for_pad if span_for_pad > 0 else 0.05
 
     x_min = base_low - pad
+    if data_min >= 0 and x_min < 0:
+        x_min = 0.0
     x_max = data_max + pad
 
     if data_min >= 0.0 and x_min < 0.0:
@@ -828,6 +979,31 @@ def kde_peaks_valleys(
 
     # ---------- *re-derive* indices for every peak we now have ----------
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+
+    if diag is not None:
+        need_left = len(peaks_idx) == 1 and (n_peaks is None or n_peaks > 1)
+        diag["left_peak_needed"] = need_left
+        diag["left_peak_attempted"] = False
+        diag["left_peak_recovered"] = False
+
+    # ---------- attempt to recover a missing negative peak ---------------
+    if len(peaks_idx) == 1 and (n_peaks is None or n_peaks > 1):
+        if diag is not None:
+            diag["left_peak_attempted"] = True
+        recovered = _recover_left_peak(
+            xs,
+            ys,
+            peaks_idx[0],
+            min_x_sep=min_x_sep,
+            prominence=prominence,
+        )
+        if recovered is not None:
+            peaks_idx = sorted({*peaks_idx, int(recovered)})
+            if diag is not None:
+                diag["left_peak_recovered"] = True
+            peaks_x = [float(xs[idx]) for idx in peaks_idx]
+            peaks_x = _enforce_min_separation(peaks_x, xs, ys, min_x_sep)
+            peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
 
     # ---------- valleys ----------
     valleys_x: list[float] = []

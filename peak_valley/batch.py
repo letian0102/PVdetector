@@ -109,7 +109,7 @@ class BatchOptions:
     apply_consistency: bool = False
     consistency_tol: float = 0.5
 
-    sample_timeout: float = 10.0
+    sample_timeout: float = 0.0
 
     align: bool = False
     align_mode: str = "negPeak_valley_posPeak"
@@ -579,19 +579,27 @@ def run_batch(
         if timeout <= 0:
             return process_sample(sample, options, overrides, gpt_client)
 
+        try:
+            alarm_signal = signal.SIGALRM
+            set_timer = signal.setitimer
+        except AttributeError:
+            # Windows and some platforms do not expose SIGALRM/setitimer; fall back to
+            # processing without a timeout instead of raising an AttributeError.
+            return process_sample(sample, options, overrides, gpt_client)
+
         def _raise_timeout(signum, frame):  # pragma: no cover - invoked by signal
             raise TimeoutError(
                 f"Sample '{sample.stem}' exceeded the {timeout:.3f}-second processing timeout"
             )
 
-        previous_handler = signal.getsignal(signal.SIGALRM)
-        signal.signal(signal.SIGALRM, _raise_timeout)
-        signal.setitimer(signal.ITIMER_REAL, timeout)
+        previous_handler = signal.getsignal(alarm_signal)
+        signal.signal(alarm_signal, _raise_timeout)
+        set_timer(signal.ITIMER_REAL, timeout)
         try:
             return process_sample(sample, options, overrides, gpt_client)
         finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, previous_handler)
+            set_timer(signal.ITIMER_REAL, 0)
+            signal.signal(alarm_signal, previous_handler)
 
     worker_count = options.workers if options.sample_timeout <= 0 else 1
 

@@ -353,7 +353,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sample-timeout",
         type=float,
-        default=10.0,
+        default=0.0,
         help="Maximum seconds to spend processing a sample before skipping it (<=0 disables).",
     )
     parser.add_argument("--override-file", help="JSON file with per-sample or per-marker overrides.")

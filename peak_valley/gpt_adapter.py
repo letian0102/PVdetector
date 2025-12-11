@@ -6,7 +6,7 @@ import numbers
 import re
 import textwrap
 from collections import deque
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import numpy as np
 from openai import AuthenticationError, OpenAI
@@ -2240,6 +2240,31 @@ def _sanitize_plan_field(value: Any, *, fallback: Any) -> Any:
     return fallback
 
 
+def _fallback_plan_note(
+    plan: Mapping[str, Any],
+    *,
+    bw_floor: float,
+    bw_cap: float,
+    min_floor: float,
+    max_min_separation: float,
+) -> str:
+    """Generate a human-readable note when GPT omits an explanation."""
+
+    bandwidth = plan.get("bandwidth")
+    bandwidth_desc = f"bandwidth within [{bw_floor:.3g}, {bw_cap:.3g}] (picked {bandwidth})"
+
+    min_sep = plan.get("min_separation")
+    min_sep_desc = (
+        f"min separation in [{min_floor:.3g}, {max_min_separation:.3g}] (picked {min_sep})"
+    )
+
+    prominence_desc = f"prominence {plan.get('prominence')}"
+    cap_desc = f"peak cap {plan.get('peak_cap')}"
+    tp_desc = f"turning points {'on' if plan.get('apply_turning_points') else 'off'}"
+
+    return "; ".join([bandwidth_desc, min_sep_desc, prominence_desc, cap_desc, tp_desc])
+
+
 def ask_gpt_parameter_plan(
     client: OpenAI,
     model_name: str,
@@ -2266,7 +2291,8 @@ def ask_gpt_parameter_plan(
         "prominence": float(defaults.get("prominence", 0.05)),
         "peak_cap": int(defaults.get("peak_cap", max(1, max_peaks))),
         "apply_turning_points": bool(defaults.get("apply_turning_points", False)),
-        "notes": defaults.get("notes", ""),
+        "notes": defaults.get("notes")
+        or "Using data-driven defaults; GPT did not provide an explanation.",
     }
 
     if client is None:
@@ -2385,6 +2411,20 @@ def ask_gpt_parameter_plan(
         label = bw_val.strip().lower()
         if label not in {"scott", "silverman", "roughness"}:
             suggestion["bandwidth"] = base_defaults["bandwidth"]
+
+    if isinstance(suggestion["notes"], str):
+        suggestion["notes"] = suggestion["notes"].strip()
+    else:
+        suggestion["notes"] = ""
+
+    if not suggestion["notes"]:
+        suggestion["notes"] = _fallback_plan_note(
+            suggestion,
+            bw_floor=bw_floor,
+            bw_cap=bw_cap,
+            min_floor=min_floor,
+            max_min_separation=max_min_separation,
+        )
 
     _cache[key] = suggestion
     return suggestion

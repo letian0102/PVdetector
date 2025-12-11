@@ -278,6 +278,61 @@ def test_parameter_plan_clamps_and_fills_defaults():
     assert captured_payload is not None
 
 
+def test_parameter_plan_backfills_empty_notes():
+    counts = _dummy_counts()
+    features = _build_feature_payload(counts)
+
+    captured_payload = None
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            nonlocal captured_payload
+            user = next(msg for msg in kwargs["messages"] if msg["role"] == "user")
+            captured_payload = json.loads(user["content"])
+            response = {
+                "bandwidth": "scott",
+                "min_separation": 0.1,
+                "prominence": 0.05,
+                "peak_cap": 3,
+                "apply_turning_points": False,
+                "notes": " ",  # simulate empty explanation
+            }
+            message = SimpleNamespace(content=json.dumps(response))
+            choice = SimpleNamespace(message=message)
+            return SimpleNamespace(choices=[choice])
+
+    defaults = {
+        "bandwidth": "scott",
+        "min_separation": 0.25,
+        "prominence": 0.05,
+        "peak_cap": 3,
+        "apply_turning_points": False,
+    }
+
+    client = DummyClient()
+    plan = ask_gpt_parameter_plan(
+        client,
+        model_name="dummy",
+        counts_full=counts,
+        max_peaks=4,
+        defaults=defaults,
+        features=features,
+    )
+
+    bw_floor, bw_cap, _ = _bandwidth_window(counts, features, defaults["bandwidth"])
+    min_floor, max_min_sep, _ = _min_separation_window(
+        counts, features, defaults["min_separation"], max_peaks=4
+    )
+
+    assert captured_payload is not None
+    assert plan["notes"]
+    assert f"[{bw_floor:.3g}, {bw_cap:.3g}]" in plan["notes"]
+    assert f"[{min_floor:.3g}, {max_min_sep:.3g}]" in plan["notes"]
+
+
 def test_parameter_plan_returns_defaults_without_client():
     defaults = {
         "bandwidth": "roughness",

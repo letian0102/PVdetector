@@ -583,9 +583,19 @@ def run_batch(
             alarm_signal = signal.SIGALRM
             set_timer = signal.setitimer
         except AttributeError:
-            # Windows and some platforms do not expose SIGALRM/setitimer; fall back to
-            # processing without a timeout instead of raising an AttributeError.
-            return process_sample(sample, options, overrides, gpt_client)
+            # Windows and some platforms do not expose SIGALRM/setitimer; enforce the
+            # timeout with a short-lived worker thread instead so a pathological
+            # sample cannot block the batch indefinitely.
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(process_sample, sample, options, overrides, gpt_client)
+                try:
+                    return fut.result(timeout=timeout)
+                except FutureTimeout:
+                    raise TimeoutError(
+                        f"Sample '{sample.stem}' exceeded the {timeout:.3f}-second processing timeout"
+                    )
 
         def _raise_timeout(signum, frame):  # pragma: no cover - invoked by signal
             raise TimeoutError(

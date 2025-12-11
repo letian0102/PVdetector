@@ -256,7 +256,7 @@ def test_parameter_plan_clamps_and_fills_defaults():
     )
 
     assert plan["bandwidth"] == 1.5
-    assert plan["min_separation"] == 1.25
+    assert plan["min_separation"] == 0.85
     assert plan["prominence"] == 0.3
     assert plan["peak_cap"] == 6
     assert plan["apply_turning_points"] is True

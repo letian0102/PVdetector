@@ -2074,8 +2074,8 @@ def ask_gpt_parameter_plan(
     if not finite_values.size:
         return base_defaults
 
-    # Keep the GPT range realistic: roughly one-third the robust span, capped at
-    # 1.25 and no lower than the current default. This prevents overly large
+    # Keep the GPT range realistic: roughly one-fifth the robust span, capped at
+    # 0.85 and no lower than the current default. This prevents overly large
     # min separation suggestions on compact marker distributions and nudges the
     # model toward values that separate neighbouring peaks instead of merging
     # them away.
@@ -2083,7 +2083,7 @@ def ask_gpt_parameter_plan(
     span = span if np.isfinite(span) and span > 0 else np.ptp(finite_values)
     max_min_separation = max(
         base_defaults["min_separation"],
-        min(1.25, float(span) * 0.33 if np.isfinite(span) else 0.0),
+        min(0.85, float(span) * 0.20 if np.isfinite(span) else 0.0),
     )
 
     sig = shape_signature(values)

@@ -1620,6 +1620,20 @@ def _min_separation_window(
 
     gap_candidates: list[float] = [g for g in adjacent_gaps if g > 0]
 
+    if finite_values.size >= 5:
+        quantile_points = min(100, finite_values.size)
+        try:
+            quantiles = np.quantile(
+                finite_values, np.linspace(0, 1, num=quantile_points)
+            )
+            quantile_gaps = [r - l for l, r in zip(quantiles, quantiles[1:]) if r > l]
+            if quantile_gaps:
+                dense_gap = float(np.min(quantile_gaps))
+                if math.isfinite(dense_gap) and dense_gap > 0:
+                    gap_candidates.append(dense_gap)
+        except Exception:
+            pass
+
     vote_summary = feature_payload.get("vote_summary") or {}
     consensus = vote_summary.get("consensus") if isinstance(vote_summary, dict) else None
     recommended_peaks = None
@@ -1640,6 +1654,8 @@ def _min_separation_window(
             gap_candidates.append(span)
 
     positive_candidates = [g for g in gap_candidates if math.isfinite(g) and g > 0]
+    if math.isfinite(lower_bound) and lower_bound > 0:
+        positive_candidates.append(lower_bound)
     if positive_candidates:
         ceiling = float(min(positive_candidates))
     else:
@@ -1649,7 +1665,12 @@ def _min_separation_window(
         ceiling = lower_bound
 
     default_guess = None
-    if adjacent_gaps:
+    if positive_candidates:
+        try:
+            default_guess = float(np.median(positive_candidates))
+        except Exception:
+            default_guess = None
+    if default_guess is None and adjacent_gaps:
         try:
             default_guess = float(np.percentile(adjacent_gaps, 25))
         except Exception:

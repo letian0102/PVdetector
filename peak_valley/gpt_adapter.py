@@ -855,6 +855,68 @@ def _bandwidth_window(
     return floor, cap, default_scale
 
 
+def _aggregate_multi_marker_windows(
+    marker_entries: list[dict[str, Any]],
+    base_defaults: dict[str, Any],
+    max_peaks: int,
+) -> tuple[tuple[float, float, float] | None, tuple[float, float, float] | None]:
+    """Blend per-marker windows to keep GPT suggestions grounded to each marker.
+
+    When multiple markers are selected, concatenating them can inflate spans and
+    lead to overly large bandwidth or separation caps. Instead, derive windows
+    for each marker individually and collapse them with lower-leaning percentiles
+    so the combined guidance stays close to the densest markers.
+    """
+
+    bw_windows: list[tuple[float, float, float]] = []
+    min_windows: list[tuple[float, float, float]] = []
+
+    for entry in marker_entries:
+        raw_values = entry.get("values")
+        if raw_values is None:
+            continue
+
+        values = _prepare_values(np.asarray(raw_values, dtype=float))
+        if not values.size:
+            continue
+
+        features = entry.get("features") if isinstance(entry.get("features"), dict) else None
+        bw_windows.append(
+            _bandwidth_window(values, features or {}, base_defaults.get("bandwidth"))
+        )
+        min_windows.append(
+            _min_separation_window(
+                values,
+                features or {},
+                base_defaults.get("min_separation", 0.5),
+                max_peaks=max_peaks,
+            )
+        )
+
+    def _collapse(
+        windows: list[tuple[float, float, float]],
+        *,
+        cap_bias: float = 40.0,
+        default_bias: float = 50.0,
+    ) -> tuple[float, float, float] | None:
+        if not windows:
+            return None
+
+        floors, caps, defaults = (np.array(part, dtype=float) for part in zip(*windows))
+        floor = float(np.percentile(floors, 50))
+        cap = float(np.percentile(caps, cap_bias))
+        default = float(np.percentile(defaults, default_bias))
+
+        cap = float(max(cap, floor))
+        default = float(np.clip(default, floor, cap))
+        return floor, cap, default
+
+    aggregated_bw = _collapse(bw_windows, cap_bias=35.0, default_bias=50.0)
+    aggregated_min = _collapse(min_windows, cap_bias=35.0, default_bias=45.0)
+
+    return aggregated_bw, aggregated_min
+
+
 def _second_derivative_summary(smoothed: np.ndarray) -> dict[str, Any]:
     """Summarise curvature structure from a smoothed histogram."""
 
@@ -2308,15 +2370,40 @@ def ask_gpt_parameter_plan(
 
     feature_payload = _build_feature_payload(values) if features is None else dict(features)
 
+    aggregated_bw = aggregated_min = None
+    marker_entries = feature_payload.get("multi_marker_features")
+    if isinstance(marker_entries, list) and marker_entries:
+        sanitized_entries = []
+        for entry in marker_entries:
+            values = _prepare_values(np.asarray(entry.get("values", []), dtype=float))
+            if not values.size:
+                continue
+
+            clean_entry: dict[str, Any] = {"marker": entry.get("marker"), "values": values.tolist()}
+            feats = entry.get("features")
+            if isinstance(feats, dict):
+                clean_entry["features"] = feats
+            sanitized_entries.append(clean_entry)
+
+        if sanitized_entries:
+            feature_payload["multi_marker_features"] = sanitized_entries
+            aggregated_bw, aggregated_min = _aggregate_multi_marker_windows(
+                sanitized_entries, base_defaults, max_peaks
+            )
+
     bw_floor, bw_cap, bw_default = _bandwidth_window(
         values, feature_payload, base_defaults["bandwidth"]
     )
+    if aggregated_bw is not None:
+        bw_floor, bw_cap, bw_default = aggregated_bw
     min_floor, max_min_separation, inferred_default = _min_separation_window(
         values,
         feature_payload,
         base_defaults["min_separation"],
         max_peaks=max_peaks,
     )
+    if aggregated_min is not None:
+        min_floor, max_min_separation, inferred_default = aggregated_min
     bandwidth_default = (
         bw_default
         if isinstance(bw_default, (int, float))

@@ -41,7 +41,7 @@ from peak_valley.cli_import import (
 )
 from peak_valley.gpt_adapter import (
     ask_gpt_peak_count, ask_gpt_prominence, ask_gpt_bandwidth,
-    ask_gpt_parameter_plan,
+    ask_gpt_parameter_plan, _build_feature_payload,
 )
 from peak_valley.batch import (
     BatchOptions,
@@ -4544,8 +4544,8 @@ with st.sidebar:
             )
 
 
-    def _preview_counts_for_gpt() -> np.ndarray | None:
-        """Return a small representative sample of counts for GPT planning."""
+    def _preview_counts_for_gpt() -> tuple[np.ndarray, dict] | np.ndarray | None:
+        """Return a small representative sample (and optional features) for GPT."""
 
         if mode == "Counts CSV files":
             for bio in use_uploads + use_generated:
@@ -4581,6 +4581,36 @@ with st.sidebar:
                 keep = [m for m in sel_markers if m in numeric.columns]
                 if keep:
                     numeric = numeric[keep]
+            marker_payloads: list[dict] = []
+            pooled_values: list[np.ndarray] = []
+
+            for col in numeric.columns:
+                column_values = numeric[col].to_numpy(dtype=float)
+                column_values = column_values[np.isfinite(column_values)]
+                if column_values.size == 0:
+                    continue
+
+                if column_values.size > 2500:
+                    column_values = np.random.choice(column_values, 2500, replace=False)
+
+                pooled_values.append(column_values)
+                marker_payloads.append(
+                    {
+                        "marker": col,
+                        "values": column_values.tolist(),
+                        "features": _build_feature_payload(column_values),
+                    }
+                )
+
+            if pooled_values:
+                values = np.concatenate(pooled_values)
+                if values.size > 5000:
+                    values = np.random.choice(values, 5000, replace=False)
+
+                feature_payload = _build_feature_payload(values)
+                feature_payload["multi_marker_features"] = marker_payloads
+                return values, feature_payload
+
             if not numeric.empty:
                 values = numeric.to_numpy().ravel()
                 if values.size > 5000:
@@ -4619,11 +4649,14 @@ with st.sidebar:
 
     if ask_plan:
         counts_preview = _preview_counts_for_gpt()
+        preview_features = None
         if counts_preview is None:
             plan_cols[1].warning("Upload a CSV or load a dataset before asking GPT for defaults.")
         elif not api_key:
             plan_cols[1].error("Provide an OpenAI API key to request GPT defaults.")
         else:
+            if isinstance(counts_preview, tuple):
+                counts_preview, preview_features = counts_preview
             try:
                 plan_client = OpenAI(api_key=api_key)
             except AuthenticationError:
@@ -4645,6 +4678,7 @@ with st.sidebar:
                         counts_preview,
                         max_peaks=int(max_peaks),
                         defaults=defaults_payload,
+                        features=preview_features,
                     )
                     plan_cols[1].success("GPT suggested a parameter plan. See below.")
                 except AuthenticationError:

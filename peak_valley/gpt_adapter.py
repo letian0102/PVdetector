@@ -765,6 +765,96 @@ def _bandwidth_projection(
     return payload
 
 
+def _bandwidth_window(
+    values: np.ndarray, feature_payload: dict[str, Any], fallback: Any
+) -> tuple[float, float, float]:
+    """Derive a data-informed bandwidth scale window.
+
+    The bounds lean on multiscale stability bands, observed inter-peak spacing,
+    and histogram resolution so GPT suggestions stay close to separations seen
+    in the sample rather than drifting to very smooth kernels.
+    """
+
+    histogram = (feature_payload or {}).get("histogram", {})
+    moments = histogram.get("moment_summary") or {}
+    std_val = moments.get("std") if isinstance(moments, dict) else None
+    bin_width = histogram.get("bin_width")
+    consensus = histogram.get("multiscale_consensus") or {}
+    candidates_section = (feature_payload or {}).get("candidates", {})
+    pairwise = candidates_section.get("pairwise_separations") or []
+
+    scale_candidates: list[float] = []
+
+    if isinstance(fallback, (int, float)) and np.isfinite(fallback) and fallback > 0:
+        scale_candidates.append(float(fallback))
+
+    kde_scale = histogram.get("kde_scale")
+    if isinstance(kde_scale, (int, float)) and np.isfinite(kde_scale) and kde_scale > 0:
+        scale_candidates.append(float(kde_scale))
+
+    recommended = consensus.get("recommended") if isinstance(consensus, dict) else None
+    if isinstance(consensus, dict):
+        for run in consensus.get("longest_runs", []) or []:
+            if run.get("count") == recommended:
+                for key in ("start_scale", "end_scale"):
+                    val = run.get(key)
+                    if isinstance(val, (int, float)) and np.isfinite(val) and val > 0:
+                        scale_candidates.append(float(val))
+                start = run.get("start_scale")
+                end = run.get("end_scale")
+                if (
+                    isinstance(start, (int, float))
+                    and isinstance(end, (int, float))
+                    and np.isfinite(start)
+                    and np.isfinite(end)
+                    and start > 0
+                    and end > 0
+                ):
+                    scale_candidates.append(float((start + end) / 2.0))
+
+        for entry in consensus.get("counts_by_scale", []) or []:
+            if entry.get("count") == recommended:
+                val = entry.get("scale")
+                if isinstance(val, (int, float)) and np.isfinite(val) and val > 0:
+                    scale_candidates.append(float(val))
+
+    if std_val and isinstance(std_val, (int, float)) and std_val > 0:
+        gap_scales: list[float] = []
+        for sep in pairwise:
+            delta = sep.get("delta") if isinstance(sep, dict) else None
+            if isinstance(delta, (int, float)) and np.isfinite(delta) and delta > 0:
+                gap_scales.append(delta / (2.0 * std_val))
+        if gap_scales:
+            finite = [g for g in gap_scales if np.isfinite(g) and g > 0]
+            if finite:
+                scale_candidates.extend(finite)
+
+        if bin_width and isinstance(bin_width, (int, float)) and bin_width > 0:
+            try:
+                scale_candidates.append(float((2.0 * bin_width) / std_val))
+            except Exception:
+                pass
+
+    finite_candidates = np.asarray(
+        [c for c in scale_candidates if np.isfinite(c) and c > 0], dtype=float
+    )
+
+    if finite_candidates.size:
+        floor = float(np.percentile(finite_candidates, 10))
+        cap = float(np.percentile(finite_candidates, 90))
+        default_scale = float(np.median(finite_candidates))
+    else:
+        floor = 0.10
+        cap = MAX_BANDWIDTH_SCALE
+        default_scale = 0.35
+
+    cap = float(min(MAX_BANDWIDTH_SCALE, max(cap, floor)))
+    floor = float(max(0.05, min(floor, cap)))
+    default_scale = float(np.clip(default_scale, floor, cap))
+
+    return floor, cap, default_scale
+
+
 def _second_derivative_summary(smoothed: np.ndarray) -> dict[str, Any]:
     """Summarise curvature structure from a smoothed histogram."""
 
@@ -2192,11 +2282,19 @@ def ask_gpt_parameter_plan(
 
     feature_payload = _build_feature_payload(values) if features is None else dict(features)
 
+    bw_floor, bw_cap, bw_default = _bandwidth_window(
+        values, feature_payload, base_defaults["bandwidth"]
+    )
     min_floor, max_min_separation, inferred_default = _min_separation_window(
         values,
         feature_payload,
         base_defaults["min_separation"],
         max_peaks=max_peaks,
+    )
+    bandwidth_default = (
+        bw_default
+        if isinstance(bw_default, (int, float))
+        else base_defaults["bandwidth"]
     )
     base_defaults["min_separation"] = inferred_default
 
@@ -2211,7 +2309,7 @@ def ask_gpt_parameter_plan(
         You help tune a peak/valley detector for single-cell marker densities.
         Given the distribution summary, propose values for:
         - bandwidth: choose "scott", "silverman", "roughness", or a scale
-          factor between 0.10 and 1.50.
+          factor between {bw_floor:.3g} and {bw_cap:.3g} (default {bandwidth_default}).
         - min_separation: minimum spacing between *adjacent* peaks so we can
           tell the 2nd/3rd peaks apart. Choose a value that keeps neighbours
           separate without erasing them ({min_floor:.3g} to {max_min_separation:.3g},
@@ -2282,7 +2380,7 @@ def ask_gpt_parameter_plan(
     # normalise bandwidth scale factors to a safe range
     bw_val = suggestion["bandwidth"]
     if isinstance(bw_val, (int, float)):
-        suggestion["bandwidth"] = float(np.clip(float(bw_val), 0.10, MAX_BANDWIDTH_SCALE))
+        suggestion["bandwidth"] = float(np.clip(float(bw_val), bw_floor, bw_cap))
     elif isinstance(bw_val, str):
         label = bw_val.strip().lower()
         if label not in {"scott", "silverman", "roughness"}:

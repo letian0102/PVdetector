@@ -95,7 +95,7 @@ Key flags:
 | `--align` | Optional | Off | `--align` | Enable landmark alignment and normalisation. |
 | `--alignment-mode` | Optional | `negPeak_valley_posPeak` | `--alignment-mode negPeak_valley` | Alignment template: `negPeak`, `negPeak_valley`, `negPeak_valley_posPeak`, or `valley`. |
 | `--alignment-target` | Optional | Cohort medians | `--alignment-target -1.5,0.0,1.5` | Comma-separated landmark targets; defaults to cohort medians. |
-| `--sample-timeout` | Optional | `10.0` | `--sample-timeout 5` | Maximum seconds to process each sample before skipping it (`<=0` disables). Timed-out samples are listed in `error_samples.txt`. |
+| `--sample-timeout` | Optional | `0.0` | `--sample-timeout 5` | Maximum seconds to process each sample before skipping it (`<=0` disables). Timed-out samples are listed in `error_samples.txt`. |
 | `--workers` | Optional | `1` | `--workers 4` | Number of parallel worker threads. |
 | `--override-file` | Optional | _None_ | `--override-file overrides.json` | JSON overrides for global/marker/sample/stem settings. |
 | `--gpt-model` | Optional | Auto (`o4-mini`) | `--gpt-model o4-mini` | Override GPT model name when using automatic suggestions. |

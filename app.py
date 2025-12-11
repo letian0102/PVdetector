@@ -4218,6 +4218,43 @@ with st.sidebar:
         header_row, skip_rows = -1, 0
         use_uploads, use_generated = [], []
 
+    def _apply_gpt_plan_to_session_state(plan: dict[str, object]) -> None:
+        bw_raw = plan.get("bandwidth")
+        if isinstance(bw_raw, (int, float)):
+            bw_choice = f"{float(bw_raw):g}"
+        elif bw_raw is not None:
+            bw_choice = str(bw_raw)
+        else:
+            bw_choice = None
+
+        if bw_choice:
+            st.session_state["bw_sel"] = bw_choice
+            st.session_state["Bandwidth mode"] = "Manual"
+
+        prom_val_plan = plan.get("prominence")
+        if prom_val_plan is not None:
+            st.session_state["prom_sel"] = "Manual"
+            st.session_state["Prominence"] = "Manual"
+            st.session_state["Prominence value"] = float(np.clip(float(prom_val_plan), 0.0, 0.30))
+
+        min_sep_plan = plan.get("min_separation")
+        if min_sep_plan is not None:
+            st.session_state["Min peak separation"] = float(np.clip(float(min_sep_plan), 0.0, 10.0))
+
+        peak_cap_plan = plan.get("peak_cap")
+        if peak_cap_plan is not None:
+            st.session_state["Number of peaks"] = "GPT Automatic"
+            st.session_state["Maximum peaks (Automatic cap)"] = int(peak_cap_plan)
+
+        tp_plan = plan.get("apply_turning_points")
+        if tp_plan is not None:
+            st.session_state["Treat concave-down turning points as peaks"] = bool(tp_plan)
+
+    apply_gpt_notice = st.session_state.pop("gpt_apply_notice", False)
+    pending_plan = st.session_state.pop("pending_gpt_plan", None)
+    if pending_plan:
+        _apply_gpt_plan_to_session_state(pending_plan)
+
     # ───────────── Preprocessing ──────────────
     st.markdown("---\n### Preprocessing")
     apply_arc = st.checkbox(
@@ -4628,42 +4665,12 @@ with st.sidebar:
             f"Notes: {suggestion.get('notes', '')}"
         )
 
-        def _apply_gpt_defaults(plan: dict[str, object]) -> None:
-            bw_raw = plan.get("bandwidth")
-            if isinstance(bw_raw, (int, float)):
-                bw_choice = f"{float(bw_raw):g}"
-            elif bw_raw is not None:
-                bw_choice = str(bw_raw)
-            else:
-                bw_choice = None
-
-            if bw_choice:
-                st.session_state["bw_sel"] = bw_choice
-                st.session_state["Bandwidth mode"] = "Manual"
-
-            prom_val_plan = plan.get("prominence")
-            if prom_val_plan is not None:
-                st.session_state["prom_sel"] = "Manual"
-                st.session_state["Prominence"] = "Manual"
-                st.session_state["Prominence value"] = float(np.clip(float(prom_val_plan), 0.0, 0.30))
-
-            min_sep_plan = plan.get("min_separation")
-            if min_sep_plan is not None:
-                st.session_state["Min peak separation"] = float(np.clip(float(min_sep_plan), 0.0, 10.0))
-
-            peak_cap_plan = plan.get("peak_cap")
-            if peak_cap_plan is not None:
-                st.session_state["Number of peaks"] = "GPT Automatic"
-                st.session_state["Maximum peaks (Automatic cap)"] = int(peak_cap_plan)
-
-            tp_plan = plan.get("apply_turning_points")
-            if tp_plan is not None:
-                st.session_state["Treat concave-down turning points as peaks"] = bool(tp_plan)
-
         if apply_col.button("Apply GPT settings", key="apply_gpt_plan"):
-            _apply_gpt_defaults(suggestion)
-            st.success("Applied GPT defaults to the current controls.")
+            st.session_state["pending_gpt_plan"] = suggestion
+            st.session_state["gpt_apply_notice"] = True
             st.rerun()
+        elif apply_gpt_notice:
+            st.success("Applied GPT defaults to the current controls.")
 
     workers = st.slider(
         "Workers",

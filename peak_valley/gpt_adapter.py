@@ -2074,14 +2074,16 @@ def ask_gpt_parameter_plan(
     if not finite_values.size:
         return base_defaults
 
-    # Keep the GPT range realistic: half the robust span, capped at 2.5 and no
-    # lower than the current default. This prevents overly large min separation
-    # suggestions on compact marker distributions.
+    # Keep the GPT range realistic: roughly one-third the robust span, capped at
+    # 1.25 and no lower than the current default. This prevents overly large
+    # min separation suggestions on compact marker distributions and nudges the
+    # model toward values that separate neighbouring peaks instead of merging
+    # them away.
     span = np.percentile(finite_values, 95) - np.percentile(finite_values, 5)
     span = span if np.isfinite(span) and span > 0 else np.ptp(finite_values)
     max_min_separation = max(
         base_defaults["min_separation"],
-        min(2.5, float(span) * 0.5 if np.isfinite(span) else 0.0),
+        min(1.25, float(span) * 0.33 if np.isfinite(span) else 0.0),
     )
 
     sig = shape_signature(values)
@@ -2101,8 +2103,10 @@ def ask_gpt_parameter_plan(
         Given the distribution summary, propose values for:
         - bandwidth: choose "scott", "silverman", "roughness", or a scale
           factor between 0.10 and 1.50.
-        - min_separation: minimum spacing between peaks (0.0 to
-          {max_min_separation:.2f}, default {base_defaults["min_separation"]}).
+        - min_separation: minimum spacing between *adjacent* peaks so we can
+          tell the 2nd/3rd peaks apart. Choose a value that keeps neighbours
+          separate without erasing them (0.05 to {max_min_separation:.2f},
+          default {base_defaults["min_separation"]}).
         - prominence: valley drop threshold between 0.01 and 0.30.
         - peak_cap: limit on peaks to search for (1..{max_peaks}).
         - apply_turning_points: whether to treat concave-down turning points as peaks.
@@ -2140,7 +2144,7 @@ def ask_gpt_parameter_plan(
             _sanitize_plan_field(
                 data.get("min_separation"), fallback=base_defaults["min_separation"]
             ),
-            0.0,
+            0.05,
             max_min_separation,
         )
     )

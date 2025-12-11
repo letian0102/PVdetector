@@ -4526,7 +4526,10 @@ with st.sidebar:
                     values = np.random.choice(values, 5000, replace=False)
                 return values
 
-        expr_df = st.session_state.expr_df or st.session_state.combined_expr_df
+        expr_df = st.session_state.get("expr_df")
+        if expr_df is None:
+            expr_df = st.session_state.get("combined_expr_df")
+
         if expr_df is not None and not expr_df.empty:
             numeric = expr_df.select_dtypes(include=[np.number])
             if not numeric.empty:

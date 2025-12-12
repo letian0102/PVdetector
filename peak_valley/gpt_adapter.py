@@ -911,8 +911,8 @@ def _aggregate_multi_marker_windows(
         default = float(np.clip(default, floor, cap))
         return floor, cap, default
 
-    aggregated_bw = _collapse(bw_windows, cap_bias=35.0, default_bias=50.0)
-    aggregated_min = _collapse(min_windows, cap_bias=35.0, default_bias=45.0)
+    aggregated_bw = _collapse(bw_windows, cap_bias=30.0, default_bias=45.0)
+    aggregated_min = _collapse(min_windows, cap_bias=30.0, default_bias=40.0)
 
     return aggregated_bw, aggregated_min
 
@@ -1771,6 +1771,16 @@ def _min_separation_window(
         adjacent_gaps = [r - l for l, r in zip(ordered, ordered[1:]) if r > l]
 
     gap_candidates: list[float] = [g for g in adjacent_gaps if g > 0]
+
+    if finite_values.size >= 3:
+        sorted_vals = np.sort(finite_values)
+        point_gaps = np.diff(sorted_vals)
+        if point_gaps.size:
+            positive_gaps = point_gaps[point_gaps > 0]
+            if positive_gaps.size:
+                dense_point_gap = np.percentile(positive_gaps, 15)
+                if math.isfinite(dense_point_gap) and dense_point_gap > 0:
+                    gap_candidates.append(float(dense_point_gap))
 
     if finite_values.size >= 5:
         quantile_points = min(100, finite_values.size)

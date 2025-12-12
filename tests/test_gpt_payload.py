@@ -16,6 +16,7 @@ from peak_valley.gpt_adapter import (
     _min_separation_window,
     _bandwidth_window,
     _aggregate_multi_marker_windows,
+    _merge_windows,
     ask_gpt_parameter_plan,
     ask_gpt_peak_count,
 )
@@ -405,6 +406,73 @@ def test_parameter_plan_uses_multi_marker_windows():
     assert captured_payload.get("multi_marker_features")
     assert plan["bandwidth"] == aggregated_bw[1]
     assert plan["min_separation"] == aggregated_min[1]
+    assert plan["peak_cap"] == 5
+
+
+def test_parameter_plan_prefers_pooled_bounds_when_tighter():
+    rng = np.random.default_rng(11)
+    marker_a = rng.normal(0.0, 0.15, size=550)
+    marker_b = rng.normal(0.0, 0.55, size=550)
+
+    pooled = np.concatenate([marker_a, marker_b])
+    pooled_features = _build_feature_payload(pooled)
+    pooled_features["multi_marker_features"] = [
+        {"marker": "A", "values": marker_a.tolist(), "features": _build_feature_payload(marker_a)},
+        {"marker": "B", "values": marker_b.tolist(), "features": _build_feature_payload(marker_b)},
+    ]
+
+    defaults = {
+        "bandwidth": "scott",
+        "min_separation": 0.35,
+        "prominence": 0.05,
+        "peak_cap": 4,
+        "apply_turning_points": False,
+    }
+
+    pooled_bw = _bandwidth_window(pooled, pooled_features, defaults["bandwidth"])
+    pooled_min = _min_separation_window(
+        pooled, pooled_features, defaults["min_separation"], max_peaks=5
+    )
+
+    aggregated_bw, aggregated_min = _aggregate_multi_marker_windows(
+        pooled_features["multi_marker_features"], defaults, max_peaks=5
+    )
+
+    captured_payload = None
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            nonlocal captured_payload
+            user = next(msg for msg in kwargs["messages"] if msg["role"] == "user")
+            captured_payload = json.loads(user["content"])
+            response = {
+                "bandwidth": 99.0,
+                "min_separation": 7.5,
+                "prominence": 0.07,
+                "peak_cap": 7,
+                "apply_turning_points": True,
+                "notes": "prefer pooled",
+            }
+            message = SimpleNamespace(content=json.dumps(response))
+            choice = SimpleNamespace(message=message)
+            return SimpleNamespace(choices=[choice])
+
+    client = DummyClient()
+    plan = ask_gpt_parameter_plan(
+        client,
+        model_name="dummy",
+        counts_full=pooled,
+        max_peaks=5,
+        defaults=defaults,
+        features=pooled_features,
+    )
+
+    assert captured_payload is not None and captured_payload.get("multi_marker_features")
+    assert plan["bandwidth"] <= min(pooled_bw[1], aggregated_bw[1])
+    assert plan["min_separation"] <= min(pooled_min[1], aggregated_min[1]) * 1.05
     assert plan["peak_cap"] == 5
 
 

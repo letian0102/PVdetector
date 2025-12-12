@@ -917,6 +917,30 @@ def _aggregate_multi_marker_windows(
     return aggregated_bw, aggregated_min
 
 
+def _merge_windows(
+    base_window: tuple[float, float, float],
+    override_window: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """Combine two windows, preferring the tighter bounds.
+
+    The merged window keeps the smallest floor/cap from either source and clamps the
+    default inside the merged range so multi-marker overrides cannot inflate beyond
+    the pooled-data bounds.
+    """
+
+    base_floor, base_cap, base_default = base_window
+    override_floor, override_cap, override_default = override_window
+
+    floor = float(min(base_floor, override_floor))
+    cap = float(min(base_cap, override_cap))
+    cap = float(max(cap, floor))
+
+    default = float(min(base_default, override_default))
+    default = float(np.clip(default, floor, cap))
+
+    return floor, cap, default
+
+
 def _second_derivative_summary(smoothed: np.ndarray) -> dict[str, Any]:
     """Summarise curvature structure from a smoothed histogram."""
 
@@ -2420,19 +2444,57 @@ def ask_gpt_parameter_plan(
                 sanitized_entries, base_defaults, max_peaks
             )
 
-    bw_floor, bw_cap, bw_default = _bandwidth_window(
-        values, feature_payload, base_defaults["bandwidth"]
-    )
+    base_bw_window = _bandwidth_window(values, feature_payload, base_defaults["bandwidth"])
+    pooled_bw_window = _bandwidth_window(values, _build_feature_payload(values), base_defaults["bandwidth"])
+    candidates_bw = [base_bw_window, pooled_bw_window]
     if aggregated_bw is not None:
-        bw_floor, bw_cap, bw_default = aggregated_bw
-    min_floor, max_min_separation, inferred_default = _min_separation_window(
+        candidates_bw.append(aggregated_bw)
+
+    bw_floor = float(min(w[0] for w in candidates_bw))
+    bw_cap = float(min(w[1] for w in candidates_bw))
+    bw_cap = float(max(bw_cap, bw_floor))
+    bw_default = float(
+        np.clip(min(w[2] for w in candidates_bw), bw_floor, bw_cap)
+    )
+
+    base_min_window = _min_separation_window(
         values,
         feature_payload,
         base_defaults["min_separation"],
         max_peaks=max_peaks,
     )
+    pooled_min_window = _min_separation_window(
+        values,
+        _build_feature_payload(values),
+        base_defaults["min_separation"],
+        max_peaks=max_peaks,
+    )
+
+    candidates_min = [base_min_window, pooled_min_window]
     if aggregated_min is not None:
-        min_floor, max_min_separation, inferred_default = aggregated_min
+        candidates_min.append(aggregated_min)
+
+    min_floor = float(min(w[0] for w in candidates_min))
+    max_min_separation = float(min(w[1] for w in candidates_min))
+    max_min_separation = float(max(max_min_separation, min_floor))
+    inferred_default = float(
+        np.clip(min(w[2] for w in candidates_min), min_floor, max_min_separation)
+    )
+
+    if feature_payload.get("multi_marker_features"):
+        bw_floor = float(min(bw_floor, base_bw_window[0]))
+        bw_cap = float(min(bw_cap, base_bw_window[1]))
+        bw_cap = float(max(bw_cap, bw_floor))
+        bw_default = float(min(bw_default, base_bw_window[2]))
+
+        min_floor = float(min(min_floor, base_min_window[0]))
+        max_min_separation = float(min(max_min_separation, base_min_window[1]))
+        max_min_separation = float(max(max_min_separation, min_floor))
+        inferred_default = float(min(inferred_default, base_min_window[2]))
+
+    min_floor = float(min(min_floor, base_min_window[1]))
+    max_min_separation = float(min(max_min_separation, base_min_window[1]))
+    max_min_separation = float(max(max_min_separation, min_floor))
     bandwidth_default = (
         bw_default
         if isinstance(bw_default, (int, float))

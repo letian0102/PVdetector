@@ -1772,12 +1772,23 @@ def _min_separation_window(
 
     gap_candidates: list[float] = [g for g in adjacent_gaps if g > 0]
 
+    candidate_pairs = candidates.get("pairwise_separations") or []
+    for pair in candidate_pairs:
+        delta = pair.get("delta") if isinstance(pair, dict) else None
+        if isinstance(delta, numbers.Real) and not isinstance(delta, bool):
+            delta = float(delta)
+            if math.isfinite(delta) and delta > 0:
+                gap_candidates.append(delta)
+
     if finite_values.size >= 3:
         sorted_vals = np.sort(finite_values)
         point_gaps = np.diff(sorted_vals)
         if point_gaps.size:
             positive_gaps = point_gaps[point_gaps > 0]
             if positive_gaps.size:
+                tight_gap = np.percentile(positive_gaps, 5)
+                if math.isfinite(tight_gap) and tight_gap > 0:
+                    gap_candidates.append(float(tight_gap))
                 dense_point_gap = np.percentile(positive_gaps, 15)
                 if math.isfinite(dense_point_gap) and dense_point_gap > 0:
                     gap_candidates.append(float(dense_point_gap))
@@ -1814,6 +1825,15 @@ def _min_separation_window(
                 gap_candidates.append(span_per_peak)
         else:
             gap_candidates.append(span)
+
+    try:
+        iqr = float(np.subtract(*np.percentile(finite_values, [75, 25])))
+        if math.isfinite(iqr) and iqr > 0:
+            fd_width = 2.0 * iqr / float(finite_values.size ** (1 / 3))
+            if math.isfinite(fd_width) and fd_width > 0:
+                gap_candidates.append(fd_width)
+    except Exception:
+        pass
 
     positive_candidates = [g for g in gap_candidates if math.isfinite(g) and g > 0]
     if math.isfinite(lower_bound) and lower_bound > 0:

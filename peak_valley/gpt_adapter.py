@@ -903,8 +903,8 @@ def _aggregate_multi_marker_windows(
             return None
 
         floors, caps, defaults = (np.array(part, dtype=float) for part in zip(*windows))
-        floor = float(np.percentile(floors, 50))
-        cap = float(np.percentile(caps, cap_bias))
+        floor = float(np.min(floors))
+        cap = float(min(np.percentile(caps, cap_bias), np.min(caps)))
         default = float(np.percentile(defaults, default_bias))
 
         cap = float(max(cap, floor))
@@ -1836,15 +1836,14 @@ def _min_separation_window(
         pass
 
     positive_candidates = [g for g in gap_candidates if math.isfinite(g) and g > 0]
-    if math.isfinite(lower_bound) and lower_bound > 0:
-        positive_candidates.append(lower_bound)
     if positive_candidates:
         ceiling = float(min(positive_candidates))
     else:
         ceiling = base_default
 
-    if ceiling < lower_bound:
-        ceiling = lower_bound
+    floor = lower_bound
+    if ceiling < floor and math.isfinite(ceiling) and ceiling > 0:
+        floor = ceiling
 
     default_guess = None
     if positive_candidates:
@@ -1861,9 +1860,9 @@ def _min_separation_window(
     if default_guess is None:
         default_guess = base_default if base_default > 0 else ceiling
 
-    default_guess = float(np.clip(default_guess, lower_bound, ceiling))
+    default_guess = float(np.clip(default_guess, floor, ceiling))
 
-    return lower_bound, float(ceiling), default_guess
+    return float(floor), float(ceiling), default_guess
 
 
 def _build_feature_payload(

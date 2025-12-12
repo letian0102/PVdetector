@@ -13,6 +13,11 @@ from peak_valley.gpt_adapter import (
     SUMMARY_BINS,
     BASELINE_BINS,
     _build_feature_payload,
+    _min_separation_window,
+    _bandwidth_window,
+    _aggregate_multi_marker_windows,
+    _merge_windows,
+    ask_gpt_parameter_plan,
     ask_gpt_peak_count,
 )
 
@@ -208,3 +213,288 @@ def test_peak_caps_allow_three_with_clear_triplet():
     consensus = heuristics.get("multiscale_consensus")
     assert isinstance(consensus, dict)
     assert consensus.get("recommended") == 3
+
+
+def test_parameter_plan_clamps_and_fills_defaults():
+    counts = _dummy_counts()
+    features = _build_feature_payload(counts)
+
+    captured_payload = None
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            nonlocal captured_payload
+            user = next(msg for msg in kwargs["messages"] if msg["role"] == "user")
+            captured_payload = json.loads(user["content"])
+            response = {
+                "bandwidth": 2.0,  # beyond cap
+                "min_separation": 5.0,  # beyond dynamic clamp
+                "prominence": 0.9,
+                "peak_cap": 9,
+                "apply_turning_points": "yes",
+                "notes": "stress test",
+            }
+            message = SimpleNamespace(content=json.dumps(response))
+            choice = SimpleNamespace(message=message)
+            return SimpleNamespace(choices=[choice])
+
+    defaults = {
+        "bandwidth": "scott",
+        "min_separation": 0.5,
+        "prominence": 0.05,
+        "peak_cap": 4,
+        "apply_turning_points": False,
+    }
+
+    client = DummyClient()
+    plan = ask_gpt_parameter_plan(
+        client,
+        model_name="dummy",
+        counts_full=counts,
+        max_peaks=6,
+        defaults=defaults,
+        features=features,
+    )
+
+    bw_floor, bw_cap, bw_default = _bandwidth_window(
+        counts, features, defaults["bandwidth"]
+    )
+    min_floor, max_min_sep, inferred_default = _min_separation_window(
+        counts, features, defaults["min_separation"], max_peaks=6
+    )
+
+    assert plan["bandwidth"] == bw_cap
+    assert plan["min_separation"] == max_min_sep
+    assert plan["min_separation"] <= defaults["min_separation"]
+    assert min_floor <= plan["min_separation"] <= max_min_sep
+    assert inferred_default <= max_min_sep
+    assert bw_floor <= plan["bandwidth"] <= bw_cap
+    assert bw_default <= bw_cap
+    assert plan["prominence"] == 0.3
+    assert plan["peak_cap"] == 6
+    assert plan["apply_turning_points"] is True
+    assert plan["notes"] == "stress test"
+    assert captured_payload is not None
+
+
+def test_parameter_plan_backfills_empty_notes():
+    counts = _dummy_counts()
+    features = _build_feature_payload(counts)
+
+    captured_payload = None
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            nonlocal captured_payload
+            user = next(msg for msg in kwargs["messages"] if msg["role"] == "user")
+            captured_payload = json.loads(user["content"])
+            response = {
+                "bandwidth": "scott",
+                "min_separation": 0.1,
+                "prominence": 0.05,
+                "peak_cap": 3,
+                "apply_turning_points": False,
+                "notes": " ",  # simulate empty explanation
+            }
+            message = SimpleNamespace(content=json.dumps(response))
+            choice = SimpleNamespace(message=message)
+            return SimpleNamespace(choices=[choice])
+
+    defaults = {
+        "bandwidth": "scott",
+        "min_separation": 0.25,
+        "prominence": 0.05,
+        "peak_cap": 3,
+        "apply_turning_points": False,
+    }
+
+    client = DummyClient()
+    plan = ask_gpt_parameter_plan(
+        client,
+        model_name="dummy",
+        counts_full=counts,
+        max_peaks=4,
+        defaults=defaults,
+        features=features,
+    )
+
+    bw_floor, bw_cap, _ = _bandwidth_window(counts, features, defaults["bandwidth"])
+    min_floor, max_min_sep, _ = _min_separation_window(
+        counts, features, defaults["min_separation"], max_peaks=4
+    )
+
+    assert captured_payload is not None
+    assert plan["notes"]
+    assert f"[{bw_floor:.3g}, {bw_cap:.3g}]" in plan["notes"]
+    assert f"[{min_floor:.3g}, {max_min_sep:.3g}]" in plan["notes"]
+
+
+def test_parameter_plan_uses_multi_marker_windows():
+    rng = np.random.default_rng(7)
+    marker_a = rng.normal(0.0, 0.12, size=450)
+    marker_b = rng.normal(0.0, 0.85, size=450)
+
+    pooled = np.concatenate([marker_a, marker_b])
+    marker_entries = []
+    for name, values in (("A", marker_a), ("B", marker_b)):
+        marker_entries.append(
+            {"marker": name, "values": values, "features": _build_feature_payload(values)}
+        )
+
+    pooled_features = _build_feature_payload(pooled)
+    pooled_features["multi_marker_features"] = marker_entries
+
+    defaults = {
+        "bandwidth": "scott",
+        "min_separation": 0.4,
+        "prominence": 0.05,
+        "peak_cap": 4,
+        "apply_turning_points": False,
+    }
+
+    aggregated_bw, aggregated_min = _aggregate_multi_marker_windows(
+        marker_entries, defaults, max_peaks=5
+    )
+    pooled_bw = _bandwidth_window(pooled, pooled_features, defaults["bandwidth"])
+    pooled_min = _min_separation_window(
+        pooled, pooled_features, defaults["min_separation"], max_peaks=5
+    )
+
+    assert aggregated_bw is not None and aggregated_min is not None
+    assert aggregated_bw[1] <= pooled_bw[1]
+    assert aggregated_min[1] <= pooled_min[1]
+
+    captured_payload = None
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            nonlocal captured_payload
+            user = next(msg for msg in kwargs["messages"] if msg["role"] == "user")
+            captured_payload = json.loads(user["content"])
+            response = {
+                "bandwidth": 5.0,
+                "min_separation": 2.0,
+                "prominence": 0.07,
+                "peak_cap": 9,
+                "apply_turning_points": True,
+                "notes": "multi", 
+            }
+            message = SimpleNamespace(content=json.dumps(response))
+            choice = SimpleNamespace(message=message)
+            return SimpleNamespace(choices=[choice])
+
+    client = DummyClient()
+    plan = ask_gpt_parameter_plan(
+        client,
+        model_name="dummy",
+        counts_full=pooled,
+        max_peaks=5,
+        defaults=defaults,
+        features=pooled_features,
+    )
+
+    assert captured_payload is not None
+    assert captured_payload.get("multi_marker_features")
+    assert plan["bandwidth"] == aggregated_bw[1]
+    assert plan["min_separation"] == aggregated_min[1]
+    assert plan["peak_cap"] == 5
+
+
+def test_parameter_plan_prefers_pooled_bounds_when_tighter():
+    rng = np.random.default_rng(11)
+    marker_a = rng.normal(0.0, 0.15, size=550)
+    marker_b = rng.normal(0.0, 0.55, size=550)
+
+    pooled = np.concatenate([marker_a, marker_b])
+    pooled_features = _build_feature_payload(pooled)
+    pooled_features["multi_marker_features"] = [
+        {"marker": "A", "values": marker_a.tolist(), "features": _build_feature_payload(marker_a)},
+        {"marker": "B", "values": marker_b.tolist(), "features": _build_feature_payload(marker_b)},
+    ]
+
+    defaults = {
+        "bandwidth": "scott",
+        "min_separation": 0.35,
+        "prominence": 0.05,
+        "peak_cap": 4,
+        "apply_turning_points": False,
+    }
+
+    pooled_bw = _bandwidth_window(pooled, pooled_features, defaults["bandwidth"])
+    pooled_min = _min_separation_window(
+        pooled, pooled_features, defaults["min_separation"], max_peaks=5
+    )
+
+    aggregated_bw, aggregated_min = _aggregate_multi_marker_windows(
+        pooled_features["multi_marker_features"], defaults, max_peaks=5
+    )
+
+    captured_payload = None
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            nonlocal captured_payload
+            user = next(msg for msg in kwargs["messages"] if msg["role"] == "user")
+            captured_payload = json.loads(user["content"])
+            response = {
+                "bandwidth": 99.0,
+                "min_separation": 7.5,
+                "prominence": 0.07,
+                "peak_cap": 7,
+                "apply_turning_points": True,
+                "notes": "prefer pooled",
+            }
+            message = SimpleNamespace(content=json.dumps(response))
+            choice = SimpleNamespace(message=message)
+            return SimpleNamespace(choices=[choice])
+
+    client = DummyClient()
+    plan = ask_gpt_parameter_plan(
+        client,
+        model_name="dummy",
+        counts_full=pooled,
+        max_peaks=5,
+        defaults=defaults,
+        features=pooled_features,
+    )
+
+    assert captured_payload is not None and captured_payload.get("multi_marker_features")
+    assert plan["bandwidth"] <= min(pooled_bw[1], aggregated_bw[1])
+    assert plan["min_separation"] <= min(pooled_min[1], aggregated_min[1]) * 1.05
+    assert plan["peak_cap"] == 5
+
+
+def test_parameter_plan_returns_defaults_without_client():
+    defaults = {
+        "bandwidth": "roughness",
+        "min_separation": 0.75,
+        "prominence": 0.07,
+        "peak_cap": 5,
+        "apply_turning_points": True,
+    }
+
+    plan = ask_gpt_parameter_plan(
+        client=None,  # type: ignore[arg-type]
+        model_name="none",
+        counts_full=_dummy_counts(),
+        max_peaks=5,
+        defaults=defaults,
+    )
+
+    assert plan["bandwidth"] == "roughness"
+    assert plan["min_separation"] == 0.75
+    assert plan["prominence"] == 0.07
+    assert plan["peak_cap"] == 5
+    assert plan["apply_turning_points"] is True

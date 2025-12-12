@@ -280,6 +280,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-peaks", default=None, help="Fixed number of peaks or 'auto' for GPT/heuristic.")
     parser.add_argument("--max-peaks", type=int, default=2)
     parser.add_argument("--bandwidth", default="scott", help="Bandwidth rule/value or 'auto'.")
+    parser.add_argument("--roughness-target", type=float, default=7.0, help="Maximum allowed KDE roughness when searching bandwidth.")
+    parser.add_argument("--roughness-lower", type=float, default=0.01, help="Lower bound of the bandwidth search range.")
+    parser.add_argument("--roughness-upper", type=float, default=0.25, help="Upper bound of the bandwidth search range.")
+    parser.add_argument("--roughness-tol", type=float, default=1e-4, help="Stop bandwidth search when the bracket is within this tolerance.")
+    parser.add_argument("--roughness-max-iter", type=int, default=50, help="Maximum iterations allowed for the roughness bandwidth search.")
+    parser.add_argument(
+        "--roughness-min-peak",
+        type=float,
+        default=0.001,
+        help="Relative height threshold for considering early peaks in the roughness check.",
+    )
+    parser.add_argument(
+        "--roughness-valley-prom",
+        type=float,
+        default=0.001,
+        help="Minimum valley depth (as a fraction of max height) to flag a double peak.",
+    )
+    parser.add_argument(
+        "--roughness-grid",
+        type=int,
+        default=512,
+        help="Grid size for KDE evaluation during the roughness search.",
+    )
     parser.add_argument("--prominence", default="0.05", help="Prominence value or 'auto'.")
     parser.add_argument("--min-width", type=int, default=0)
     parser.add_argument("--curvature", type=float, default=0.0001)
@@ -402,6 +425,14 @@ def main(argv: list[str] | None = None) -> int:
     options.grid_size = max(4000, args.grid_size)
     options.valley_drop = args.valley_drop
     options.first_valley = args.first_valley
+    options.roughness_target = args.roughness_target
+    options.roughness_lower = args.roughness_lower
+    options.roughness_upper = args.roughness_upper
+    options.roughness_tol = args.roughness_tol
+    options.roughness_max_iter = args.roughness_max_iter
+    options.roughness_min_peak = args.roughness_min_peak
+    options.roughness_valley_prom = args.roughness_valley_prom
+    options.roughness_grid = args.roughness_grid
     options.consistency_tol = args.consistency_tol
     options.apply_consistency = bool(args.apply_consistency)
 

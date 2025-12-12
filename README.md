@@ -82,6 +82,14 @@ Key flags:
 | `--n-peaks` | Optional | Auto | `--n-peaks 2` | Fixed peak count or `auto`/`gpt` for automatic selection. |
 | `--max-peaks` | Optional | `2` | `--max-peaks 4` | Upper bound on peaks considered during automatic runs. |
 | `--bandwidth` | Optional | `scott` | `--bandwidth 0.6` | KDE bandwidth value, preset (`scott`, `silverman`), `roughness`, or `auto`/`gpt`. |
+| `--roughness-target` | Optional | `7.0` | `--roughness-target 5` | Maximum KDE roughness score allowed when searching for a bandwidth. |
+| `--roughness-lower` | Optional | `0.01` | `--roughness-lower 0.02` | Lower bound of the roughness bandwidth search interval. |
+| `--roughness-upper` | Optional | `0.25` | `--roughness-upper 0.5` | Upper bound of the roughness bandwidth search interval. |
+| `--roughness-tol` | Optional | `0.0001` | `--roughness-tol 0.001` | Bandwidth search stops once the bracket is within this tolerance. |
+| `--roughness-max-iter` | Optional | `50` | `--roughness-max-iter 80` | Maximum binary-search iterations for the roughness bandwidth finder. |
+| `--roughness-min-peak` | Optional | `0.001` | `--roughness-min-peak 0.01` | Relative height threshold for early peaks when screening double peaks. |
+| `--roughness-valley-prom` | Optional | `0.001` | `--roughness-valley-prom 0.01` | Minimum valley depth (fraction of max height) used to flag double peaks. |
+| `--roughness-grid` | Optional | `512` | `--roughness-grid 1024` | Grid size for KDE evaluation during the roughness bandwidth search. |
 | `--prominence` | Optional | `0.05` | `--prominence 0.08` | Minimum prominence (`auto`/`gpt` allowed). |
 | `--min-width` | Optional | `0` | `--min-width 30` | Minimum sample count per detected peak. |
 | `--curvature` | Optional | `0.0001` | `--curvature 0.0005` | Curvature threshold for peak detection. |
@@ -129,6 +137,13 @@ finalises partial results if an analysis is interrupted.
 - **Number of peaks** – enter a fixed value or select “GPT Automatic” with a user-defined maximum.
 - **Bandwidth** and **Prominence** – choose manual presets/scales or allow GPT to suggest values.
 - Additional controls include minimum peak width, curvature threshold, concave turning points, minimum separation, KDE grid size, valley drop, first-valley method selection, and marker-consistency enforcement.
+
+#### GPT parameter planner (new)
+- Load a CSV upload or dataset first so the app can sample representative counts.
+- Open the **GPT helper** section near the bottom of the sidebar, pick a model (or enter a custom name), and supply an OpenAI API key.
+- Click **Ask GPT for optimal detection settings**. The app sends a histogram summary to the model and stores the proposed bandwidth, peak cap, minimum separation, and prominence in session state.
+- The returned suggestion appears as a checklist; tick the parameters you want to apply and leave others unchanged.
+- When you run detection with any GPT-driven options enabled, the app automatically reuses your provided API key. The planner caches per-distribution suggestions within the session to avoid repeated calls on similar data.
 
 ### Running the detector
 - Click **Run detector** to process selected files. A progress bar tracks the queue, and a Pause/Resume button provides mid-run control.

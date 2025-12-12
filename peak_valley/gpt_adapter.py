@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import math
+import numbers
 import re
 import textwrap
 from collections import deque
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import numpy as np
 from openai import AuthenticationError, OpenAI
@@ -16,7 +17,12 @@ from sklearn.mixture import GaussianMixture
 from .kde_detector import quick_peak_estimate
 from .signature import shape_signature
 
-__all__ = ["ask_gpt_peak_count", "ask_gpt_prominence", "ask_gpt_bandwidth"]
+__all__ = [
+    "ask_gpt_peak_count",
+    "ask_gpt_prominence",
+    "ask_gpt_bandwidth",
+    "ask_gpt_parameter_plan",
+]
 
 HISTOGRAM_PROMPT_CHAR_BUDGET = 4800
 MIN_ADAPTIVE_SAMPLES = 512
@@ -24,6 +30,7 @@ MAX_HISTOGRAM_BINS = 160
 MIN_HISTOGRAM_BINS = 80
 BASELINE_BINS = 64
 SUMMARY_BINS = 48
+MAX_BANDWIDTH_SCALE = 1.5
 
 # keep a simple run-time cache; survives a single Streamlit run
 _cache: dict[tuple, float | int | str] = {}  # (tag, sig[, extra]) → value
@@ -756,6 +763,182 @@ def _bandwidth_projection(
         f"peaks closer than ≈{expected_resolution:.1f} bins may merge."
     )
     return payload
+
+
+def _bandwidth_window(
+    values: np.ndarray, feature_payload: dict[str, Any], fallback: Any
+) -> tuple[float, float, float]:
+    """Derive a data-informed bandwidth scale window.
+
+    The bounds lean on multiscale stability bands, observed inter-peak spacing,
+    and histogram resolution so GPT suggestions stay close to separations seen
+    in the sample rather than drifting to very smooth kernels.
+    """
+
+    histogram = (feature_payload or {}).get("histogram", {})
+    moments = histogram.get("moment_summary") or {}
+    std_val = moments.get("std") if isinstance(moments, dict) else None
+    bin_width = histogram.get("bin_width")
+    consensus = histogram.get("multiscale_consensus") or {}
+    candidates_section = (feature_payload or {}).get("candidates", {})
+    pairwise = candidates_section.get("pairwise_separations") or []
+
+    scale_candidates: list[float] = []
+
+    if isinstance(fallback, (int, float)) and np.isfinite(fallback) and fallback > 0:
+        scale_candidates.append(float(fallback))
+
+    kde_scale = histogram.get("kde_scale")
+    if isinstance(kde_scale, (int, float)) and np.isfinite(kde_scale) and kde_scale > 0:
+        scale_candidates.append(float(kde_scale))
+
+    recommended = consensus.get("recommended") if isinstance(consensus, dict) else None
+    if isinstance(consensus, dict):
+        for run in consensus.get("longest_runs", []) or []:
+            if run.get("count") == recommended:
+                for key in ("start_scale", "end_scale"):
+                    val = run.get(key)
+                    if isinstance(val, (int, float)) and np.isfinite(val) and val > 0:
+                        scale_candidates.append(float(val))
+                start = run.get("start_scale")
+                end = run.get("end_scale")
+                if (
+                    isinstance(start, (int, float))
+                    and isinstance(end, (int, float))
+                    and np.isfinite(start)
+                    and np.isfinite(end)
+                    and start > 0
+                    and end > 0
+                ):
+                    scale_candidates.append(float((start + end) / 2.0))
+
+        for entry in consensus.get("counts_by_scale", []) or []:
+            if entry.get("count") == recommended:
+                val = entry.get("scale")
+                if isinstance(val, (int, float)) and np.isfinite(val) and val > 0:
+                    scale_candidates.append(float(val))
+
+    if std_val and isinstance(std_val, (int, float)) and std_val > 0:
+        gap_scales: list[float] = []
+        for sep in pairwise:
+            delta = sep.get("delta") if isinstance(sep, dict) else None
+            if isinstance(delta, (int, float)) and np.isfinite(delta) and delta > 0:
+                gap_scales.append(delta / (2.0 * std_val))
+        if gap_scales:
+            finite = [g for g in gap_scales if np.isfinite(g) and g > 0]
+            if finite:
+                scale_candidates.extend(finite)
+
+        if bin_width and isinstance(bin_width, (int, float)) and bin_width > 0:
+            try:
+                scale_candidates.append(float((2.0 * bin_width) / std_val))
+            except Exception:
+                pass
+
+    finite_candidates = np.asarray(
+        [c for c in scale_candidates if np.isfinite(c) and c > 0], dtype=float
+    )
+
+    if finite_candidates.size:
+        floor = float(np.percentile(finite_candidates, 10))
+        cap = float(np.percentile(finite_candidates, 90))
+        default_scale = float(np.median(finite_candidates))
+    else:
+        floor = 0.10
+        cap = MAX_BANDWIDTH_SCALE
+        default_scale = 0.35
+
+    cap = float(min(MAX_BANDWIDTH_SCALE, max(cap, floor)))
+    floor = float(max(0.05, min(floor, cap)))
+    default_scale = float(np.clip(default_scale, floor, cap))
+
+    return floor, cap, default_scale
+
+
+def _aggregate_multi_marker_windows(
+    marker_entries: list[dict[str, Any]],
+    base_defaults: dict[str, Any],
+    max_peaks: int,
+) -> tuple[tuple[float, float, float] | None, tuple[float, float, float] | None]:
+    """Blend per-marker windows to keep GPT suggestions grounded to each marker.
+
+    When multiple markers are selected, concatenating them can inflate spans and
+    lead to overly large bandwidth or separation caps. Instead, derive windows
+    for each marker individually and collapse them with lower-leaning percentiles
+    so the combined guidance stays close to the densest markers.
+    """
+
+    bw_windows: list[tuple[float, float, float]] = []
+    min_windows: list[tuple[float, float, float]] = []
+
+    for entry in marker_entries:
+        raw_values = entry.get("values")
+        if raw_values is None:
+            continue
+
+        values = _prepare_values(np.asarray(raw_values, dtype=float))
+        if not values.size:
+            continue
+
+        features = entry.get("features") if isinstance(entry.get("features"), dict) else None
+        bw_windows.append(
+            _bandwidth_window(values, features or {}, base_defaults.get("bandwidth"))
+        )
+        min_windows.append(
+            _min_separation_window(
+                values,
+                features or {},
+                base_defaults.get("min_separation", 0.5),
+                max_peaks=max_peaks,
+            )
+        )
+
+    def _collapse(
+        windows: list[tuple[float, float, float]],
+        *,
+        cap_bias: float = 40.0,
+        default_bias: float = 50.0,
+    ) -> tuple[float, float, float] | None:
+        if not windows:
+            return None
+
+        floors, caps, defaults = (np.array(part, dtype=float) for part in zip(*windows))
+        floor = float(np.min(floors))
+        cap = float(min(np.percentile(caps, cap_bias), np.min(caps)))
+        default = float(np.percentile(defaults, default_bias))
+
+        cap = float(max(cap, floor))
+        default = float(np.clip(default, floor, cap))
+        return floor, cap, default
+
+    aggregated_bw = _collapse(bw_windows, cap_bias=30.0, default_bias=45.0)
+    aggregated_min = _collapse(min_windows, cap_bias=30.0, default_bias=40.0)
+
+    return aggregated_bw, aggregated_min
+
+
+def _merge_windows(
+    base_window: tuple[float, float, float],
+    override_window: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """Combine two windows, preferring the tighter bounds.
+
+    The merged window keeps the smallest floor/cap from either source and clamps the
+    default inside the merged range so multi-marker overrides cannot inflate beyond
+    the pooled-data bounds.
+    """
+
+    base_floor, base_cap, base_default = base_window
+    override_floor, override_cap, override_default = override_window
+
+    floor = float(min(base_floor, override_floor))
+    cap = float(min(base_cap, override_cap))
+    cap = float(max(cap, floor))
+
+    default = float(min(base_default, override_default))
+    default = float(np.clip(default, floor, cap))
+
+    return floor, cap, default
 
 
 def _second_derivative_summary(smoothed: np.ndarray) -> dict[str, Any]:
@@ -1562,6 +1745,150 @@ def _default_priors(marker_name: Optional[str]) -> dict[str, Any]:
     return priors
 
 
+def _min_separation_window(
+    values: np.ndarray,
+    feature_payload: Optional[dict[str, Any]],
+    base_default: float,
+    *,
+    max_peaks: int,
+) -> tuple[float, float, float]:
+    """Derive a data-driven floor/ceiling for min separation suggestions.
+
+    We avoid fixed bounds by leaning on the observed histogram resolution and
+    the spacing between candidate peaks in the feature payload. The resulting
+    window keeps GPT suggestions near the smallest separations the data appear
+    to support instead of allowing arbitrarily large values.
+    """
+
+    feature_payload = feature_payload or {}
+    values = _prepare_values(values)
+    finite_values = values[np.isfinite(values)]
+    if not finite_values.size:
+        return base_default, base_default, base_default
+
+    lower_bound = np.finfo(float).eps
+
+    hist_section = feature_payload.get("histogram") or {}
+    bin_width = hist_section.get("bin_width")
+    if isinstance(bin_width, numbers.Real) and not isinstance(bin_width, bool):
+        if math.isfinite(bin_width) and bin_width > 0:
+            lower_bound = max(lower_bound, float(bin_width))
+
+    if lower_bound == np.finfo(float).eps:
+        lo, hi = _robust_limits(finite_values)
+        bins, _ = _adaptive_bin_count(finite_values, lo, hi)
+        if bins > 0 and hi > lo:
+            lower_bound = max(lower_bound, (hi - lo) / bins)
+
+    peaks: list[float] = []
+    candidates = feature_payload.get("candidates") or {}
+    for peak in candidates.get("peaks") or []:
+        x = peak.get("x")
+        if isinstance(x, numbers.Real) and not isinstance(x, bool):
+            x = float(x)
+            if math.isfinite(x):
+                peaks.append(x)
+
+    adjacent_gaps: list[float] = []
+    if len(peaks) >= 2:
+        ordered = sorted(peaks)
+        adjacent_gaps = [r - l for l, r in zip(ordered, ordered[1:]) if r > l]
+
+    gap_candidates: list[float] = [g for g in adjacent_gaps if g > 0]
+
+    candidate_pairs = candidates.get("pairwise_separations") or []
+    for pair in candidate_pairs:
+        delta = pair.get("delta") if isinstance(pair, dict) else None
+        if isinstance(delta, numbers.Real) and not isinstance(delta, bool):
+            delta = float(delta)
+            if math.isfinite(delta) and delta > 0:
+                gap_candidates.append(delta)
+
+    if finite_values.size >= 3:
+        sorted_vals = np.sort(finite_values)
+        point_gaps = np.diff(sorted_vals)
+        if point_gaps.size:
+            positive_gaps = point_gaps[point_gaps > 0]
+            if positive_gaps.size:
+                tight_gap = np.percentile(positive_gaps, 5)
+                if math.isfinite(tight_gap) and tight_gap > 0:
+                    gap_candidates.append(float(tight_gap))
+                dense_point_gap = np.percentile(positive_gaps, 15)
+                if math.isfinite(dense_point_gap) and dense_point_gap > 0:
+                    gap_candidates.append(float(dense_point_gap))
+
+    if finite_values.size >= 5:
+        quantile_points = min(100, finite_values.size)
+        try:
+            quantiles = np.quantile(
+                finite_values, np.linspace(0, 1, num=quantile_points)
+            )
+            quantile_gaps = [r - l for l, r in zip(quantiles, quantiles[1:]) if r > l]
+            if quantile_gaps:
+                dense_gap = float(np.min(quantile_gaps))
+                if math.isfinite(dense_gap) and dense_gap > 0:
+                    gap_candidates.append(dense_gap)
+        except Exception:
+            pass
+
+    vote_summary = feature_payload.get("vote_summary") or {}
+    consensus = vote_summary.get("consensus") if isinstance(vote_summary, dict) else None
+    recommended_peaks = None
+    if isinstance(consensus, dict):
+        recommended_peaks = consensus.get("recommended") or consensus.get("majority")
+    if recommended_peaks is None and peaks:
+        recommended_peaks = len(peaks)
+    if recommended_peaks is None:
+        recommended_peaks = max_peaks if max_peaks > 0 else None
+
+    span = np.percentile(finite_values, 95) - np.percentile(finite_values, 5)
+    if math.isfinite(span) and span > 0:
+        if recommended_peaks:
+            span_per_peak = span / float(max(recommended_peaks, 1))
+            if span_per_peak > 0:
+                gap_candidates.append(span_per_peak)
+        else:
+            gap_candidates.append(span)
+
+    try:
+        iqr = float(np.subtract(*np.percentile(finite_values, [75, 25])))
+        if math.isfinite(iqr) and iqr > 0:
+            fd_width = 2.0 * iqr / float(finite_values.size ** (1 / 3))
+            if math.isfinite(fd_width) and fd_width > 0:
+                gap_candidates.append(fd_width)
+    except Exception:
+        pass
+
+    positive_candidates = [g for g in gap_candidates if math.isfinite(g) and g > 0]
+    if positive_candidates:
+        ceiling = float(min(positive_candidates))
+    else:
+        ceiling = base_default
+
+    floor = lower_bound
+    if ceiling < floor and math.isfinite(ceiling) and ceiling > 0:
+        floor = ceiling
+
+    default_guess = None
+    if positive_candidates:
+        try:
+            default_guess = float(np.median(positive_candidates))
+        except Exception:
+            default_guess = None
+    if default_guess is None and adjacent_gaps:
+        try:
+            default_guess = float(np.percentile(adjacent_gaps, 25))
+        except Exception:
+            default_guess = None
+
+    if default_guess is None:
+        default_guess = base_default if base_default > 0 else ceiling
+
+    default_guess = float(np.clip(default_guess, floor, ceiling))
+
+    return float(floor), float(ceiling), default_guess
+
+
 def _build_feature_payload(
     counts_full: Optional[np.ndarray],
 ) -> dict[str, Any]:
@@ -1996,6 +2323,289 @@ def ask_gpt_bandwidth(
 
     _cache[key] = val
     return val
+
+
+def _sanitize_plan_field(value: Any, *, fallback: Any) -> Any:
+    """Return a cleaned parameter suggestion with sensible bounds."""
+
+    if isinstance(fallback, bool):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "yes", "y", "1"}:
+                return True
+            if lowered in {"false", "no", "n", "0"}:
+                return False
+    if isinstance(value, (int, float)):
+        if isinstance(fallback, int):
+            return int(value)
+        return float(value)
+    if isinstance(fallback, (int, float)):
+        try:
+            coerced = float(value)
+        except Exception:
+            return fallback
+        if isinstance(fallback, int):
+            return int(coerced)
+        return coerced
+    if isinstance(fallback, str):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return fallback
+
+
+def _fallback_plan_note(
+    plan: Mapping[str, Any],
+    *,
+    bw_floor: float,
+    bw_cap: float,
+    min_floor: float,
+    max_min_separation: float,
+) -> str:
+    """Generate a human-readable note when GPT omits an explanation."""
+
+    bandwidth = plan.get("bandwidth")
+    bandwidth_desc = f"bandwidth within [{bw_floor:.3g}, {bw_cap:.3g}] (picked {bandwidth})"
+
+    min_sep = plan.get("min_separation")
+    min_sep_desc = (
+        f"min separation in [{min_floor:.3g}, {max_min_separation:.3g}] (picked {min_sep})"
+    )
+
+    prominence_desc = f"prominence {plan.get('prominence')}"
+    cap_desc = f"peak cap {plan.get('peak_cap')}"
+    tp_desc = f"turning points {'on' if plan.get('apply_turning_points') else 'off'}"
+
+    return "; ".join([bandwidth_desc, min_sep_desc, prominence_desc, cap_desc, tp_desc])
+
+
+def ask_gpt_parameter_plan(
+    client: OpenAI,
+    model_name: str,
+    counts_full: np.ndarray,
+    *,
+    max_peaks: int,
+    defaults: Optional[dict[str, Any]] = None,
+    features: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Ask GPT for a holistic detection plan (bandwidth, peaks, separation).
+
+    The function shares a compact feature payload and asks the model to return
+    a JSON object with suggested detection settings.  Results are memoised by
+    the distribution signature so repeated requests for the same data are
+    cheap.  Suggestions are clamped into reasonable ranges and fall back to
+    ``defaults`` whenever parsing fails.
+    """
+
+    defaults = defaults or {}
+
+    base_defaults = {
+        "bandwidth": defaults.get("bandwidth", "scott"),
+        "min_separation": float(defaults.get("min_separation", 0.5)),
+        "prominence": float(defaults.get("prominence", 0.05)),
+        "peak_cap": int(defaults.get("peak_cap", max(1, max_peaks))),
+        "apply_turning_points": bool(defaults.get("apply_turning_points", False)),
+        "notes": defaults.get("notes")
+        or "Using data-driven defaults; GPT did not provide an explanation.",
+    }
+
+    if client is None:
+        return base_defaults
+
+    values = _prepare_values(counts_full)
+    if not values.size:
+        return base_defaults
+
+    finite_values = values[np.isfinite(values)]
+    if not finite_values.size:
+        return base_defaults
+
+    feature_payload = _build_feature_payload(values) if features is None else dict(features)
+
+    aggregated_bw = aggregated_min = None
+    marker_entries = feature_payload.get("multi_marker_features")
+    if isinstance(marker_entries, list) and marker_entries:
+        sanitized_entries = []
+        for entry in marker_entries:
+            values = _prepare_values(np.asarray(entry.get("values", []), dtype=float))
+            if not values.size:
+                continue
+
+            clean_entry: dict[str, Any] = {"marker": entry.get("marker"), "values": values.tolist()}
+            feats = entry.get("features")
+            if isinstance(feats, dict):
+                clean_entry["features"] = feats
+            sanitized_entries.append(clean_entry)
+
+        if sanitized_entries:
+            feature_payload["multi_marker_features"] = sanitized_entries
+            aggregated_bw, aggregated_min = _aggregate_multi_marker_windows(
+                sanitized_entries, base_defaults, max_peaks
+            )
+
+    base_bw_window = _bandwidth_window(values, feature_payload, base_defaults["bandwidth"])
+    pooled_bw_window = _bandwidth_window(values, _build_feature_payload(values), base_defaults["bandwidth"])
+    candidates_bw = [base_bw_window, pooled_bw_window]
+    if aggregated_bw is not None:
+        candidates_bw.append(aggregated_bw)
+
+    bw_floor = float(min(w[0] for w in candidates_bw))
+    bw_cap = float(min(w[1] for w in candidates_bw))
+    bw_cap = float(max(bw_cap, bw_floor))
+    bw_default = float(
+        np.clip(min(w[2] for w in candidates_bw), bw_floor, bw_cap)
+    )
+
+    base_min_window = _min_separation_window(
+        values,
+        feature_payload,
+        base_defaults["min_separation"],
+        max_peaks=max_peaks,
+    )
+    pooled_min_window = _min_separation_window(
+        values,
+        _build_feature_payload(values),
+        base_defaults["min_separation"],
+        max_peaks=max_peaks,
+    )
+
+    candidates_min = [base_min_window, pooled_min_window]
+    if aggregated_min is not None:
+        candidates_min.append(aggregated_min)
+
+    min_floor = float(min(w[0] for w in candidates_min))
+    max_min_separation = float(min(w[1] for w in candidates_min))
+    max_min_separation = float(max(max_min_separation, min_floor))
+    inferred_default = float(
+        np.clip(min(w[2] for w in candidates_min), min_floor, max_min_separation)
+    )
+
+    if feature_payload.get("multi_marker_features"):
+        bw_floor = float(min(bw_floor, base_bw_window[0]))
+        bw_cap = float(min(bw_cap, base_bw_window[1]))
+        bw_cap = float(max(bw_cap, bw_floor))
+        bw_default = float(min(bw_default, base_bw_window[2]))
+
+        min_floor = float(min(min_floor, base_min_window[0]))
+        max_min_separation = float(min(max_min_separation, base_min_window[1]))
+        max_min_separation = float(max(max_min_separation, min_floor))
+        inferred_default = float(min(inferred_default, base_min_window[2]))
+
+    min_floor = float(min(min_floor, base_min_window[1]))
+    max_min_separation = float(min(max_min_separation, base_min_window[1]))
+    max_min_separation = float(max(max_min_separation, min_floor))
+    bandwidth_default = (
+        bw_default
+        if isinstance(bw_default, (int, float))
+        else base_defaults["bandwidth"]
+    )
+    base_defaults["min_separation"] = inferred_default
+
+    sig = shape_signature(values)
+    key = ("plan", sig, int(max_peaks))
+    cached = _cache.get(key)
+    if isinstance(cached, dict):
+        return dict(cached)
+
+    prompt = textwrap.dedent(
+        """
+        You help tune a peak/valley detector for single-cell marker densities.
+        Given the distribution summary, propose values for:
+        - bandwidth: choose "scott", "silverman", "roughness", or a scale
+          factor between {bw_floor:.3g} and {bw_cap:.3g} (default {bandwidth_default}).
+        - min_separation: minimum spacing between *adjacent* peaks so we can
+          tell the 2nd/3rd peaks apart. Choose a value that keeps neighbours
+          separate without erasing them ({min_floor:.3g} to {max_min_separation:.3g},
+          default {base_defaults["min_separation"]:.3g}).
+        - prominence: valley drop threshold between 0.01 and 0.30.
+        - peak_cap: limit on peaks to search for (1..{max_peaks}).
+        - apply_turning_points: whether to treat concave-down turning points as peaks.
+        Return JSON with those keys plus a short "notes" string explaining the
+        choice.  Prefer conservative values when unsure.
+        """
+    ).strip()
+
+    try:
+        rsp = client.chat.completions.create(
+            model=model_name,
+            seed=2025,
+            response_format={"type": "json_object"},
+            timeout=45,
+            messages=[
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(feature_payload),
+                },
+            ],
+        )
+        data = json.loads(rsp.choices[0].message.content)
+    except AuthenticationError:
+        raise
+    except Exception:
+        return base_defaults
+
+    suggestion = dict(base_defaults)
+    suggestion["bandwidth"] = _sanitize_plan_field(
+        data.get("bandwidth"), fallback=base_defaults["bandwidth"]
+    )
+    suggestion["min_separation"] = float(
+        np.clip(
+            _sanitize_plan_field(
+                data.get("min_separation"), fallback=base_defaults["min_separation"]
+            ),
+            min_floor,
+            max_min_separation,
+        )
+    )
+    suggestion["prominence"] = float(
+        np.clip(
+            _sanitize_plan_field(data.get("prominence"), fallback=base_defaults["prominence"]),
+            0.01,
+            0.30,
+        )
+    )
+    suggestion["peak_cap"] = int(
+        np.clip(
+            _sanitize_plan_field(data.get("peak_cap"), fallback=base_defaults["peak_cap"]),
+            1,
+            max_peaks,
+        )
+    )
+    suggestion["apply_turning_points"] = bool(
+        _sanitize_plan_field(
+            data.get("apply_turning_points"),
+            fallback=base_defaults["apply_turning_points"],
+        )
+    )
+    suggestion["notes"] = _sanitize_plan_field(data.get("notes"), fallback="")
+
+    # normalise bandwidth scale factors to a safe range
+    bw_val = suggestion["bandwidth"]
+    if isinstance(bw_val, (int, float)):
+        suggestion["bandwidth"] = float(np.clip(float(bw_val), bw_floor, bw_cap))
+    elif isinstance(bw_val, str):
+        label = bw_val.strip().lower()
+        if label not in {"scott", "silverman", "roughness"}:
+            suggestion["bandwidth"] = base_defaults["bandwidth"]
+
+    if isinstance(suggestion["notes"], str):
+        suggestion["notes"] = suggestion["notes"].strip()
+    else:
+        suggestion["notes"] = ""
+
+    if not suggestion["notes"]:
+        suggestion["notes"] = _fallback_plan_note(
+            suggestion,
+            bw_floor=bw_floor,
+            bw_cap=bw_cap,
+            min_floor=min_floor,
+            max_min_separation=max_min_separation,
+        )
+
+    _cache[key] = suggestion
+    return suggestion
 
 def ask_gpt_prominence(
     client:     OpenAI,

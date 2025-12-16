@@ -688,14 +688,19 @@ def run_batch(
             # Windows does not support SIGALRM or setitimer; run without a timeout.
             return process_sample(sample, options, overrides, gpt_client)
 
-        previous_handler = signal.getsignal(sigalrm)
-        signal.signal(sigalrm, _raise_timeout)
-        setitimer(signal.ITIMER_REAL, timeout)
         try:
-            return process_sample(sample, options, overrides, gpt_client)
-        finally:
-            setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(sigalrm, previous_handler)
+            previous_handler = signal.getsignal(sigalrm)
+            signal.signal(sigalrm, _raise_timeout)
+            setitimer(signal.ITIMER_REAL, timeout)
+            try:
+                return process_sample(sample, options, overrides, gpt_client)
+            finally:
+                setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(sigalrm, previous_handler)
+        except ValueError:
+            # Signals can only be installed in the main interpreter thread; fall back to
+            # the thread-based timeout used for non-main threads above.
+            return _run_sample_with_timeout(sample)
 
     worker_count = options.workers if options.sample_timeout <= 0 else 1
 

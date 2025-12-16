@@ -13,6 +13,7 @@ import io
 import json
 import math
 import re
+import threading
 import zipfile
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field
@@ -650,6 +651,30 @@ def run_batch(
         timeout = float(options.sample_timeout)
         if timeout <= 0:
             return process_sample(sample, options, overrides, gpt_client)
+
+        if threading.current_thread() is not threading.main_thread():
+            result: list[SampleResult] = []
+            error: list[BaseException] = []
+            done = threading.Event()
+
+            def _worker() -> None:
+                try:
+                    result.append(process_sample(sample, options, overrides, gpt_client))
+                except BaseException as exc:  # pragma: no cover - exercised indirectly
+                    error.append(exc)
+                finally:
+                    done.set()
+
+            thread = threading.Thread(target=_worker, daemon=True)
+            thread.start()
+            finished = done.wait(timeout)
+            if not finished:
+                raise TimeoutError(
+                    f"Sample '{sample.stem}' exceeded the {timeout:.3f}-second processing timeout"
+                )
+            if error:
+                raise error[0]
+            return result[0]
 
         def _raise_timeout(signum, frame):  # pragma: no cover - invoked by signal
             raise TimeoutError(
@@ -1730,4 +1755,3 @@ def _ridge_plot_png(
     plt.close(fig)
     buffer.seek(0)
     return buffer.read()
-

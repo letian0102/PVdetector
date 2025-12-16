@@ -13,6 +13,7 @@ import io
 import json
 import math
 import re
+import threading
 import zipfile
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field
@@ -651,6 +652,30 @@ def run_batch(
         if timeout <= 0:
             return process_sample(sample, options, overrides, gpt_client)
 
+        if threading.current_thread() is not threading.main_thread():
+            result: list[SampleResult] = []
+            error: list[BaseException] = []
+            done = threading.Event()
+
+            def _worker() -> None:
+                try:
+                    result.append(process_sample(sample, options, overrides, gpt_client))
+                except BaseException as exc:  # pragma: no cover - exercised indirectly
+                    error.append(exc)
+                finally:
+                    done.set()
+
+            thread = threading.Thread(target=_worker, daemon=True)
+            thread.start()
+            finished = done.wait(timeout)
+            if not finished:
+                raise TimeoutError(
+                    f"Sample '{sample.stem}' exceeded the {timeout:.3f}-second processing timeout"
+                )
+            if error:
+                raise error[0]
+            return result[0]
+
         def _raise_timeout(signum, frame):  # pragma: no cover - invoked by signal
             raise TimeoutError(
                 f"Sample '{sample.stem}' exceeded the {timeout:.3f}-second processing timeout"
@@ -663,14 +688,19 @@ def run_batch(
             # Windows does not support SIGALRM or setitimer; run without a timeout.
             return process_sample(sample, options, overrides, gpt_client)
 
-        previous_handler = signal.getsignal(sigalrm)
-        signal.signal(sigalrm, _raise_timeout)
-        setitimer(signal.ITIMER_REAL, timeout)
         try:
-            return process_sample(sample, options, overrides, gpt_client)
-        finally:
-            setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(sigalrm, previous_handler)
+            previous_handler = signal.getsignal(sigalrm)
+            signal.signal(sigalrm, _raise_timeout)
+            setitimer(signal.ITIMER_REAL, timeout)
+            try:
+                return process_sample(sample, options, overrides, gpt_client)
+            finally:
+                setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(sigalrm, previous_handler)
+        except ValueError:
+            # Signals can only be installed in the main interpreter thread; fall back to
+            # the thread-based timeout used for non-main threads above.
+            return _run_sample_with_timeout(sample)
 
     worker_count = options.workers if options.sample_timeout <= 0 else 1
 
@@ -1730,4 +1760,3 @@ def _ridge_plot_png(
     plt.close(fig)
     buffer.seek(0)
     return buffer.read()
-

@@ -716,6 +716,8 @@ def kde_peaks_valleys(
     pad = 0.02 * span_for_pad if span_for_pad > 0 else 0.05
 
     x_min = base_low - pad
+    if data_min >= 0.0:
+        x_min = max(0.0, x_min)
     x_max = data_max + pad
 
     if data_min >= 0.0 and x_min < 0.0:

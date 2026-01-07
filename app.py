@@ -1480,7 +1480,20 @@ def _aligned_dataset_tables() -> tuple[pd.DataFrame, pd.DataFrame] | None:
 
     meta_map = st.session_state.get("generated_meta", {}) or {}
     if not meta_map:
-        return None
+        summary_df = st.session_state.get("cli_summary_df")
+        if isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
+            meta_map = {}
+            for row in summary_df.itertuples(index=False):
+                stem = _clean_stem_label(getattr(row, "stem", None))
+                if not stem or stem in meta_map:
+                    continue
+                meta_map[stem] = {
+                    "sample": _normalize_label(getattr(row, "sample", None)),
+                    "marker": _normalize_label(getattr(row, "marker", None)),
+                    "batch": getattr(row, "batch", None),
+                }
+        if not meta_map:
+            return None
 
     expr_aligned = expr_df.copy()
     marker_lookup = _build_expr_marker_lookup(expr_df)
@@ -1636,6 +1649,37 @@ def _protein_label() -> str:
     return safe or "PeakValleyResults"
 
 
+def _safe_zip_label(value: str, *, fallback: str = "group") -> str:
+    """Return a filesystem-safe label for ZIP entry names."""
+
+    cleaned = re.sub(r"[^0-9A-Za-z_-]+", "_", str(value)).strip("_")
+    return cleaned or fallback
+
+
+def _aligned_marker_ridges() -> dict[str, bytes]:
+    """Return per-marker aligned ridge plots when marker grouping is active."""
+
+    if not st.session_state.get("align_group_markers"):
+        return {}
+
+    aligned_results = st.session_state.get("aligned_results") or {}
+    if not aligned_results:
+        return {}
+
+    group_map = _group_stems_with_results()
+    ridge_map: dict[str, bytes] = {}
+
+    for group_name, stems in group_map.items():
+        if not stems:
+            continue
+        png = _ridge_plot_for_stems(stems, aligned_results, robust_limits=True)
+        if png:
+            label = _safe_zip_label(str(group_name), fallback="marker")
+            ridge_map[label] = png
+
+    return ridge_map
+
+
 def _before_alignment_zip_name() -> str:
     return f"{_protein_label()}_before_alignment.zip"
 
@@ -1671,7 +1715,7 @@ def _make_final_alignment_zip() -> bytes:
     aligned_csv = _aligned_counts_csv()
     meta_aligned_csv, expr_aligned_csv = _dataset_csv_exports(aligned=True)
     meta_csv, expr_csv = _dataset_csv_exports(aligned=False)
-    aligned_sample_exports = _sample_csv_exports(aligned=True)
+    marker_ridges = _aligned_marker_ridges()
 
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
@@ -1679,8 +1723,8 @@ def _make_final_alignment_zip() -> bytes:
             z.writestr("before_alignment_ridge.png", raw_png)
         if aligned_png:
             z.writestr("aligned_ridge.png", aligned_png)
-        for filename, csv_bytes in aligned_sample_exports:
-            z.writestr(filename, csv_bytes)
+        for marker_label, png in marker_ridges.items():
+            z.writestr(f"aligned_ridge_{marker_label}.png", png)
         meta_bytes = meta_aligned_csv or meta_csv
         if expr_aligned_csv:
             if meta_bytes:
@@ -1689,7 +1733,8 @@ def _make_final_alignment_zip() -> bytes:
         elif meta_bytes and expr_csv:
             z.writestr("cell_metadata_combined.csv", meta_bytes)
             z.writestr("expression_matrix_combined.csv", expr_csv)
-        z.writestr("aligned_data.csv", aligned_csv)
+        if aligned_csv:
+            z.writestr("aligned_data.csv", aligned_csv)
     return out.getvalue()
 
 
@@ -1702,19 +1747,16 @@ def _make_combined_alignment_zip() -> bytes:
 
     meta_before, expr_before = _dataset_csv_exports(aligned=False)
     meta_after, expr_after = _dataset_csv_exports(aligned=True)
-    sample_before = _sample_csv_exports(aligned=False)
-    sample_after = _sample_csv_exports(aligned=True)
     raw_png = _ensure_raw_ridge_png()
     aligned_png = st.session_state.get("aligned_ridge_png")
     aligned_csv = _aligned_counts_csv()
+    marker_ridges = _aligned_marker_ridges()
 
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
         if meta_before and expr_before:
             z.writestr("before_alignment/cell_metadata_combined.csv", meta_before)
             z.writestr("before_alignment/expression_matrix_combined.csv", expr_before)
-        for filename, csv_bytes in sample_before:
-            z.writestr(f"before_alignment/{filename}", csv_bytes)
         if raw_png:
             z.writestr("before_alignment/before_alignment_ridge.png", raw_png)
         if expr_after:
@@ -1722,10 +1764,10 @@ def _make_combined_alignment_zip() -> bytes:
             if meta_bytes:
                 z.writestr("after_alignment/cell_metadata_combined.csv", meta_bytes)
             z.writestr("after_alignment/expression_matrix_aligned.csv", expr_after)
-        for filename, csv_bytes in sample_after:
-            z.writestr(f"after_alignment/{filename}", csv_bytes)
         if aligned_png:
             z.writestr("after_alignment/aligned_ridge.png", aligned_png)
+        for marker_label, png in marker_ridges.items():
+            z.writestr(f"after_alignment/aligned_ridge_{marker_label}.png", png)
         if aligned_csv:
             z.writestr("after_alignment/aligned_data.csv", aligned_csv)
     return out.getvalue()

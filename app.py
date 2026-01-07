@@ -1466,10 +1466,68 @@ def _dataset_tables(use_aligned: bool = False) -> tuple[pd.DataFrame, pd.DataFra
     return meta_subset.reset_index(drop=True), expr_table.reset_index(drop=True)
 
 
+def _aligned_dataset_tables() -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    """Build aligned metadata/expression tables preserving uploaded ordering."""
+
+    meta_df = st.session_state.get("meta_df")
+    expr_df = st.session_state.get("expr_df")
+    if meta_df is None or expr_df is None:
+        return None
+
+    aligned_counts = st.session_state.get("aligned_counts") or {}
+    if not aligned_counts:
+        return None
+
+    meta_map = st.session_state.get("generated_meta", {}) or {}
+    if not meta_map:
+        return None
+
+    expr_aligned = expr_df.copy()
+    marker_lookup = _build_expr_marker_lookup(expr_df)
+
+    for stem, counts in aligned_counts.items():
+        meta = meta_map.get(stem, {})
+        marker = meta.get("marker")
+        sample = meta.get("sample")
+        batch = meta.get("batch")
+
+        if not marker:
+            continue
+
+        column_label = _resolve_expr_marker(marker, marker_lookup)
+        if column_label is None:
+            continue
+
+        indices = meta.get("cell_indices")
+        if indices and not isinstance(indices, list):
+            indices = list(indices)
+        if not indices:
+            indices = _cell_indices_for(meta_df, sample, batch)
+        if not indices:
+            continue
+
+        values = np.asarray(counts, dtype=float).ravel()
+        if values.size == 0:
+            continue
+        if values.size != len(indices):
+            limit = min(values.size, len(indices))
+            values = values[:limit]
+            indices = list(indices)[:limit]
+
+        expr_aligned.loc[indices, column_label] = values
+
+    return meta_df.copy(), expr_aligned
+
+
 def _dataset_csv_exports(*, aligned: bool = False) -> tuple[bytes | None, bytes | None]:
     """Return (metadata_csv, expression_csv) for dataset-mode exports."""
 
-    tables = _dataset_tables(use_aligned=aligned)
+    if aligned:
+        tables = _aligned_dataset_tables()
+        if tables is None:
+            tables = _dataset_tables(use_aligned=True)
+    else:
+        tables = _dataset_tables(use_aligned=False)
     if not tables:
         return None, None
     meta_tbl, expr_tbl = tables
@@ -5108,7 +5166,7 @@ with download_section:
             key="before_alignment_download",
         )
 
-        if st.session_state.get("aligned_counts"):
+        if st.session_state.get("aligned_counts") is not None:
             col_after.download_button(
                 "Download aligned data",
                 _make_final_alignment_zip(),
@@ -5246,6 +5304,12 @@ if st.session_state.results:
     st.markdown("---")
     align_col, dl_col = st.columns([2, 1])
     with align_col:
+        align_by_marker = st.checkbox(
+            "Align by marker name",
+            value=bool(st.session_state.get("align_group_markers")),
+            help="Align each marker independently instead of using a single global alignment.",
+        )
+        st.session_state.align_group_markers = align_by_marker
         do_align = st.button("Align landmarks & normalize counts",
                              type="primary")
     if do_align:

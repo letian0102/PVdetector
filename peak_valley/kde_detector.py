@@ -301,6 +301,97 @@ def _resolve_peak_valley_conflicts(
 
     return peaks_idx, valleys
 
+
+def _recover_left_shoulder(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    main_idx: int,
+    *,
+    prominence: float,
+    drop_frac: float,
+    distance: int | None,
+    min_x_sep: float | None,
+) -> list[int] | None:
+    """
+    Try to recover a **missing negative/left peak** when only a single peak was
+    detected.
+
+    The heuristic looks for a secondary local maximum **to the left** of the
+    dominant peak, using a **relaxed prominence** and a soft minimum separation.
+    A candidate is accepted only if there is a meaningful drop to the valley
+    between it and the dominant peak.  Returning ``None`` leaves the peak list
+    unchanged.
+    """
+
+    if main_idx <= 0:
+        return None
+
+    grid_dx = float(xs[1] - xs[0]) if xs.size > 1 else 1.0
+    if not np.isfinite(grid_dx) or grid_dx <= 0:
+        grid_dx = 1.0
+
+    min_gap = float(min_x_sep) if (min_x_sep is not None and np.isfinite(min_x_sep)) else 0.0
+    min_gap = max(min_gap, grid_dx)
+    relaxed_gap = 0.5 * min_gap
+
+    dominant_height = float(ys[main_idx])
+    relaxed_prom = max(0.35 * prominence, 0.05 * dominant_height)
+    relaxed_prom = max(relaxed_prom, 0.0)
+
+    # ``distance`` has already been validated for the main peak search; re-use
+    # it when available to avoid introducing sub-grid spacing issues.
+    distance = distance if distance is not None else 1
+
+    locs, props = find_peaks(ys, prominence=relaxed_prom, distance=distance)
+    prominences = props.get("prominences", np.array([]))
+
+    # Only consider candidates that sit to the **left** of the dominant peak
+    # and respect a softened separation threshold.
+    candidates: list[int] = []
+    for idx, prom in zip(locs.tolist(), prominences.tolist()):
+        if idx >= main_idx:
+            continue
+        if xs[main_idx] - xs[idx] < relaxed_gap:
+            continue
+        # Reject extremely flat shoulders that were only admitted because of a
+        # very low relaxed prominence.
+        if prom <= 0:
+            continue
+        candidates.append(int(idx))
+
+    if not candidates:
+        return None
+
+    def _valley_depth(idx: int) -> tuple[float, int]:
+        valley_x = _valley_between(xs, ys, idx, main_idx, drop_frac)
+        valley_idx = int(np.argmin(np.abs(xs - valley_x)))
+        base = min(float(ys[idx]), dominant_height)
+        depth = base - float(ys[valley_idx])
+        return depth, valley_idx
+
+    best_idx = None
+    best_score = 0.0
+    for cand in candidates:
+        depth, valley_idx = _valley_depth(cand)
+        # Require at least half the nominal drop_frac contrast so we do not
+        # elevate noise bumps to real peaks.
+        min_drop = drop_frac * min(float(ys[cand]), dominant_height) * 0.5
+        if depth <= max(min_drop, 0.0):
+            continue
+
+        # Prefer candidates with deeper separating valleys; tie-break on height.
+        if depth > best_score:
+            best_score = depth
+            best_idx = cand
+        elif depth == best_score and best_idx is not None:
+            if ys[cand] > ys[best_idx]:
+                best_idx = cand
+
+    if best_idx is None:
+        return None
+
+    return sorted({best_idx, int(main_idx)})
+
 def _fft_gaussian_kde(
     x: np.ndarray,
     xs: np.ndarray,
@@ -716,6 +807,10 @@ def kde_peaks_valleys(
     pad = 0.02 * span_for_pad if span_for_pad > 0 else 0.05
 
     x_min = base_low - pad
+    if data_min >= 0:
+        # For strictly non-negative data sets we keep the grid anchored at 0 to
+        # avoid introducing artefactual negative coordinates during alignment.
+        x_min = 0.0
     x_max = data_max + pad
 
     if data_min >= 0.0 and x_min < 0.0:
@@ -844,6 +939,23 @@ def kde_peaks_valleys(
 
     # ---------- *re-derive* indices for every peak we now have ----------
     peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
+
+    # ---------- left-shoulder recovery for missing negative peaks -------
+    if len(peaks_idx) == 1 and (n_peaks is None or n_peaks > 1):
+        recovered = _recover_left_shoulder(
+            xs,
+            ys,
+            peaks_idx[0],
+            prominence=prominence,
+            drop_frac=drop_frac,
+            distance=distance,
+            min_x_sep=min_x_sep,
+        )
+        if recovered is not None:
+            peaks_idx = recovered
+            peaks_x = [float(xs[idx]) for idx in peaks_idx]
+            peaks_x = _enforce_min_separation(peaks_x, xs, ys, min_x_sep)
+            peaks_idx = [int(np.argmin(np.abs(xs - px))) for px in peaks_x]
 
     # ---------- valleys ----------
     valleys_x: list[float] = []

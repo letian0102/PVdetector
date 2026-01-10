@@ -30,8 +30,14 @@ def _enforce_valley_rule(peaks: Sequence[float],
     return kept
 
 
-def _local_extreme(xs: np.ndarray, ys: np.ndarray, center: float,
-                   window: float, find_max: bool) -> float:
+def _local_extreme(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    center: float,
+    window: float,
+    find_max: bool,
+    require_zero_second: bool = False,
+) -> float:
     """Return local maximum or minimum near *center* within *window*.
 
     If the window does not overlap ``xs`` at all the original ``center``
@@ -42,6 +48,32 @@ def _local_extreme(xs: np.ndarray, ys: np.ndarray, center: float,
         return center
     seg_x = xs[mask]
     seg_y = ys[mask]
+
+    if require_zero_second and seg_x.size >= 3:
+        second = np.gradient(np.gradient(seg_y, seg_x), seg_x)
+        finite_second = second[np.isfinite(second)]
+        zero_tol = (
+            float(np.percentile(np.abs(finite_second), 30))
+            if finite_second.size
+            else 0.0
+        )
+
+        def _is_extreme(pos: int) -> bool:
+            left = seg_y[pos - 1] if pos > 0 else seg_y[pos]
+            right = seg_y[pos + 1] if pos + 1 < seg_y.size else seg_y[pos]
+            return (seg_y[pos] >= left and seg_y[pos] >= right) if find_max else (
+                seg_y[pos] <= left and seg_y[pos] <= right
+            )
+
+        order = np.argsort(np.abs(second)) if second.size else np.array([], int)
+        candidates = [int(i) for i in order if abs(second[i]) <= zero_tol + 1e-12]
+        if not candidates and second.size:
+            candidates = [int(order[0])]
+
+        for cand in candidates:
+            if _is_extreme(cand):
+                return float(seg_x[cand])
+
     idx = np.argmax(seg_y) if find_max else np.argmin(seg_y)
     return float(seg_x[idx])
 
@@ -116,7 +148,11 @@ def enforce_marker_consistency(results: Dict[str, Dict[str, Sequence[float]]],
                         if abs(pk[i] - exp) > tol:
                             pk[i] = _local_extreme(xs, ys, exp, win, True)
                     else:
-                        pk.append(_local_extreme(xs, ys, exp, win, True))
+                        pk.append(
+                            _local_extreme(
+                                xs, ys, exp, win, True, require_zero_second=True
+                            )
+                        )
 
             if vl:
                 for i, exp in enumerate(vl_cons[1:], start=1):

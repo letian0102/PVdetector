@@ -1007,29 +1007,34 @@ def _extract_peak_candidates(
         return [], None, None, None, None, [], None
 
     max_height = float(np.max(smoothed))
-    prom_thresh = max_height * 0.05 if max_height > 0 else 0.0
-    best_idx = np.array([], dtype=int)
-    best_thresh = prom_thresh
-    thresholds = [prom_thresh]
-    if max_height > 0:
-        thresholds.extend([
-            max_height * 0.03,
-            max_height * 0.015,
-            max_height * 0.008,
-        ])
-    used_thresh = prom_thresh
-    for thresh in thresholds:
-        thresh = float(max(thresh, 0.0))
-        idx, _ = find_peaks(smoothed, prominence=thresh, width=1)
-        if idx.size > best_idx.size:
-            best_idx = idx
-            best_thresh = thresh
-        if idx.size >= 3:
-            best_idx = idx
-            best_thresh = thresh
-            break
-    idx = best_idx
-    used_thresh = best_thresh
+    base_prom_thresh = max_height * 0.002 if max_height > 0 else 0.0
+    idx_low, props = find_peaks(smoothed, prominence=base_prom_thresh, width=1)
+    raw_prominences = np.asarray(props.get("prominences", []), dtype=float)
+
+    if idx_low.size == 0:
+        return [], None, None, None, None, [], None
+
+    primary_prom = float(np.max(raw_prominences)) if raw_prominences.size else 0.0
+    noise_floor = (
+        float(np.percentile(raw_prominences, 30))
+        if raw_prominences.size
+        else 0.0
+    )
+    relative_factor = 0.05
+    if noise_floor > 0 and primary_prom > noise_floor * 10:
+        relative_factor = 0.02
+    relative_thresh = primary_prom * relative_factor
+    noise_thresh = noise_floor * 1.2
+    used_thresh = max(relative_thresh, noise_thresh, base_prom_thresh)
+
+    keep_mask = raw_prominences >= used_thresh
+    if not np.any(keep_mask):
+        top = int(np.argmax(raw_prominences)) if raw_prominences.size else 0
+        keep_mask = np.zeros_like(raw_prominences, dtype=bool)
+        if keep_mask.size:
+            keep_mask[top] = True
+
+    idx = idx_low[keep_mask]
 
     if idx.size == 0:
         return [], None, None, None, None, [], None

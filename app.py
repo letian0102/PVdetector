@@ -824,7 +824,7 @@ def _refresh_raw_ridge() -> None:
     use_groups = bool(st.session_state.get("align_group_markers"))
     stems = _ordered_stems_for_results(use_groups=use_groups)
     st.session_state.raw_ridge_png = _ridge_plot_for_stems(
-        stems, st.session_state.results, robust_limits=True
+        stems, st.session_state.results, robust_limits=False
     )
 
 
@@ -5293,7 +5293,7 @@ with tab_cmp:
                 grp_col_raw, grp_col_aligned = st.columns(2, gap="small")
 
                 raw_png = _ridge_plot_for_stems(
-                    stems, st.session_state.results, robust_limits=True
+                    stems, st.session_state.results, robust_limits=False
                 )
                 if raw_png:
                     grp_col_raw.image(

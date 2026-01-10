@@ -58,6 +58,7 @@ def fill_landmark_matrix(
 
     has_val_orig = max_vl > 0
     has_pos_orig = any(length > 1 for length in pk_lengths)
+    has_single_peak = any(length == 1 for length in pk_lengths)
 
     pk_mat = np.full((n, max_pk if max_pk > 0 else 1), np.nan)
     vl_mat = np.full((n, max_vl if max_vl > 0 else 1), np.nan)
@@ -81,6 +82,48 @@ def fill_landmark_matrix(
     for i, pk in enumerate(peaks):
         if pk and len(pk) > 1:           # needs a distinct positive peak
             pos[i] = pk[-1]              # last element, true positive peak
+
+    # Detect single-peak samples whose lone peak is better interpreted as
+    # the positive mode.  We prefer using the cohort's valley to disambiguate
+    # left/right placement and fall back to proximity to the cohort medians.
+    if align_type == "negPeak_valley_posPeak" and has_single_peak:
+        val_candidates = [vl[0] for vl in valleys if vl]
+        val_median = np.nanmedian(val_candidates) if val_candidates else np.nan
+        neg_median = np.nanmedian(neg) if np.any(~np.isnan(neg)) else np.nan
+        pos_candidates = [pk[-1] for pk in peaks if len(pk) > 1]
+        pos_median = (
+            np.nanmedian(pos_candidates) if len(pos_candidates) > 0 else np.nan
+        )
+
+        for i, pk in enumerate(peaks):
+            if len(pk) != 1:
+                continue
+
+            pk_value = pk[0]
+            ref_valley = (
+                val_median
+                if not np.isnan(val_median)
+                else (val[i] if not np.isnan(val[i]) else np.nan)
+            )
+
+            is_positive = False
+            if not np.isnan(ref_valley):
+                is_positive = pk_value >= ref_valley
+
+            dist_neg = abs(pk_value - neg_median) if not np.isnan(neg_median) else np.inf
+            dist_pos = abs(pk_value - pos_median) if not np.isnan(pos_median) else np.inf
+
+            if not is_positive:
+                if dist_pos < dist_neg:
+                    is_positive = True
+                elif np.isinf(dist_neg) and not np.isinf(dist_pos):
+                    is_positive = True
+
+            if is_positive:
+                pos[i] = pk_value
+                neg[i] = np.nan
+
+    has_pos = has_pos_orig or np.any(~np.isnan(pos))
     neg_thr = neg_thr if neg_thr is not None else np.arcsinh(10 / 5 + 1)
 
     if align_type == "valley":
@@ -112,7 +155,7 @@ def fill_landmark_matrix(
         # --- return early for 1- or 2-anchor regimes --------------------
         if align_type == "negPeak":
             return out[:, :1]
-        if align_type == "negPeak_valley" or (has_val_orig and not has_pos_orig):
+        if align_type == "negPeak_valley":
             return out
 
         # ---- need a surrogate positive peak ----------------------------
@@ -187,6 +230,11 @@ def build_warp_function(
     ls, lt = ls[order], lt[order]
     lt = np.maximum.accumulate(lt)
 
+    min_step = max(np.finfo(float).eps, 1e-6)
+    for idx in range(1, ls.size):
+        if ls[idx] <= ls[idx - 1]:
+            ls[idx] = ls[idx - 1] + min_step
+
     # —— single-landmark → constant shift ————————————————
     if ls.size == 1:
         delta = float(lt[0] - ls[0])    
@@ -198,6 +246,15 @@ def build_warp_function(
     # slopes for each interval  (≥ 2 landmarks from here on)
     slopes = np.diff(lt) / np.diff(ls)
 
+    # Guard against zero/negative edge slopes which would flatten the
+    # extrapolated tails (observed as right-side truncation for
+    # single-peak alignments).  Use the last positive internal slope as
+    # a fallback or a tiny epsilon if none exist.
+    pos_slopes = slopes[slopes > 0]
+    fallback_slope = float(pos_slopes[-1]) if pos_slopes.size else max(np.finfo(float).eps, 1e-6)
+    left_slope = float(slopes[0]) if slopes[0] > 0 else fallback_slope
+    right_slope = float(slopes[-1]) if slopes[-1] > 0 else fallback_slope
+
     def f(x):
         x = np.asarray(x, float)
         y = np.empty_like(x)
@@ -208,10 +265,10 @@ def build_warp_function(
         mid_mask   = ~(left_mask | right_mask)
 
         # ---- left - constant slope == slopes[0] --------------------------
-        y[left_mask] = lt[0] + slopes[0] * (x[left_mask] - ls[0])
+        y[left_mask] = lt[0] + left_slope * (x[left_mask] - ls[0])
 
         # ---- right -------------------------------------------------------
-        y[right_mask] = lt[-1] + slopes[-1] * (x[right_mask] - ls[-1])
+        y[right_mask] = lt[-1] + right_slope * (x[right_mask] - ls[-1])
 
         # ---- interior: vectorised piece-wise linear ---------------------
         if mid_mask.any():
@@ -287,7 +344,28 @@ def align_distributions(
     # ---------- choose the common target positions -----------------------
     tgt_raw = (np.nanmean(lm, axis=0)
                if target_landmark is None else np.asarray(target_landmark, float))
-    tgt = np.maximum.accumulate(np.asarray(tgt_raw, float))
+    tgt = np.asarray(tgt_raw, float)
+
+    if tgt.size > 1:
+        diffs = lm[:, 1:] - lm[:, :-1]
+        min_gaps: list[float] = []
+        for col in range(diffs.shape[1]):
+            col_diff = np.asarray(diffs[:, col], float)
+            finite_pos = col_diff[np.isfinite(col_diff) & (col_diff > 0.0)]
+            if finite_pos.size:
+                gap = float(np.nanmedian(finite_pos))
+            else:
+                fallback = col_diff[np.isfinite(col_diff)]
+                gap = float(np.nanmedian(np.abs(fallback))) if fallback.size else 1.0
+                if not np.isfinite(gap) or gap <= 0:
+                    gap = 1.0
+            min_gaps.append(gap)
+
+        for idx in range(1, tgt.size):
+            if tgt[idx] <= tgt[idx - 1]:
+                tgt[idx] = tgt[idx - 1] + min_gaps[idx - 1]
+
+    tgt = np.maximum.accumulate(tgt)
     if tgt.shape[0] != lm.shape[1]:
         raise ValueError(
             "target_landmark length does not match landmark columns"

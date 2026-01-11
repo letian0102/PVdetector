@@ -23,6 +23,7 @@ from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
+from sklearn.mixture import GaussianMixture
 
 from .alignment import align_distributions
 from .consistency import enforce_marker_consistency
@@ -38,6 +39,8 @@ from .roughness import find_bw_for_roughness
 
 
 DEFAULT_GPT_MODEL = "o4-mini"
+GMM_SAMPLE_SIZE = 5_000
+BIC_IMPROVEMENT_THRESHOLD = 6.0
 
 try:  # optional dependency during tests
     from openai import OpenAI
@@ -222,6 +225,31 @@ def _bandwidth_config(value: Any, default: str | float, auto_flag: bool) -> tupl
     return default, auto_flag
 
 
+def _normalise_bandwidth(value: Any, fallback: str | float = "scott") -> str | float:
+    """Coerce user/GPT-provided bandwidth into a ``gaussian_kde`` friendly form."""
+
+    if callable(value):  # pragma: no cover - passthrough for advanced users
+        return value
+
+    if isinstance(value, (int, float, np.floating)):
+        return float(value)
+
+    if isinstance(value, str):
+        label = value.strip().lower()
+        if not label:
+            return fallback
+        if label in {"scott", "silverman", "roughness"}:
+            return label
+        if label in {"auto", "default", "gpt", "none"}:
+            return fallback
+        try:
+            return float(label)
+        except ValueError:
+            return fallback
+
+    return fallback
+
+
 def _boolean_override(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -232,6 +260,93 @@ def _boolean_override(value: Any, default: bool) -> bool:
         if lowered in {"false", "no", "0", "off"}:
             return False
     return default
+
+
+def _estimate_n_peaks_bic(
+    counts: np.ndarray,
+    max_peaks: int,
+    sample_size: int = GMM_SAMPLE_SIZE,
+    bic_improvement_threshold: float = BIC_IMPROVEMENT_THRESHOLD,
+    random_state: int = 0,
+) -> tuple[int, dict[str, Any]]:
+    """Estimate the number of peaks using 1-D GMMs scored by BIC.
+
+    Returns both the chosen peak count and a debug payload with the raw BIC
+    scores and any adaptive decisions (e.g. when a subtle first peak is
+    recovered despite a dominant second peak).
+    """
+
+    x = np.asarray(counts, float)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return 1, {"reason": "no_data"}
+
+    if x.size > sample_size:
+        x = np.random.choice(x, sample_size, replace=False)
+
+    unique = np.unique(x)
+    max_k = max(1, min(max_peaks, unique.size))
+
+    bics: list[float] = []
+    models: list[GaussianMixture] = []
+    X = x.reshape(-1, 1)
+    for k in range(1, max_k + 1):
+        gm = GaussianMixture(
+            n_components=k,
+            covariance_type="full",
+            n_init=5,
+            random_state=random_state,
+        )
+        gm.fit(X)
+        bics.append(gm.bic(X))
+        models.append(gm)
+
+    bics = np.asarray(bics)
+    k_raw = int(np.argmin(bics) + 1)
+
+    # Demand strong enough evidence for additional components.
+    k_pruned = k_raw
+    for k in range(k_pruned, 1, -1):
+        delta = bics[k - 2] - bics[k - 1]
+        if delta < bic_improvement_threshold:
+            k_pruned = k - 1
+        else:
+            break
+
+    debug: dict[str, Any] = {
+        "bic_scores": bics.tolist(),
+        "k_raw": k_raw,
+        "k_pruned": k_pruned,
+    }
+
+    # Adaptive rescue: if a dominant second peak hides a smaller first one,
+    # allow a modest BIC improvement to keep two components when they are well
+    # separated and both have non-trivial weight.
+    if k_pruned == 1 and max_k >= 2 and bics.size >= 2:
+        delta_12 = bics[0] - bics[1]
+        gm2 = models[1]
+        means = np.sort(gm2.means_.ravel())
+        stdevs = np.sqrt(np.array(gm2.covariances_).reshape(gm2.n_components, -1)[:, 0])
+        sep = float(abs(np.diff(means)[0])) if means.size >= 2 else 0.0
+        pooled = float(np.sqrt(np.mean(np.square(stdevs)))) if stdevs.size else 0.0
+        weight_floor = float(np.min(gm2.weights_)) if gm2.weights_.size else 0.0
+        separation_score = sep / pooled if pooled > 0 else 0.0
+        debug.update(
+            {
+                "delta_12": delta_12,
+                "separation_score": separation_score,
+                "weight_floor": weight_floor,
+            }
+        )
+
+        if delta_12 > 0 and separation_score >= 0.8 and weight_floor >= 0.03:
+            k_pruned = 2
+            debug["promotion"] = "rescued_second_peak"
+
+    k_final = int(max(1, min(k_pruned, max_k)))
+    debug["k_final"] = k_final
+
+    return k_final, debug
 
 
 def _merge_overrides(
@@ -423,7 +538,7 @@ def _resolve_parameters(
         if gpt_client is None:
             debug["gpt_warning"] = "GPT client unavailable; falling back to defaults"
 
-    bw_use = params["bandwidth"]
+    bw_use = _normalise_bandwidth(params["bandwidth"], options.bandwidth)
     if params["bandwidth_auto"] and gpt_client is not None:
         expected = (
             params["n_peaks"]
@@ -441,6 +556,7 @@ def _resolve_parameters(
         except Exception as exc:  # pragma: no cover - depends on API
             debug["gpt_bandwidth_error"] = str(exc)
             bw_use = options.bandwidth
+    bw_use = _normalise_bandwidth(bw_use, options.bandwidth)
     params["bandwidth_effective"] = bw_use
 
     if isinstance(params["bandwidth_effective"], str):
@@ -497,14 +613,35 @@ def _resolve_parameters(
                 debug["gpt_peak_error"] = str(exc)
                 n_use = None
         if n_use is None:
-            n_est, confident = quick_peak_estimate(
+            quick_n, confident = quick_peak_estimate(
                 counts,
                 params["prominence_effective"],
                 bw_use,
                 params["min_width"] or None,
                 params["grid_size"],
             )
-            n_use = n_est if confident else None
+            debug["n_peaks_quick"] = quick_n
+            debug["n_peaks_quick_confident"] = bool(confident)
+
+            if confident and quick_n > 0:
+                n_use = quick_n
+            else:
+                try:
+                    n_gmm, bic_debug = _estimate_n_peaks_bic(
+                        counts, params["max_peaks"]
+                    )
+                    debug["n_peaks_gmm_bic"] = n_gmm
+                    debug["n_peaks_gmm_debug"] = bic_debug
+                    if quick_n > 0:
+                        debug["n_peaks_quick_hint"] = quick_n
+
+                    if n_use is None:
+                        n_use = n_gmm
+                    else:
+                        n_use = max(int(n_use), int(n_gmm))
+                except Exception as exc:  # pragma: no cover - sklearn optional
+                    debug["gmm_bic_error"] = str(exc)
+                    n_use = quick_n if quick_n > 0 else n_use
 
     if n_use is None:
         n_use = params["max_peaks"]

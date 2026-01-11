@@ -1074,7 +1074,10 @@ def collect_dataset_samples(
         marker_excludes = {str(m).lower() for m in exclude_markers}
         markers_sel = [m for m in markers_sel if str(m).lower() not in marker_excludes]
 
-    sample_values = meta_df["sample"].astype(str).tolist()
+    meta_df = meta_df.copy()
+    meta_df["sample"] = meta_df["sample"].astype(str).map(_sanitize_stem_value)
+
+    sample_values = meta_df["sample"].tolist()
     sample_sel = samples_filter if samples_filter else sorted(set(sample_values))
     if exclude_samples:
         sample_excludes = {str(s).lower() for s in exclude_samples}

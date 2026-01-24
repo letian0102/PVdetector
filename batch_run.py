@@ -310,7 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-separation",
         type=float,
-        default=0.5,
+        default=BatchOptions().min_separation,
         help="Minimum distance between detected peaks.",
     )
     parser.add_argument("--grid-size", type=int, default=20_000)

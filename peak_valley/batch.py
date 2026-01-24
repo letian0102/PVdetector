@@ -355,6 +355,21 @@ def _resolve_parameters(
         else max(0.0, float(options.min_separation))
     )
 
+    finite_counts = np.asarray(counts[np.isfinite(counts)], float)
+    if finite_counts.size:
+        spread = float(np.subtract(*np.percentile(finite_counts, [75, 25])))
+        if not np.isfinite(spread) or spread <= 0:
+            spread = float(np.std(finite_counts, ddof=1))
+        if not np.isfinite(spread) or spread <= 0:
+            spread = float(finite_counts.max() - finite_counts.min())
+
+        if np.isfinite(spread) and spread > 0:
+            scaled_sep = 0.05 * spread
+            if scaled_sep > params["min_separation"]:
+                debug["min_separation_scaled_from_spread"] = scaled_sep
+                debug["spread_iqr_or_std"] = spread
+                params["min_separation"] = scaled_sep
+
     grid_val = _coerce_int(overrides.get("max_grid"))
     grid_use = grid_val if grid_val is not None else options.grid_size
     params["grid_size"] = max(4000, int(grid_use))

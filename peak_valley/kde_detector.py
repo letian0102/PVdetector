@@ -31,10 +31,10 @@ def _merge_close_peaks(
     """
     Collapse peaks that violate the minimum separation rule.
 
-    Whenever two peaks lie closer than ``min_x_sep`` we keep only the taller
-    one, regardless of how deep the valley between them is.  This matches the
-    user expectation that "too-close" peaks should always be reduced to their
-    single dominant representative.
+    For every adjacent pair of peaks that sits closer than ``min_x_sep`` the
+    shorter member is discarded and the survivor is compared again with its new
+    neighbour.  This iterative pruning continues until every remaining peak is
+    separated from its neighbours by at least ``min_x_sep``.
     """
 
     _ = min_valley_drop  # kept for API compatibility with previous heuristic
@@ -45,14 +45,13 @@ def _merge_close_peaks(
     if not np.isfinite(min_x_sep) or min_x_sep <= 0:
         return np.sort(p_idx)
 
-    # Work on a mutable copy so that we can drop indices in-place while
-    # scanning through the sorted peak list.
     keep = list(np.sort(p_idx))
 
     i = 0
     while i < len(keep) - 1:
         left = keep[i]
         right = keep[i + 1]
+
         if xs[right] - xs[left] >= min_x_sep:
             i += 1
             continue

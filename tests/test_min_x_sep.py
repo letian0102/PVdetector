@@ -2,6 +2,7 @@ import numpy as np
 
 from peak_valley.batch import BatchOptions
 from peak_valley.kde_detector import (
+    _merge_close_peaks,
     _resolve_peak_valley_conflicts,
     kde_peaks_valleys,
 )
@@ -139,3 +140,13 @@ def test_valley_recomputed_when_close_to_first_peak():
     second_peak_x = xs[updated_idx[1]]
     assert abs(valleys[0] - first_peak_x) >= 0.5
     assert abs(second_peak_x - valleys[0]) >= 0.5
+
+
+def test_merge_close_peaks_drops_lower_members_iteratively():
+    xs = np.array([0.0, 0.1, 0.18, 0.26], dtype=float)
+    ys = np.array([5.0, 3.0, 4.5, 4.0], dtype=float)
+    p_idx = np.array([0, 1, 2, 3], dtype=int)
+
+    merged = _merge_close_peaks(xs, ys, p_idx, min_x_sep=0.15)
+
+    assert merged.tolist() == [0, 2]
